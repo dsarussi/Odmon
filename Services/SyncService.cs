@@ -326,7 +326,12 @@ namespace Odmon.Worker.Services
 
         private static (string ItemName, bool PrefixApplied) BuildItemName(OdcanitCase c, bool testMode)
         {
-            var baseName = $"{c.TikNumber} - {c.TikName}";
+            var tikNumber = c.TikNumber ?? string.Empty;
+            var tikName = c.TikName ?? string.Empty;
+            var clientName = c.ClientName ?? string.Empty;
+
+            var baseName = $"{tikNumber} | {tikName} | {clientName}".Trim();
+            
             if (!testMode)
             {
                 return (baseName, false);
