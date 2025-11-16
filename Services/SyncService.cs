@@ -99,7 +99,11 @@ namespace Odmon.Worker.Services
                 bool wasNoChange = false;
                 string? errorMessage = null;
 
-                if (!_safetyPolicy.IsTestCase(c))
+                // Explicit override for the single test case (TikCounter == 31490)
+                bool isExplicitTestCase = c.TikCounter == 31490;
+                bool isSafeTestCase = _safetyPolicy.IsTestCase(c) || isExplicitTestCase;
+
+                if (!isSafeTestCase)
                 {
                     action = "skipped_non_test";
                     skippedNonTest++;
@@ -158,9 +162,10 @@ namespace Odmon.Worker.Services
                 else
                 {
                     var requiresUpdate = mapping.OdcanitVersion != odcanitVersion;
+                    var requiresNameUpdate = mapping.MondayChecksum != itemName;
                     mondayIdForLog = mapping.MondayItemId;
 
-                    if (!requiresUpdate)
+                    if (!requiresUpdate && !requiresNameUpdate)
                     {
                         action = "skipped_no_change";
                         wasNoChange = true;
@@ -173,8 +178,18 @@ namespace Odmon.Worker.Services
                         {
                             try
                             {
-                                await _mondayClient.UpdateItemAsync(caseBoardId, mapping.MondayItemId, columnValuesJson, ct);
-                                mapping.OdcanitVersion = odcanitVersion;
+                                // Update item name if it has changed
+                                if (requiresNameUpdate)
+                                {
+                                    await _mondayClient.UpdateItemNameAsync(caseBoardId, mapping.MondayItemId, itemName, ct);
+                                }
+
+                                // Update column values if data has changed
+                                if (requiresUpdate)
+                                {
+                                    await _mondayClient.UpdateItemAsync(caseBoardId, mapping.MondayItemId, columnValuesJson, ct);
+                                    mapping.OdcanitVersion = odcanitVersion;
+                                }
                             }
                             catch (Exception ex)
                             {

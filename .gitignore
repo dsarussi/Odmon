@@ -41,6 +41,11 @@ artifacts/
 .idea/
 *.sln.iml
 
+# Environment-specific configuration files (may contain real secrets)
+appsettings.Development.Local.json
+appsettings.Production.json
+appsettings.*.Local.json
+
 # User-specific files
 *.rsuser
 *.suo
@@ -80,4 +85,9 @@ artifacts/
 # Rider
 .idea/
 *.sln.iml
+
+# Environment-specific configuration files (may contain real secrets)
+appsettings.Development.Local.json
+appsettings.Production.json
+appsettings.*.Local.json
 

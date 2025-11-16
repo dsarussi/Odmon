@@ -128,13 +128,13 @@ static string ResolveConnectionString(IServiceProvider serviceProvider, string s
     var logger = serviceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("ConnectionStrings");
 
     var secretValue = secretProvider.GetSecret(secretKey);
-    if (!string.IsNullOrWhiteSpace(secretValue))
+    if (!string.IsNullOrWhiteSpace(secretValue) && !IsPlaceholderValue(secretValue))
     {
         return secretValue;
     }
 
     var fallback = configuration.GetConnectionString(connectionName);
-    if (!string.IsNullOrWhiteSpace(fallback))
+    if (!string.IsNullOrWhiteSpace(fallback) && !IsPlaceholderValue(fallback))
     {
         logger.LogWarning("Connection string '{ConnectionName}' retrieved from configuration fallback. Move it to secret key '{SecretKey}'.", connectionName, secretKey);
         return fallback;
@@ -142,11 +142,40 @@ static string ResolveConnectionString(IServiceProvider serviceProvider, string s
 
     if (required)
     {
-        throw new InvalidOperationException($"Connection string '{connectionName}' is not configured. Provide it via secret '{secretKey}'.");
+        throw new InvalidOperationException($"Connection string '{connectionName}' is not configured. Provide it via secret '{secretKey}' or set it in user-secrets/environment variables. See README for setup instructions.");
     }
 
     logger.LogInformation("Connection string '{ConnectionName}' not configured.", connectionName);
     return string.Empty;
+}
+
+static bool IsPlaceholderValue(string value)
+{
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return true;
+    }
+
+    // Check for common placeholder patterns
+    if (value.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("__USE_SECRET__", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    // Check if the value looks like a secret key name (contains "__" and doesn't look like a connection string)
+    // Secret keys follow the pattern: Something__SomethingElse (e.g., "IntegrationDb__ConnectionString")
+    if (value.Contains("__", StringComparison.Ordinal) && 
+        !value.Contains("Server=", StringComparison.OrdinalIgnoreCase) &&
+        !value.Contains("Database=", StringComparison.OrdinalIgnoreCase) &&
+        !value.Contains("Data Source=", StringComparison.OrdinalIgnoreCase) &&
+        !value.Contains("Initial Catalog=", StringComparison.OrdinalIgnoreCase))
+    {
+        // If it contains "__" and doesn't have connection string keywords, it's likely a secret key reference
+        return true;
+    }
+
+    return false;
 }
 
 static async Task ValidateRequiredSecretsAsync(IServiceProvider services)
@@ -180,12 +209,12 @@ static async Task ValidateRequiredSecretsAsync(IServiceProvider services)
             _ => null
         };
 
-        if (!string.IsNullOrWhiteSpace(fallback))
+        if (!string.IsNullOrWhiteSpace(fallback) && !IsPlaceholderValue(fallback))
         {
             logger.LogWarning("Secret '{SecretKey}' not found in secret providers; using configuration fallback temporarily.", key);
             continue;
         }
 
-        throw new InvalidOperationException($"Required secret '{key}' was not found. See README for configuration steps.");
+        throw new InvalidOperationException($"Required secret '{key}' was not found. Provide it via user-secrets (Development) or Azure KeyVault/Environment Variables (Production). See README for setup instructions.");
     }
 }
