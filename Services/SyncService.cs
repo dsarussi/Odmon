@@ -80,19 +80,13 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            // DEMO: ignore last sync history and fetch all cases, filtering by creation date (today).
+            // DEMO: load cases created today directly from Odcanit.
             var today = DateTime.Today;
             var tomorrow = today.AddDays(1);
 
-            var newOrUpdatedCases = await _odcanitReader.GetAllCasesAsync(ct);
+            var newOrUpdatedCases = await _odcanitReader.GetCasesCreatedOnDateAsync(today, ct);
 
-            _logger.LogInformation("DEMO: total cases from Odcanit before tsCreateDate filter: {Count}", newOrUpdatedCases.Count);
-
-            newOrUpdatedCases = newOrUpdatedCases
-                .Where(c => c.tsCreateDate >= today && c.tsCreateDate < tomorrow)
-                .ToList();
-
-            _logger.LogInformation("DEMO: cases created today after tsCreateDate filter: {Count}", newOrUpdatedCases.Count);
+            _logger.LogInformation("DEMO: cases created today retrieved from Odcanit: {Count}", newOrUpdatedCases.Count);
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();

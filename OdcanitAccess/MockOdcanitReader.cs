@@ -42,17 +42,14 @@ namespace Odmon.Worker.OdcanitAccess
             };
         }
 
-        public Task<List<OdcanitCase>> GetCasesUpdatedSinceAsync(DateTime lastSyncUtc, CancellationToken ct)
+        public Task<List<OdcanitCase>> GetCasesCreatedOnDateAsync(DateTime date, CancellationToken ct)
         {
-            var res = _cases
-                .Where(c => c.tsModifyDate > lastSyncUtc)
+            var start = date.Date;
+            var end = start.AddDays(1);
+            var result = _cases
+                .Where(c => c.tsCreateDate >= start && c.tsCreateDate < end)
                 .ToList();
-            return Task.FromResult(res);
-        }
-
-        public Task<List<OdcanitCase>> GetAllCasesAsync(CancellationToken ct)
-        {
-            return Task.FromResult(_cases.ToList());
+            return Task.FromResult(result);
         }
     }
 }

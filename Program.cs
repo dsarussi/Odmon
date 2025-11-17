@@ -83,26 +83,16 @@ hostBuilder.ConfigureServices((context, services) =>
         options.UseSqlServer(connectionString);
     });
 
-    services.AddScoped<IOdcanitReader>(provider =>
+    services.AddDbContext<OdcanitDbContext>((sp, options) =>
     {
-        var hostingEnv = provider.GetRequiredService<IHostEnvironment>();
-        if (hostingEnv.IsDevelopment())
-        {
-            return provider.GetRequiredService<LocalDbOdcanitReader>();
-        }
-
-        return provider.GetRequiredService<SqlOdcanitReader>();
+        var connectionString = ResolveConnectionString(sp, "OdcanitDb__ConnectionString", "OdcanitDb", required: true);
+        options.UseSqlServer(connectionString);
     });
-    services.AddScoped<LocalDbOdcanitReader>();
+
+    services.AddScoped<IOdcanitReader, SqlOdcanitReader>();
 
     if (!env.IsDevelopment())
     {
-        services.AddDbContext<OdcanitDbContext>((sp, options) =>
-        {
-            var connectionString = ResolveConnectionString(sp, "OdcanitDb__ConnectionString", "OdcanitDb", required: true);
-            options.UseSqlServer(connectionString);
-        });
-        services.AddScoped<SqlOdcanitReader>();
         services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
     }
 
