@@ -85,11 +85,11 @@ namespace Odmon.Worker.Services
 
             var newOrUpdatedCases = await _odcanitReader.GetCasesUpdatedSinceAsync(lastSync, ct);
 
-            // DEMO: restrict processing to cases created on 2025-11-17 between 09:00 and 10:00 local time.
+            // DEMO: restrict processing to cases modified on 2025-11-17 between 09:00 and 10:00 local time.
             var demoStart = new DateTime(2025, 11, 17, 9, 0, 0, DateTimeKind.Local);
             var demoEnd = new DateTime(2025, 11, 17, 10, 0, 0, DateTimeKind.Local);
             newOrUpdatedCases = newOrUpdatedCases
-                .Where(c => c.tsCreateDate >= demoStart && c.tsCreateDate < demoEnd)
+                .Where(c => c.tsModifyDate >= demoStart && c.tsModifyDate < demoEnd)
                 .ToList();
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
@@ -103,7 +103,7 @@ namespace Odmon.Worker.Services
                 var caseBoardId = boardIdToUse;
                 var caseGroupId = groupIdToUse;
                 // DEMO: determine if the current case belongs to the demo time window.
-                bool isInDemoWindow = c.tsCreateDate >= demoStart && c.tsCreateDate < demoEnd;
+                bool isInDemoWindow = c.tsModifyDate >= demoStart && c.tsModifyDate < demoEnd;
                 if (isInDemoWindow)
                 {
                     if (testBoardId > 0)
