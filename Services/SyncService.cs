@@ -20,6 +20,7 @@ namespace Odmon.Worker.Services
         private readonly IConfiguration _config;
         private readonly ILogger<SyncService> _logger;
         private readonly ITestSafetyPolicy _safetyPolicy;
+        private readonly bool _demoMode;
 
         public SyncService(
             IOdcanitReader odcanitReader,
@@ -35,6 +36,7 @@ namespace Odmon.Worker.Services
             _config = config;
             _logger = logger;
             _safetyPolicy = safetyPolicy;
+            _demoMode = config.GetValue<bool>("Sync:DemoMode");
         }
 
         public async Task SyncOdcanitToMondayAsync(CancellationToken ct)
@@ -83,14 +85,31 @@ namespace Odmon.Worker.Services
             var lastSync = await _integrationDb.MondayItemMappings
                 .MaxAsync(m => (DateTime?)m.LastSyncFromOdcanitUtc, cancellationToken: ct) ?? DateTime.UtcNow.AddDays(-7);
 
+            var today = DateTime.Today;
+            var tomorrow = today.AddDays(1);
+
+            if (_demoMode)
+            {
+                _logger.LogInformation("DEMO: overriding lastSync (was {LastSync}) to start of today to include all cases created today.", lastSync);
+                lastSync = today;
+            }
+
             var newOrUpdatedCases = await _odcanitReader.GetCasesUpdatedSinceAsync(lastSync, ct);
 
-            // DEMO: restrict processing to cases modified on 2025-11-17 between 09:00 and 10:00 local time.
-            var demoStart = new DateTime(2025, 11, 17, 9, 0, 0, DateTimeKind.Local);
-            var demoEnd = new DateTime(2025, 11, 17, 10, 0, 0, DateTimeKind.Local);
+            if (_demoMode)
+            {
+                _logger.LogInformation("DEMO: total cases from Odcanit before time filter: {Count}", newOrUpdatedCases.Count);
+            }
+
+            // DEMO: process only cases created today (local server time).
             newOrUpdatedCases = newOrUpdatedCases
-                .Where(c => c.tsModifyDate >= demoStart && c.tsModifyDate < demoEnd)
+                .Where(c => c.tsCreateDate >= today && c.tsCreateDate < tomorrow)
                 .ToList();
+
+            if (_demoMode)
+            {
+                _logger.LogInformation("DEMO: cases after tsCreateDate demo window filter: {Count}", newOrUpdatedCases.Count);
+            }
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
@@ -102,8 +121,8 @@ namespace Odmon.Worker.Services
             {
                 var caseBoardId = boardIdToUse;
                 var caseGroupId = groupIdToUse;
-                // DEMO: determine if the current case belongs to the demo time window.
-                bool isInDemoWindow = c.tsModifyDate >= demoStart && c.tsModifyDate < demoEnd;
+                // DEMO: determine if the current case belongs to today's demo window.
+                bool isInDemoWindow = c.tsCreateDate >= today && c.tsCreateDate < tomorrow;
                 if (isInDemoWindow)
                 {
                     if (testBoardId > 0)
