@@ -49,6 +49,11 @@ namespace Odmon.Worker.OdcanitAccess
                 .ToList();
             return Task.FromResult(res);
         }
+
+        public Task<List<OdcanitCase>> GetAllCasesAsync(CancellationToken ct)
+        {
+            return Task.FromResult(_cases.ToList());
+        }
     }
 }
 
