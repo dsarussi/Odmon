@@ -367,7 +367,7 @@ namespace Odmon.Worker.Services
             var columnValues = new Dictionary<string, object>
             {
                 ["project_status"] = forceNotStartedStatus
-                    ? new { label = "Not started" }
+                    ? new { label = "Not Started" }
                     : new { index = MapStatusIndex(c.StatusName) },
                 ["date"] = new { date = c.tsCreateDate.ToString("yyyy-MM-dd") },
                 ["text9"] = c.Notes ?? string.Empty
