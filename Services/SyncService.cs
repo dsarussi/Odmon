@@ -82,31 +82,20 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            var lastSync = await _integrationDb.MondayItemMappings
-                .MaxAsync(m => (DateTime?)m.LastSyncFromOdcanitUtc, cancellationToken: ct) ?? DateTime.UtcNow.AddDays(-7);
-
-            if (_demoMode)
-            {
-                var todayLocal = DateTime.Today;
-                _logger.LogInformation("DEMO: overriding lastSync (was {LastSync}) to start of today ({Today}) to include all cases created today.", lastSync, todayLocal);
-                lastSync = todayLocal;
-            }
+            // DEMO: ignore last sync history and focus only on cases created today.
+            var today = DateTime.Today;
+            var tomorrow = today.AddDays(1);
+            var lastSync = today;
 
             var newOrUpdatedCases = await _odcanitReader.GetCasesUpdatedSinceAsync(lastSync, ct);
 
-            var today = DateTime.Today;
-            var tomorrow = today.AddDays(1);
+            _logger.LogInformation("DEMO: total cases from Odcanit before tsCreateDate filter: {Count}", newOrUpdatedCases.Count);
 
-            if (_demoMode)
-            {
-                _logger.LogInformation("DEMO: total cases from Odcanit before date filter: {Count}", newOrUpdatedCases.Count);
+            newOrUpdatedCases = newOrUpdatedCases
+                .Where(c => c.tsCreateDate >= today && c.tsCreateDate < tomorrow)
+                .ToList();
 
-                newOrUpdatedCases = newOrUpdatedCases
-                    .Where(c => c.tsCreateDate >= today && c.tsCreateDate < tomorrow)
-                    .ToList();
-
-                _logger.LogInformation("DEMO: cases created today after filter: {Count}", newOrUpdatedCases.Count);
-            }
+            _logger.LogInformation("DEMO: cases created today after tsCreateDate filter: {Count}", newOrUpdatedCases.Count);
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
