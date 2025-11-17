@@ -84,6 +84,14 @@ namespace Odmon.Worker.Services
                 .MaxAsync(m => (DateTime?)m.LastSyncFromOdcanitUtc, cancellationToken: ct) ?? DateTime.UtcNow.AddDays(-7);
 
             var newOrUpdatedCases = await _odcanitReader.GetCasesUpdatedSinceAsync(lastSync, ct);
+
+            // DEMO: restrict processing to cases created on 2025-11-17 between 09:00 and 10:00 local time.
+            var demoStart = new DateTime(2025, 11, 17, 9, 0, 0, DateTimeKind.Local);
+            var demoEnd = new DateTime(2025, 11, 17, 10, 0, 0, DateTimeKind.Local);
+            newOrUpdatedCases = newOrUpdatedCases
+                .Where(c => c.tsCreateDate >= demoStart && c.tsCreateDate < demoEnd)
+                .ToList();
+
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
             int created = 0, updated = 0;
@@ -94,6 +102,21 @@ namespace Odmon.Worker.Services
             {
                 var caseBoardId = boardIdToUse;
                 var caseGroupId = groupIdToUse;
+                // DEMO: determine if the current case belongs to the demo time window.
+                bool isInDemoWindow = c.tsCreateDate >= demoStart && c.tsCreateDate < demoEnd;
+                if (isInDemoWindow)
+                {
+                    if (testBoardId > 0)
+                    {
+                        caseBoardId = testBoardId;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(testGroupId))
+                    {
+                        caseGroupId = testGroupId;
+                    }
+                }
+
                 var (itemName, prefixApplied) = BuildItemName(c, testMode);
                 string action;
                 bool wasNoChange = false;
@@ -103,7 +126,7 @@ namespace Odmon.Worker.Services
                 bool isExplicitTestCase = c.TikCounter == 31490;
                 bool isSafeTestCase = _safetyPolicy.IsTestCase(c) || isExplicitTestCase;
 
-                if (!isSafeTestCase)
+                if (!isInDemoWindow && !isSafeTestCase)
                 {
                     action = "skipped_non_test";
                     skippedNonTest++;
@@ -126,11 +149,11 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
-                var columnValuesJson = BuildColumnValuesJson(c);
                 var odcanitVersion = c.tsModifyDate.ToString("o");
 
                 if (mapping == null)
                 {
+                    var columnValuesJson = BuildColumnValuesJson(c, forceNotStartedStatus: true);
                     action = dryRun ? "dry-create" : "created";
                     if (!dryRun)
                     {
@@ -162,6 +185,7 @@ namespace Odmon.Worker.Services
                 else
                 {
                     var requiresUpdate = mapping.OdcanitVersion != odcanitVersion;
+                    var columnValuesJson = BuildColumnValuesJson(c);
                     var requiresNameUpdate = mapping.MondayChecksum != itemName;
                     mondayIdForLog = mapping.MondayItemId;
 
@@ -326,12 +350,9 @@ namespace Odmon.Worker.Services
 
         private static (string ItemName, bool PrefixApplied) BuildItemName(OdcanitCase c, bool testMode)
         {
-            var tikNumber = c.TikNumber ?? string.Empty;
-            var tikName = c.TikName ?? string.Empty;
-            var clientName = c.ClientName ?? string.Empty;
+            var tikNumber = (c.TikNumber ?? string.Empty).Trim();
+            var baseName = tikNumber;
 
-            var baseName = $"{tikNumber} | {tikName} | {clientName}".Trim();
-            
             if (!testMode)
             {
                 return (baseName, false);
@@ -345,11 +366,13 @@ namespace Odmon.Worker.Services
             return ($"[TEST] {baseName}", true);
         }
 
-        private static string BuildColumnValuesJson(OdcanitCase c)
+        private static string BuildColumnValuesJson(OdcanitCase c, bool forceNotStartedStatus = false)
         {
             var columnValues = new Dictionary<string, object>
             {
-                ["project_status"] = new { index = MapStatusIndex(c.StatusName) },
+                ["project_status"] = forceNotStartedStatus
+                    ? new { label = "Not started" }
+                    : new { index = MapStatusIndex(c.StatusName) },
                 ["date"] = new { date = c.tsCreateDate.ToString("yyyy-MM-dd") },
                 ["text9"] = c.Notes ?? string.Empty
             };
