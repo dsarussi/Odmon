@@ -85,30 +85,27 @@ namespace Odmon.Worker.Services
             var lastSync = await _integrationDb.MondayItemMappings
                 .MaxAsync(m => (DateTime?)m.LastSyncFromOdcanitUtc, cancellationToken: ct) ?? DateTime.UtcNow.AddDays(-7);
 
+            if (_demoMode)
+            {
+                var todayLocal = DateTime.Today;
+                _logger.LogInformation("DEMO: overriding lastSync (was {LastSync}) to start of today ({Today}) to include all cases created today.", lastSync, todayLocal);
+                lastSync = todayLocal;
+            }
+
+            var newOrUpdatedCases = await _odcanitReader.GetCasesUpdatedSinceAsync(lastSync, ct);
+
             var today = DateTime.Today;
             var tomorrow = today.AddDays(1);
 
             if (_demoMode)
             {
-                _logger.LogInformation("DEMO: overriding lastSync (was {LastSync}) to start of today to include all cases created today.", lastSync);
-                lastSync = today;
-            }
+                _logger.LogInformation("DEMO: total cases from Odcanit before date filter: {Count}", newOrUpdatedCases.Count);
 
-            var newOrUpdatedCases = await _odcanitReader.GetCasesUpdatedSinceAsync(lastSync, ct);
+                newOrUpdatedCases = newOrUpdatedCases
+                    .Where(c => c.tsCreateDate >= today && c.tsCreateDate < tomorrow)
+                    .ToList();
 
-            if (_demoMode)
-            {
-                _logger.LogInformation("DEMO: total cases from Odcanit before time filter: {Count}", newOrUpdatedCases.Count);
-            }
-
-            // DEMO: process only cases created today (local server time).
-            newOrUpdatedCases = newOrUpdatedCases
-                .Where(c => c.tsCreateDate >= today && c.tsCreateDate < tomorrow)
-                .ToList();
-
-            if (_demoMode)
-            {
-                _logger.LogInformation("DEMO: cases after tsCreateDate demo window filter: {Count}", newOrUpdatedCases.Count);
+                _logger.LogInformation("DEMO: cases created today after filter: {Count}", newOrUpdatedCases.Count);
             }
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
