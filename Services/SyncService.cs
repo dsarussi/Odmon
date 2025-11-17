@@ -20,7 +20,6 @@ namespace Odmon.Worker.Services
         private readonly IConfiguration _config;
         private readonly ILogger<SyncService> _logger;
         private readonly ITestSafetyPolicy _safetyPolicy;
-        private readonly bool _demoMode;
 
         public SyncService(
             IOdcanitReader odcanitReader,
@@ -36,7 +35,6 @@ namespace Odmon.Worker.Services
             _config = config;
             _logger = logger;
             _safetyPolicy = safetyPolicy;
-            _demoMode = config.GetValue<bool>("Sync:DemoMode");
         }
 
         public async Task SyncOdcanitToMondayAsync(CancellationToken ct)
@@ -82,12 +80,11 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            // DEMO: ignore last sync history and focus only on cases created today.
+            // DEMO: ignore last sync history and fetch all cases, filtering by creation date (today).
             var today = DateTime.Today;
             var tomorrow = today.AddDays(1);
-            var lastSync = today;
 
-            var newOrUpdatedCases = await _odcanitReader.GetCasesUpdatedSinceAsync(lastSync, ct);
+            var newOrUpdatedCases = await _odcanitReader.GetAllCasesAsync(ct);
 
             _logger.LogInformation("DEMO: total cases from Odcanit before tsCreateDate filter: {Count}", newOrUpdatedCases.Count);
 

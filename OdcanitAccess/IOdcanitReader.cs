@@ -5,6 +5,7 @@ namespace Odmon.Worker.OdcanitAccess
     public interface IOdcanitReader
     {
         Task<List<OdcanitCase>> GetCasesUpdatedSinceAsync(DateTime lastSyncUtc, CancellationToken ct);
+        Task<List<OdcanitCase>> GetAllCasesAsync(CancellationToken ct);
     }
 
     public interface IOdcanitWriter

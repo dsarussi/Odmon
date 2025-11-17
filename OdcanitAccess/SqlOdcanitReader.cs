@@ -18,6 +18,13 @@ namespace Odmon.Worker.OdcanitAccess
                 .Where(c => c.tsModifyDate > lastSyncUtc)
                 .ToListAsync(ct);
         }
+
+        public async Task<List<OdcanitCase>> GetAllCasesAsync(CancellationToken ct)
+        {
+            return await _db.Cases
+                .AsNoTracking()
+                .ToListAsync(ct);
+        }
     }
 }
 

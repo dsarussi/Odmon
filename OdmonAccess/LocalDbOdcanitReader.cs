@@ -22,6 +22,14 @@ namespace Odmon.Worker.OdcanitAccess
                 .OrderBy(c => c.tsModifyDate)
                 .ToListAsync(ct);
         }
+
+        public async Task<List<Odmon.Worker.Models.OdcanitCase>> GetAllCasesAsync(CancellationToken ct)
+        {
+            return await _db.Set<Odmon.Worker.Models.OdcanitCase>()
+                .FromSqlRaw("SELECT TikCounter, TikNumber, TikName, ClientName, StatusName, TikOwner, tsCreateDate, tsModifyDate, Notes FROM dbo.OdcanitCasesMock")
+                .OrderBy(c => c.tsModifyDate)
+                .ToListAsync(ct);
+        }
     }
 }
 
