@@ -28,7 +28,7 @@ namespace Odmon.Worker.Models
         public string? tsModifiedBy { get; set; }
         public string? UsersNames { get; set; }
         public int? SideCounter { get; set; }
-        public int TikCounter { get; set; }
+        public int? TikCounter { get; set; }
         public int? MeetStatus { get; set; }
         public string? MeetStatusName { get; set; }
     }

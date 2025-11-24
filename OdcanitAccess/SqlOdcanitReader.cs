@@ -167,11 +167,11 @@ namespace Odmon.Worker.OdcanitAccess
                 .ToListAsync(ct);
 
             var diaryEvents = diaryEventsFromDb
-                .Where(d => tikCounterSet.Contains(d.TikCounter))
+                .Where(d => d.TikCounter.HasValue && tikCounterSet.Contains(d.TikCounter.Value))
                 .ToList();
 
             var diaryByCase = diaryEvents
-                .GroupBy(d => d.TikCounter)
+                .GroupBy(d => d.TikCounter!.Value)
                 .ToDictionary(g => g.Key, g => g
                     .Where(e => e != null)
                     .OrderBy(e => e.StartDate ?? DateTime.MaxValue)
