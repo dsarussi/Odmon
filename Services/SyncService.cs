@@ -439,7 +439,7 @@ namespace Odmon.Worker.Services
             // TODO: Align Odcanit stage/result values with Monday status labels.
             TryAddStatusLabelColumn(columnValues, _mondaySettings.ResultStatusColumnId, c.StageName ?? c.StatusName);
 
-            var statusColumnId = NormalizeColumnId(_mondaySettings.CaseStatusColumnId);
+            var statusColumnId = _mondaySettings.CaseStatusColumnId;
             if (!string.IsNullOrWhiteSpace(statusColumnId))
             {
                 if (forceNotStartedStatus)
@@ -460,13 +460,12 @@ namespace Odmon.Worker.Services
 
         private static void TryAddStringColumn(Dictionary<string, object> columnValues, string? columnId, string? value)
         {
-            var normalized = NormalizeColumnId(columnId);
-            if (string.IsNullOrWhiteSpace(normalized) || string.IsNullOrWhiteSpace(value))
+            if (string.IsNullOrWhiteSpace(columnId) || string.IsNullOrWhiteSpace(value))
             {
                 return;
             }
 
-            columnValues[normalized] = value;
+            columnValues[columnId] = value;
         }
 
         private static void TryAddDateColumn(Dictionary<string, object> columnValues, string? columnId, DateTime value)
@@ -476,64 +475,59 @@ namespace Odmon.Worker.Services
 
         private static void TryAddDateColumn(Dictionary<string, object> columnValues, string? columnId, DateTime? value)
         {
-            var normalized = NormalizeColumnId(columnId);
-            if (string.IsNullOrWhiteSpace(normalized) || value is null)
+            if (string.IsNullOrWhiteSpace(columnId) || value is null)
             {
                 return;
             }
 
-            columnValues[normalized] = new { date = value.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) };
+            columnValues[columnId] = new { date = value.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) };
         }
 
         private static void TryAddDecimalColumn(Dictionary<string, object> columnValues, string? columnId, decimal? value)
         {
-            var normalized = NormalizeColumnId(columnId);
-            if (string.IsNullOrWhiteSpace(normalized) || value is null)
+            if (string.IsNullOrWhiteSpace(columnId) || value is null)
             {
                 return;
             }
 
-            columnValues[normalized] = value.Value.ToString(CultureInfo.InvariantCulture);
+            columnValues[columnId] = value.Value.ToString(CultureInfo.InvariantCulture);
         }
 
         private void TryAddPhoneColumn(Dictionary<string, object> columnValues, string? columnId, string? phoneNumber, int tikCounter, string context)
         {
-            var normalized = NormalizeColumnId(columnId);
-            if (string.IsNullOrWhiteSpace(normalized))
+            if (string.IsNullOrWhiteSpace(columnId))
             {
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(phoneNumber))
             {
-                _logger.LogDebug("No {Context} for TikCounter {TikCounter}; column {ColumnId} left empty", context, tikCounter, normalized);
+                _logger.LogDebug("No {Context} for TikCounter {TikCounter}; column {ColumnId} left empty", context, tikCounter, columnId);
                 return;
             }
 
-            columnValues[normalized] = new { phone = phoneNumber, countryShortName = "IL" };
-            _logger.LogDebug("Including {Context} for TikCounter {TikCounter} on column {ColumnId}", context, tikCounter, normalized);
+            columnValues[columnId] = new { phone = phoneNumber, countryShortName = "IL" };
+            _logger.LogDebug("Including {Context} for TikCounter {TikCounter} on column {ColumnId}", context, tikCounter, columnId);
         }
 
         private static void TryAddHourColumn(Dictionary<string, object> columnValues, string? columnId, TimeSpan? value)
         {
-            var normalized = NormalizeColumnId(columnId);
-            if (string.IsNullOrWhiteSpace(normalized) || value is null)
+            if (string.IsNullOrWhiteSpace(columnId) || value is null)
             {
                 return;
             }
 
-            columnValues[normalized] = value.Value.ToString(@"hh\:mm", CultureInfo.InvariantCulture);
+            columnValues[columnId] = value.Value.ToString(@"hh\:mm", CultureInfo.InvariantCulture);
         }
 
         private static void TryAddStatusLabelColumn(Dictionary<string, object> columnValues, string? columnId, string? label)
         {
-            var normalized = NormalizeColumnId(columnId);
-            if (string.IsNullOrWhiteSpace(normalized) || string.IsNullOrWhiteSpace(label))
+            if (string.IsNullOrWhiteSpace(columnId) || string.IsNullOrWhiteSpace(label))
             {
                 return;
             }
 
-            columnValues[normalized] = new { label };
+            columnValues[columnId] = new { label };
         }
 
         private string ResolveClientPhoneColumnId()
@@ -548,17 +542,6 @@ namespace Odmon.Worker.Services
             return string.IsNullOrWhiteSpace(_mondaySettings.ClientEmailColumnId)
                 ? DefaultClientEmailColumnId
                 : _mondaySettings.ClientEmailColumnId!;
-        }
-
-        private static string? NormalizeColumnId(string? columnId)
-        {
-            if (string.IsNullOrWhiteSpace(columnId))
-            {
-                return null;
-            }
-
-            var parts = columnId.Split('_', 2, StringSplitOptions.RemoveEmptyEntries);
-            return parts.Length > 0 ? parts[0] : columnId;
         }
 
         private static bool IsMappingTestCompatible(MondayItemMapping mapping)

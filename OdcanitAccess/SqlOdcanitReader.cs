@@ -74,13 +74,24 @@ namespace Odmon.Worker.OdcanitAccess
             var sideCounterSet = new HashSet<int>(sideCounters);
             var visualIdSet = new HashSet<string>(visualIds);
 
+            _logger.LogDebug("Loading clients for {SideCounters} side counters and {VisualIds} visual IDs.", sideCounterSet.Count, visualIdSet.Count);
+
             var clientsFromDb = await _db.Clients
                 .AsNoTracking()
                 .ToListAsync(ct);
 
+            _logger.LogDebug("Loaded {TotalClients} client rows from view.", clientsFromDb.Count);
+
             var clients = clientsFromDb
                 .Where(x => sideCounterSet.Contains(x.SideCounter) && visualIdSet.Contains(x.VisualID))
                 .ToList();
+
+            _logger.LogDebug("Matched {MatchedClients} client rows to cases.", clients.Count);
+
+            foreach (var client in clients.Where(c => c.SideCounter == 31577))
+            {
+                _logger.LogDebug("Client match for TikCounter {TikCounter}: {@Client}", client.SideCounter, new { client.SideCounter, client.VisualID, client.Mobile, client.Email });
+            }
 
             var clientLookup = clients
                 .GroupBy(x => new { x.SideCounter, x.VisualID })
@@ -90,13 +101,13 @@ namespace Odmon.Worker.OdcanitAccess
 
             foreach (var odcanitCase in cases)
             {
-                if (odcanitCase.ClientVisualID is null)
+                if (odcanitCase.ClientVisualID is null || !clientLookup.TryGetValue((odcanitCase.SideCounter, odcanitCase.ClientVisualID), out var client))
                 {
-                    continue;
-                }
-
-                if (!clientLookup.TryGetValue((odcanitCase.SideCounter, odcanitCase.ClientVisualID), out var client))
-                {
+                    _logger.LogDebug(
+                        "No client row found for TikCounter {TikCounter}, SideCounter {SideCounter}, ClientVisualID {ClientVisualID}",
+                        odcanitCase.TikCounter,
+                        odcanitCase.SideCounter,
+                        odcanitCase.ClientVisualID ?? "<null>");
                     continue;
                 }
 
@@ -117,13 +128,25 @@ namespace Odmon.Worker.OdcanitAccess
                 .AsNoTracking()
                 .ToListAsync(ct);
 
+            _logger.LogDebug("Loaded {TotalSides} sides rows from view.", sidesFromDb.Count);
+
             var sides = sidesFromDb
                 .Where(s => tikCounterSet.Contains(s.TikCounter))
                 .ToList();
 
+            _logger.LogDebug("Matched {MatchedSides} sides rows to current TikCounters.", sides.Count);
+
             var sidesByCase = sides
                 .GroupBy(s => s.TikCounter)
                 .ToDictionary(g => g.Key, g => g.ToList());
+
+            if (sidesByCase.TryGetValue(31577, out var tik31577Sides))
+            {
+                var roleSummary = tik31577Sides
+                    .Select(s => new { s.SideTypeCode, s.SideTypeName, s.FullName, s.ID })
+                    .ToList();
+                _logger.LogDebug("TikCounter 31577 sides: {@Sides}", roleSummary);
+            }
 
             foreach (var odcanitCase in cases)
             {
@@ -171,6 +194,8 @@ namespace Odmon.Worker.OdcanitAccess
                 .Where(d => d.TikCounter.HasValue && tikCounterSet.Contains(d.TikCounter.Value))
                 .ToList();
 
+            _logger.LogDebug("Loaded {TotalDiary} diary rows; matched {MatchedDiary} to cases.", diaryEventsFromDb.Count, diaryEvents.Count);
+
             var diaryByCase = diaryEvents
                 .GroupBy(d => d.TikCounter!.Value)
                 .ToDictionary(g => g.Key, g => g
@@ -216,21 +241,48 @@ namespace Odmon.Worker.OdcanitAccess
 
             var userDataRowsFromDb = await _db.UserData
                 .AsNoTracking()
-                .Where(u => u.PageName == DorScreenPageName)
+                .Where(u => tikCounterSet.Contains(u.TikCounter))
                 .ToListAsync(ct);
 
             var userDataRows = userDataRowsFromDb
-                .Where(u => tikCounterSet.Contains(u.TikCounter))
+                .Where(u => string.Equals(u.PageName, DorScreenPageName, StringComparison.Ordinal))
                 .ToList();
+
+            _logger.LogDebug(
+                "Loaded {TotalUserData} rows for TikCounters, Dor screen rows={DorRows}, Distinct pages={Pages}",
+                userDataRowsFromDb.Count,
+                userDataRows.Count,
+                userDataRowsFromDb.Select(u => u.PageName).Distinct().ToArray());
+
+            var userDataAllByCase = userDataRowsFromDb
+                .GroupBy(u => u.TikCounter)
+                .ToDictionary(g => g.Key, g => g.ToList());
 
             var userDataByCase = userDataRows
                 .GroupBy(u => u.TikCounter)
                 .ToDictionary(g => g.Key, g => g.ToList());
 
+            if (userDataAllByCase.TryGetValue(31577, out var tik31577Rows))
+            {
+                var pairs = tik31577Rows
+                    .Select(r => new { r.PageName, r.FieldName, r.strData })
+                    .ToList();
+                _logger.LogDebug("TikCounter 31577 user data rows: {@UserFields}", pairs);
+            }
+
             foreach (var odcanitCase in cases)
             {
                 if (!userDataByCase.TryGetValue(odcanitCase.TikCounter, out var rows))
                 {
+                    if (userDataAllByCase.TryGetValue(odcanitCase.TikCounter, out var allRows))
+                    {
+                        var availablePages = allRows.Select(r => r.PageName ?? "<null>").Distinct().ToArray();
+                        _logger.LogDebug("No Dor page rows for TikCounter {TikCounter}. Available PageNames: {Pages}", odcanitCase.TikCounter, availablePages);
+                    }
+                    else
+                    {
+                        _logger.LogDebug("No user data rows at all for TikCounter {TikCounter}.", odcanitCase.TikCounter);
+                    }
                     continue;
                 }
 
