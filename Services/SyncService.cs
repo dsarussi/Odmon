@@ -439,18 +439,6 @@ namespace Odmon.Worker.Services
             TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
             TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
 
-            if (!string.IsNullOrWhiteSpace(_mondaySettings.ResultStatusColumnId))
-            {
-                if (forceNotStartedStatus)
-                {
-                    TryAddStatusLabelColumn(columnValues, _mondaySettings.ResultStatusColumnId, "פתוח");
-                }
-                else
-                {
-                    TryAddStatusLabelColumn(columnValues, _mondaySettings.ResultStatusColumnId, c.StageName ?? c.StatusName);
-                }
-            }
-
             var statusColumnId = _mondaySettings.CaseStatusColumnId;
             if (!string.IsNullOrWhiteSpace(statusColumnId))
             {
