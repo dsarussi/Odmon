@@ -44,6 +44,12 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.tsCreateDate);
                 b.Property(x => x.tsModifyDate);
                 b.Property(x => x.Notes);
+                b.Property(x => x.ClientVisualID);
+                b.Property(x => x.HozlapTikNumber);
+                b.Property(x => x.ClientPhone);
+                b.Property(x => x.ClientEmail);
+                b.Property(x => x.EventDate);
+                b.Property(x => x.ClaimAmount);
             });
 
             base.OnModelCreating(modelBuilder);

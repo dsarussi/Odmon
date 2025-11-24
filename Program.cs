@@ -96,6 +96,8 @@ hostBuilder.ConfigureServices((context, services) =>
         services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
     }
 
+    services.Configure<MondaySettings>(config.GetSection("Monday"));
+
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
         client.BaseAddress = new Uri("https://api.monday.com/v2/");

@@ -9,17 +9,21 @@ using Odmon.Worker.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Odmon.Worker.Services
 {
     public class SyncService
     {
+        private const string DefaultClientPhoneColumnId = "phone_mkwe10tx";
+        private const string DefaultClientEmailColumnId = "email_mkwefwgy";
         private readonly IOdcanitReader _odcanitReader;
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
         private readonly IConfiguration _config;
         private readonly ILogger<SyncService> _logger;
         private readonly ITestSafetyPolicy _safetyPolicy;
+        private readonly MondaySettings _mondaySettings;
 
         public SyncService(
             IOdcanitReader odcanitReader,
@@ -27,7 +31,8 @@ namespace Odmon.Worker.Services
             IMondayClient mondayClient,
             IConfiguration config,
             ILogger<SyncService> logger,
-            ITestSafetyPolicy safetyPolicy)
+            ITestSafetyPolicy safetyPolicy,
+            IOptions<MondaySettings> mondayOptions)
         {
             _odcanitReader = odcanitReader;
             _integrationDb = integrationDb;
@@ -35,6 +40,7 @@ namespace Odmon.Worker.Services
             _config = config;
             _logger = logger;
             _safetyPolicy = safetyPolicy;
+            _mondaySettings = mondayOptions.Value ?? new MondaySettings();
         }
 
         public async Task SyncOdcanitToMondayAsync(CancellationToken ct)
@@ -57,15 +63,15 @@ namespace Odmon.Worker.Services
             var testBoardId = safetySection.GetValue<long>("TestBoardId", 0);
             var testGroupId = safetySection["TestGroupId"];
 
-            var defaultBoardId = _config.GetValue<long>("Monday:BoardId");
-            var defaultGroupId = _config["Monday:ToDoGroupId"];
+            var casesBoardId = _mondaySettings.CasesBoardId;
+            var defaultGroupId = _mondaySettings.ToDoGroupId;
             if (string.IsNullOrWhiteSpace(defaultGroupId))
             {
                 _logger.LogError("Monday ToDo group id is missing from configuration.");
                 return;
             }
 
-            var boardIdToUse = defaultBoardId;
+            var boardIdToUse = casesBoardId;
             var groupIdToUse = defaultGroupId;
             if (testMode)
             {
@@ -86,7 +92,7 @@ namespace Odmon.Worker.Services
 
             var newOrUpdatedCases = await _odcanitReader.GetCasesCreatedOnDateAsync(today, ct);
 
-            _logger.LogInformation("DEMO: cases created today retrieved from Odcanit: {Count}", newOrUpdatedCases.Count);
+            _logger.LogInformation("DEMO: total cases from Odcanit for today: {Count}", newOrUpdatedCases.Count);
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
@@ -362,18 +368,106 @@ namespace Odmon.Worker.Services
             return ($"[TEST] {baseName}", true);
         }
 
-        private static string BuildColumnValuesJson(OdcanitCase c, bool forceNotStartedStatus = false)
+        private string BuildColumnValuesJson(OdcanitCase c, bool forceNotStartedStatus = false)
         {
-            var columnValues = new Dictionary<string, object>
+            var columnValues = new Dictionary<string, object>();
+
+            // Case internal number (TikNumber) → text_mkwe19hn ("מספר תיק")
+            if (!string.IsNullOrWhiteSpace(c.TikNumber))
             {
-                ["project_status"] = forceNotStartedStatus
-                    ? new { label = "Not Started" }
-                    : new { index = MapStatusIndex(c.StatusName) },
-                ["date"] = new { date = c.tsCreateDate.ToString("yyyy-MM-dd") },
-                ["text9"] = c.Notes ?? string.Empty
-            };
+                columnValues["text_mkwe19hn"] = c.TikNumber;
+            }
+
+            // Client number (ClientVisualID) → text_mkwjaxeh ("מספר לקוח")
+            if (!string.IsNullOrWhiteSpace(c.ClientVisualID))
+            {
+                columnValues["text_mkwjaxeh"] = c.ClientVisualID;
+            }
+
+            // Claim/lawsuit number (HozlapTikNumber) → text_mkwjy5pg ("מספר תביעה")
+            if (!string.IsNullOrWhiteSpace(c.HozlapTikNumber))
+            {
+                columnValues["text_mkwjy5pg"] = c.HozlapTikNumber;
+            }
+
+            var phoneColumnId = ResolveClientPhoneColumnId();
+            if (!string.IsNullOrWhiteSpace(phoneColumnId))
+            {
+                if (!string.IsNullOrWhiteSpace(c.ClientPhone))
+                {
+                    columnValues[phoneColumnId] = new { phone = c.ClientPhone, countryShortName = "IL" };
+                    _logger.LogDebug("Including phone for TikCounter {TikCounter} on column {ColumnId}", c.TikCounter, phoneColumnId);
+                }
+                else
+                {
+                    _logger.LogDebug("No phone available for TikCounter {TikCounter}; column {ColumnId} left empty", c.TikCounter, phoneColumnId);
+                }
+            }
+
+            var emailColumnId = ResolveClientEmailColumnId();
+            if (!string.IsNullOrWhiteSpace(emailColumnId))
+            {
+                if (!string.IsNullOrWhiteSpace(c.ClientEmail))
+                {
+                    columnValues[emailColumnId] = c.ClientEmail;
+                    _logger.LogDebug("Including email for TikCounter {TikCounter} on column {ColumnId}", c.TikCounter, emailColumnId);
+                }
+                else
+                {
+                    _logger.LogDebug("No email available for TikCounter {TikCounter}; column {ColumnId} left empty", c.TikCounter, emailColumnId);
+                }
+            }
+
+            // Case open date (tsCreateDate) → date4 ("תאריך פתיחת תיק")
+            columnValues["date4"] = new { date = c.tsCreateDate.ToString("yyyy-MM-dd") };
+
+            // Event date → date_mkwj3780 ("תאריך אירוע")
+            if (c.EventDate.HasValue)
+            {
+                columnValues["date_mkwj3780"] = new { date = c.EventDate.Value.ToString("yyyy-MM-dd") };
+            }
+
+            // Claim amount → numeric_mkxw7s29 ("הסעד המבוקש ( סכום תביעה)")
+            if (c.ClaimAmount.HasValue)
+            {
+                columnValues["numeric_mkxw7s29"] = c.ClaimAmount.Value.ToString();
+            }
+
+            // Notes → long_text_mkwe5h8v ("הערות")
+            if (!string.IsNullOrWhiteSpace(c.Notes))
+            {
+                columnValues["long_text_mkwe5h8v"] = c.Notes;
+            }
+
+            // Status → color_mkwefnbx ("סטטוס תיק")
+            if (forceNotStartedStatus)
+            {
+                // For new items, set to "חדש" (not started)
+                // Using label "חדש" - if this doesn't work, we may need to use index instead
+                columnValues["color_mkwefnbx"] = new { label = "חדש" };
+            }
+            else
+            {
+                // For updates, map the status from Odcanit
+                var statusIndex = MapStatusIndex(c.StatusName);
+                columnValues["color_mkwefnbx"] = new { index = statusIndex };
+            }
 
             return JsonSerializer.Serialize(columnValues);
+        }
+
+        private string ResolveClientPhoneColumnId()
+        {
+            return string.IsNullOrWhiteSpace(_mondaySettings.ClientPhoneColumnId)
+                ? DefaultClientPhoneColumnId
+                : _mondaySettings.ClientPhoneColumnId!;
+        }
+
+        private string ResolveClientEmailColumnId()
+        {
+            return string.IsNullOrWhiteSpace(_mondaySettings.ClientEmailColumnId)
+                ? DefaultClientEmailColumnId
+                : _mondaySettings.ClientEmailColumnId!;
         }
 
         private static bool IsMappingTestCompatible(MondayItemMapping mapping)
