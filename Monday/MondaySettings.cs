@@ -10,7 +10,7 @@ namespace Odmon.Worker.Monday
         public string? ClientPhoneColumnId { get; set; } = "phone_mkwe10tx";
         public string? ClientEmailColumnId { get; set; } = "email_mkwefwgy";
         public string? CaseNumberColumnId { get; set; } = "text_mkwe19hn";
-        public string? ClientNumberColumnId { get; set; } = "text_mkwjaxeh";
+        public string? ClientNumberColumnId { get; set; } = "dropdown_mkxjrssr";
         public string? ClaimNumberColumnId { get; set; } = "text_mkwjy5pg";
         public string? CaseOpenDateColumnId { get; set; } = "date4";
         public string? EventDateColumnId { get; set; } = "date_mkwj3780";

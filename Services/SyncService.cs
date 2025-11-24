@@ -374,7 +374,7 @@ namespace Odmon.Worker.Services
             var columnValues = new Dictionary<string, object>();
 
             TryAddStringColumn(columnValues, _mondaySettings.CaseNumberColumnId, c.TikNumber);
-            TryAddStringColumn(columnValues, _mondaySettings.ClientNumberColumnId, c.ClientVisualID);
+            TryAddDropdownColumn(columnValues, _mondaySettings.ClientNumberColumnId, c.ClientVisualID);
             TryAddStringColumn(columnValues, _mondaySettings.ClaimNumberColumnId, c.HozlapTikNumber);
 
             TryAddPhoneColumn(columnValues, ResolveClientPhoneColumnId(), c.ClientPhone, c.TikCounter, "Client phone");
@@ -466,7 +466,7 @@ namespace Odmon.Worker.Services
             }
 
             var payloadJson = JsonSerializer.Serialize(columnValues);
-            _logger.LogDebug("Monday payload for TikCounter {TikCounter} ({TikNumber}): {Payload}", c.TikCounter, c.TikNumber, payloadJson);
+            _logger.LogDebug("Monday payload for TikCounter {TikCounter}: {Payload}", c.TikCounter, payloadJson);
             return payloadJson;
         }
 
@@ -542,6 +542,16 @@ namespace Odmon.Worker.Services
             columnValues[columnId] = new { label };
         }
 
+        private static void TryAddDropdownColumn(Dictionary<string, object> columnValues, string? columnId, string? value)
+        {
+            if (string.IsNullOrWhiteSpace(columnId) || string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+
+            columnValues[columnId] = new { labels = new[] { value } };
+        }
+
         private static string MapTaskTypeLabel(string? tikType)
         {
             if (string.IsNullOrWhiteSpace(tikType))
@@ -589,7 +599,7 @@ namespace Odmon.Worker.Services
 
             if (c.TikOwner.HasValue)
             {
-                return $"מטפל {c.TikOwner.Value}";
+                return c.TikOwner.Value.ToString(CultureInfo.InvariantCulture);
             }
 
             return null;
