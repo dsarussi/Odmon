@@ -241,7 +241,7 @@ namespace Odmon.Worker.OdcanitAccess
         {
             _logger.LogDebug("Enriching cases with Dor screen user data.");
 
-            var tikCounterSet = new HashSet<long>(tikCounters.Select(tc => (long)tc));
+            var tikCounterSet = new HashSet<int>(tikCounters);
 
             var userDataRowsFromDb = await _db.UserData
                 .AsNoTracking()
@@ -276,7 +276,7 @@ namespace Odmon.Worker.OdcanitAccess
 
             foreach (var odcanitCase in cases)
             {
-                var tikCounterKey = (long)odcanitCase.TikCounter;
+                var tikCounterKey = odcanitCase.TikCounter;
 
                 if (!userDataByCase.TryGetValue(tikCounterKey, out var rows))
                 {
