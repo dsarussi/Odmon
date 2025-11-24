@@ -50,6 +50,7 @@ namespace Odmon.Worker.OdcanitAccess
             await EnrichWithSidesAsync(cases, tikCounters, ct);
             await EnrichWithDiaryEventsAsync(cases, tikCounters, ct);
             await EnrichWithUserDataAsync(cases, tikCounters, ct);
+            LogCaseEnrichment(cases);
 
             return cases;
         }
@@ -288,6 +289,8 @@ namespace Odmon.Worker.OdcanitAccess
             Add("נזק ישיר", (c, row) => c.DirectDamageAmount = ExtractDecimal(row) ?? c.DirectDamageAmount);
             Add("סכום פסק דין", (c, row) => c.JudgmentAmount = ExtractDecimal(row) ?? c.JudgmentAmount);
             Add("סכום תביעה מוכח", (c, row) => c.ProvenClaimAmount = ExtractDecimal(row) ?? c.ProvenClaimAmount);
+            Add("אגרת בית משפט ( I+II )", (c, row) => c.CourtFeeTotal = ExtractDecimal(row) ?? c.CourtFeeTotal);
+            Add("מ.אגרה I", (c, row) => c.CourtFeePartOne = ExtractDecimal(row) ?? c.CourtFeePartOne);
             Add("שם עד", (c, row) => c.WitnessName = row.strData);
             Add("סלולרי עד", (c, row) => c.WitnessPhone = row.strData);
             Add("שם נהג", (c, row) => c.DriverName = row.strData);
@@ -380,6 +383,57 @@ namespace Odmon.Worker.OdcanitAccess
             Plaintiff,
             Defendant,
             ThirdParty
+        }
+
+        private void LogCaseEnrichment(IEnumerable<OdcanitCase> cases)
+        {
+            foreach (var c in cases)
+            {
+                _logger.LogDebug(
+                    "Enriched Odcanit case {@Case}",
+                    new
+                    {
+                        c.TikCounter,
+                        c.TikNumber,
+                        c.TikName,
+                        c.ClientVisualID,
+                        c.ClientName,
+                        c.ClientPhone,
+                        c.ClientEmail,
+                        c.PolicyHolderName,
+                        c.PolicyHolderId,
+                        c.PolicyHolderAddress,
+                        c.PolicyHolderPhone,
+                        c.PolicyHolderEmail,
+                        c.DriverName,
+                        c.DriverId,
+                        c.DriverPhone,
+                        ThirdPartyName = c.ThirdPartyDriverName,
+                        ThirdPartyId = c.ThirdPartyDriverId,
+                        ThirdPartyCarNumber = c.ThirdPartyCarNumber,
+                        c.ThirdPartyPhone,
+                        c.ThirdPartyInsurerName,
+                        c.PlaintiffName,
+                        c.PlaintiffId,
+                        c.PlaintiffAddress,
+                        c.PlaintiffPhone,
+                        c.PlaintiffEmail,
+                        c.DefendantName,
+                        c.DefendantAddress,
+                        c.CourtName,
+                        c.CourtCity,
+                        c.CourtCaseNumber,
+                        c.JudgeName,
+                        c.HearingDate,
+                        HearingHour = c.HearingTime?.ToString(),
+                        c.EventDate,
+                        c.RequestedClaimAmount,
+                        c.ProvenClaimAmount,
+                        c.JudgmentAmount,
+                        CourtFeeTotal = c.CourtFeeTotal,
+                        CourtFeePartOne = c.CourtFeePartOne
+                    });
+            }
         }
     }
 }

@@ -453,7 +453,9 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            return JsonSerializer.Serialize(columnValues);
+            var payloadJson = JsonSerializer.Serialize(columnValues);
+            _logger.LogDebug("Monday payload for TikCounter {TikCounter} ({TikNumber}): {Payload}", c.TikCounter, c.TikNumber, payloadJson);
+            return payloadJson;
         }
 
         private static void TryAddStringColumn(Dictionary<string, object> columnValues, string? columnId, string? value)
