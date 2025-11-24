@@ -88,11 +88,6 @@ namespace Odmon.Worker.OdcanitAccess
 
             _logger.LogDebug("Matched {MatchedClients} client rows to cases.", clients.Count);
 
-            foreach (var client in clients.Where(c => c.SideCounter == 31577))
-            {
-                _logger.LogDebug("Client match for TikCounter {TikCounter}: {@Client}", client.SideCounter, new { client.SideCounter, client.VisualID, client.Mobile, client.Email });
-            }
-
             var clientLookup = clients
                 .GroupBy(x => new { x.SideCounter, x.VisualID })
                 .ToDictionary(
@@ -111,6 +106,15 @@ namespace Odmon.Worker.OdcanitAccess
                     continue;
                 }
 
+                if (odcanitCase.TikCounter == 31577)
+                {
+                    _logger.LogDebug("Client data for TikCounter 31577: SideCounter={SideCounter}, VisualID={VisualID}, Phone={Phone}, Email={Email}",
+                        client.SideCounter,
+                        client.VisualID,
+                        client.Mobile,
+                        client.Email);
+                }
+
                 odcanitCase.ClientPhone = client.Mobile;
                 odcanitCase.ClientEmail = client.Email;
                 odcanitCase.ClientAddress = client.FullAddress;
@@ -122,7 +126,7 @@ namespace Odmon.Worker.OdcanitAccess
         {
             _logger.LogDebug("Enriching cases with sides from vwSides.");
 
-            var tikCounterSet = new HashSet<int>(tikCounters);
+            var tikCounterSet = new HashSet<long>(tikCounters.Select(tc => (long)tc));
 
             var sidesFromDb = await _db.Sides
                 .AsNoTracking()
@@ -237,7 +241,7 @@ namespace Odmon.Worker.OdcanitAccess
         {
             _logger.LogDebug("Enriching cases with Dor screen user data.");
 
-            var tikCounterSet = new HashSet<int>(tikCounters);
+            var tikCounterSet = new HashSet<long>(tikCounters.Select(tc => (long)tc));
 
             var userDataRowsFromDb = await _db.UserData
                 .AsNoTracking()
@@ -265,16 +269,18 @@ namespace Odmon.Worker.OdcanitAccess
             if (userDataAllByCase.TryGetValue(31577, out var tik31577Rows))
             {
                 var pairs = tik31577Rows
-                    .Select(r => new { r.PageName, r.FieldName, r.strData })
+                    .Select(r => new { r.PageName, r.FieldName, r.strData, r.numData, r.dateData })
                     .ToList();
                 _logger.LogDebug("TikCounter 31577 user data rows: {@UserFields}", pairs);
             }
 
             foreach (var odcanitCase in cases)
             {
-                if (!userDataByCase.TryGetValue(odcanitCase.TikCounter, out var rows))
+                var tikCounterKey = (long)odcanitCase.TikCounter;
+
+                if (!userDataByCase.TryGetValue(tikCounterKey, out var rows))
                 {
-                    if (userDataAllByCase.TryGetValue(odcanitCase.TikCounter, out var allRows))
+                    if (userDataAllByCase.TryGetValue(tikCounterKey, out var allRows))
                     {
                         var availablePages = allRows.Select(r => r.PageName ?? "<null>").Distinct().ToArray();
                         _logger.LogDebug("No Dor page rows for TikCounter {TikCounter}. Available PageNames: {Pages}", odcanitCase.TikCounter, availablePages);
