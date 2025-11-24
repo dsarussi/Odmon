@@ -26,8 +26,10 @@ namespace Odmon.Worker.Models
         public string? HalichName { get; set; }
         public string? TiukName { get; set; }
         public DateTime? TiukDate { get; set; }
+        [NotMapped]
         public decimal? TikBalance { get; set; }
         public DateTime? TikBalanceCalcDate { get; set; }
+        [NotMapped]
         public decimal? HozlapBalance { get; set; }
         public DateTime? HozlapBalanceCalcDate { get; set; }
         public string? Notes { get; set; }
