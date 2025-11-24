@@ -436,8 +436,20 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.DefenseStreetColumnId, c.DefenseStreet);
             TryAddStringColumn(columnValues, _mondaySettings.ClaimStreetColumnId, c.ClaimStreet);
             TryAddStringColumn(columnValues, _mondaySettings.CaseFolderIdColumnId, c.CaseFolderId);
-            // TODO: Align Odcanit stage/result values with Monday status labels.
-            TryAddStatusLabelColumn(columnValues, _mondaySettings.ResultStatusColumnId, c.StageName ?? c.StatusName);
+            TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
+            TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
+
+            if (!string.IsNullOrWhiteSpace(_mondaySettings.ResultStatusColumnId))
+            {
+                if (forceNotStartedStatus)
+                {
+                    TryAddStatusLabelColumn(columnValues, _mondaySettings.ResultStatusColumnId, "פתוח");
+                }
+                else
+                {
+                    TryAddStatusLabelColumn(columnValues, _mondaySettings.ResultStatusColumnId, c.StageName ?? c.StatusName);
+                }
+            }
 
             var statusColumnId = _mondaySettings.CaseStatusColumnId;
             if (!string.IsNullOrWhiteSpace(statusColumnId))
@@ -528,6 +540,59 @@ namespace Odmon.Worker.Services
             }
 
             columnValues[columnId] = new { label };
+        }
+
+        private static string MapTaskTypeLabel(string? tikType)
+        {
+            if (string.IsNullOrWhiteSpace(tikType))
+            {
+                return "טיפול בתיק";
+            }
+
+            var value = tikType.Trim();
+            if (value.IndexOf("פגיש", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "פגישה";
+            }
+
+            if (value.IndexOf("מכתב", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("דריש", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "מכתב דרישה";
+            }
+
+            if (value.IndexOf("זימון", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("דיון", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "זימון לדיון";
+            }
+
+            if (value.IndexOf("הודע", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "הודעה";
+            }
+
+            return "טיפול בתיק";
+        }
+
+        private static string? DetermineResponsibleText(OdcanitCase c)
+        {
+            if (!string.IsNullOrWhiteSpace(c.Referant))
+            {
+                return c.Referant;
+            }
+
+            if (!string.IsNullOrWhiteSpace(c.TeamName))
+            {
+                return c.TeamName;
+            }
+
+            if (c.TikOwner.HasValue)
+            {
+                return $"מטפל {c.TikOwner.Value}";
+            }
+
+            return null;
         }
 
         private string ResolveClientPhoneColumnId()

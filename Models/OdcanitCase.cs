@@ -9,6 +9,7 @@ namespace Odmon.Worker.Models
         public int TikCounter { get; set; }
         public string TikNumber { get; set; } = string.Empty;
         public string TikName { get; set; } = string.Empty;
+        public string? TikType { get; set; }
         public string ClientName { get; set; } = string.Empty;
         public string StatusName { get; set; } = string.Empty;
         public int? TikOwner { get; set; }
