@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Globalization;
 using Odmon.Worker.OdcanitAccess;
 using Odmon.Worker.Data;
 using Odmon.Worker.Monday;
@@ -372,88 +373,165 @@ namespace Odmon.Worker.Services
         {
             var columnValues = new Dictionary<string, object>();
 
-            // Case internal number (TikNumber) → text_mkwe19hn ("מספר תיק")
-            if (!string.IsNullOrWhiteSpace(c.TikNumber))
-            {
-                columnValues["text_mkwe19hn"] = c.TikNumber;
-            }
+            TryAddStringColumn(columnValues, _mondaySettings.CaseNumberColumnId, c.TikNumber);
+            TryAddStringColumn(columnValues, _mondaySettings.ClientNumberColumnId, c.ClientVisualID);
+            TryAddStringColumn(columnValues, _mondaySettings.ClaimNumberColumnId, c.HozlapTikNumber);
 
-            // Client number (ClientVisualID) → text_mkwjaxeh ("מספר לקוח")
-            if (!string.IsNullOrWhiteSpace(c.ClientVisualID))
-            {
-                columnValues["text_mkwjaxeh"] = c.ClientVisualID;
-            }
+            TryAddPhoneColumn(columnValues, ResolveClientPhoneColumnId(), c.ClientPhone, c.TikCounter, "Client phone");
+            TryAddStringColumn(columnValues, ResolveClientEmailColumnId(), c.ClientEmail);
 
-            // Claim/lawsuit number (HozlapTikNumber) → text_mkwjy5pg ("מספר תביעה")
-            if (!string.IsNullOrWhiteSpace(c.HozlapTikNumber))
-            {
-                columnValues["text_mkwjy5pg"] = c.HozlapTikNumber;
-            }
+            TryAddDateColumn(columnValues, _mondaySettings.CaseOpenDateColumnId, c.tsCreateDate);
+            TryAddDateColumn(columnValues, _mondaySettings.EventDateColumnId, c.EventDate);
+            TryAddDateColumn(columnValues, _mondaySettings.CaseCloseDateColumnId, c.TikCloseDate);
+            TryAddDateColumn(columnValues, _mondaySettings.ComplaintReceivedDateColumnId, c.ComplaintReceivedDate);
+            TryAddDateColumn(columnValues, _mondaySettings.HearingDateColumnId, c.HearingDate);
+            TryAddHourColumn(columnValues, _mondaySettings.HearingHourColumnId, c.HearingTime);
 
-            var phoneColumnId = ResolveClientPhoneColumnId();
-            if (!string.IsNullOrWhiteSpace(phoneColumnId))
+            TryAddDecimalColumn(columnValues, _mondaySettings.RequestedClaimAmountColumnId, c.RequestedClaimAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.ProvenClaimAmountColumnId, c.ProvenClaimAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.JudgmentAmountColumnId, c.JudgmentAmount);
+            TryAddStringColumn(columnValues, _mondaySettings.NotesColumnId, c.Notes);
+            TryAddStringColumn(columnValues, _mondaySettings.ClientAddressColumnId, c.ClientAddress);
+            TryAddStringColumn(columnValues, _mondaySettings.ClientTaxIdColumnId, c.ClientTaxId);
+            TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderNameColumnId, c.PolicyHolderName);
+            TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderIdColumnId, c.PolicyHolderId);
+            TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderAddressColumnId, c.PolicyHolderAddress);
+            TryAddPhoneColumn(columnValues, _mondaySettings.PolicyHolderPhoneColumnId, c.PolicyHolderPhone, c.TikCounter, "Policy holder phone");
+            TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderEmailColumnId, c.PolicyHolderEmail);
+            TryAddStringColumn(columnValues, _mondaySettings.MainCarNumberColumnId, c.MainCarNumber);
+            TryAddStringColumn(columnValues, _mondaySettings.DriverNameColumnId, c.DriverName);
+            TryAddStringColumn(columnValues, _mondaySettings.DriverIdColumnId, c.DriverId);
+            TryAddPhoneColumn(columnValues, _mondaySettings.DriverPhoneColumnId, c.DriverPhone, c.TikCounter, "Driver phone");
+            TryAddStringColumn(columnValues, _mondaySettings.WitnessNameColumnId, c.WitnessName);
+            TryAddStringColumn(columnValues, _mondaySettings.AdditionalDefendantsColumnId, c.AdditionalDefendants);
+            TryAddStringColumn(columnValues, _mondaySettings.PlaintiffNameColumnId, c.PlaintiffName);
+            TryAddStringColumn(columnValues, _mondaySettings.PlaintiffIdColumnId, c.PlaintiffId);
+            TryAddStringColumn(columnValues, _mondaySettings.PlaintiffAddressColumnId, c.PlaintiffAddress);
+            TryAddPhoneColumn(columnValues, _mondaySettings.PlaintiffPhoneColumnId, c.PlaintiffPhone, c.TikCounter, "Plaintiff phone");
+            TryAddStringColumn(columnValues, _mondaySettings.PlaintiffEmailColumnId, c.PlaintiffEmail);
+            TryAddStringColumn(columnValues, _mondaySettings.DefendantNameColumnId, c.DefendantName);
+            TryAddStringColumn(columnValues, _mondaySettings.DefendantFaxColumnId, c.DefendantFax);
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyDriverNameColumnId, c.ThirdPartyDriverName);
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyDriverIdColumnId, c.ThirdPartyDriverId);
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyCarNumberColumnId, c.ThirdPartyCarNumber);
+            TryAddPhoneColumn(columnValues, _mondaySettings.ThirdPartyPhoneColumnId, c.ThirdPartyPhone, c.TikCounter, "Third-party phone");
+            // TODO: Verify that insurer names exist as labels on the Monday board before relying on this mapping.
+            TryAddStatusLabelColumn(columnValues, _mondaySettings.ThirdPartyInsurerStatusColumnId, c.ThirdPartyInsurerName);
+            TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompanyIdColumnId, c.InsuranceCompanyId);
+            TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompanyAddressColumnId, c.InsuranceCompanyAddress);
+            TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompanyEmailColumnId, c.InsuranceCompanyEmail);
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyEmployerNameColumnId, c.ThirdPartyEmployerName);
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyEmployerIdColumnId, c.ThirdPartyEmployerId);
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyEmployerAddressColumnId, c.ThirdPartyEmployerAddress);
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerNameColumnId, c.ThirdPartyLawyerName);
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerAddressColumnId, c.ThirdPartyLawyerAddress);
+            TryAddPhoneColumn(columnValues, _mondaySettings.ThirdPartyLawyerPhoneColumnId, c.ThirdPartyLawyerPhone, c.TikCounter, "Third-party lawyer phone");
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerEmailColumnId, c.ThirdPartyLawyerEmail);
+            // TODO: Ensure court labels on Monday match Odcanit court names.
+            TryAddStatusLabelColumn(columnValues, _mondaySettings.CourtNameStatusColumnId, c.CourtName);
+            TryAddStringColumn(columnValues, _mondaySettings.CourtCityColumnId, c.CourtCity);
+            TryAddStringColumn(columnValues, _mondaySettings.CourtCaseNumberColumnId, c.CourtCaseNumber);
+            TryAddStringColumn(columnValues, _mondaySettings.JudgeNameColumnId, c.JudgeName);
+            TryAddStringColumn(columnValues, _mondaySettings.AttorneyNameColumnId, c.AttorneyName);
+            TryAddStringColumn(columnValues, _mondaySettings.DefenseStreetColumnId, c.DefenseStreet);
+            TryAddStringColumn(columnValues, _mondaySettings.ClaimStreetColumnId, c.ClaimStreet);
+            TryAddStringColumn(columnValues, _mondaySettings.CaseFolderIdColumnId, c.CaseFolderId);
+            // TODO: Align Odcanit stage/result values with Monday status labels.
+            TryAddStatusLabelColumn(columnValues, _mondaySettings.ResultStatusColumnId, c.StageName ?? c.StatusName);
+
+            var statusColumnId = NormalizeColumnId(_mondaySettings.CaseStatusColumnId);
+            if (!string.IsNullOrWhiteSpace(statusColumnId))
             {
-                if (!string.IsNullOrWhiteSpace(c.ClientPhone))
+                if (forceNotStartedStatus)
                 {
-                    columnValues[phoneColumnId] = new { phone = c.ClientPhone, countryShortName = "IL" };
-                    _logger.LogDebug("Including phone for TikCounter {TikCounter} on column {ColumnId}", c.TikCounter, phoneColumnId);
+                    columnValues[statusColumnId] = new { label = "חדש" };
                 }
                 else
                 {
-                    _logger.LogDebug("No phone available for TikCounter {TikCounter}; column {ColumnId} left empty", c.TikCounter, phoneColumnId);
+                    var statusIndex = MapStatusIndex(c.StatusName);
+                    columnValues[statusColumnId] = new { index = statusIndex };
                 }
-            }
-
-            var emailColumnId = ResolveClientEmailColumnId();
-            if (!string.IsNullOrWhiteSpace(emailColumnId))
-            {
-                if (!string.IsNullOrWhiteSpace(c.ClientEmail))
-                {
-                    columnValues[emailColumnId] = c.ClientEmail;
-                    _logger.LogDebug("Including email for TikCounter {TikCounter} on column {ColumnId}", c.TikCounter, emailColumnId);
-                }
-                else
-                {
-                    _logger.LogDebug("No email available for TikCounter {TikCounter}; column {ColumnId} left empty", c.TikCounter, emailColumnId);
-                }
-            }
-
-            // Case open date (tsCreateDate) → date4 ("תאריך פתיחת תיק")
-            columnValues["date4"] = new { date = c.tsCreateDate.ToString("yyyy-MM-dd") };
-
-            // Event date → date_mkwj3780 ("תאריך אירוע")
-            if (c.EventDate.HasValue)
-            {
-                columnValues["date_mkwj3780"] = new { date = c.EventDate.Value.ToString("yyyy-MM-dd") };
-            }
-
-            // Claim amount → numeric_mkxw7s29 ("הסעד המבוקש ( סכום תביעה)")
-            if (c.ClaimAmount.HasValue)
-            {
-                columnValues["numeric_mkxw7s29"] = c.ClaimAmount.Value.ToString();
-            }
-
-            // Notes → long_text_mkwe5h8v ("הערות")
-            if (!string.IsNullOrWhiteSpace(c.Notes))
-            {
-                columnValues["long_text_mkwe5h8v"] = c.Notes;
-            }
-
-            // Status → color_mkwefnbx ("סטטוס תיק")
-            if (forceNotStartedStatus)
-            {
-                // For new items, set to "חדש" (not started)
-                // Using label "חדש" - if this doesn't work, we may need to use index instead
-                columnValues["color_mkwefnbx"] = new { label = "חדש" };
-            }
-            else
-            {
-                // For updates, map the status from Odcanit
-                var statusIndex = MapStatusIndex(c.StatusName);
-                columnValues["color_mkwefnbx"] = new { index = statusIndex };
             }
 
             return JsonSerializer.Serialize(columnValues);
+        }
+
+        private static void TryAddStringColumn(Dictionary<string, object> columnValues, string? columnId, string? value)
+        {
+            var normalized = NormalizeColumnId(columnId);
+            if (string.IsNullOrWhiteSpace(normalized) || string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+
+            columnValues[normalized] = value;
+        }
+
+        private static void TryAddDateColumn(Dictionary<string, object> columnValues, string? columnId, DateTime value)
+        {
+            TryAddDateColumn(columnValues, columnId, (DateTime?)value);
+        }
+
+        private static void TryAddDateColumn(Dictionary<string, object> columnValues, string? columnId, DateTime? value)
+        {
+            var normalized = NormalizeColumnId(columnId);
+            if (string.IsNullOrWhiteSpace(normalized) || value is null)
+            {
+                return;
+            }
+
+            columnValues[normalized] = new { date = value.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) };
+        }
+
+        private static void TryAddDecimalColumn(Dictionary<string, object> columnValues, string? columnId, decimal? value)
+        {
+            var normalized = NormalizeColumnId(columnId);
+            if (string.IsNullOrWhiteSpace(normalized) || value is null)
+            {
+                return;
+            }
+
+            columnValues[normalized] = value.Value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private void TryAddPhoneColumn(Dictionary<string, object> columnValues, string? columnId, string? phoneNumber, int tikCounter, string context)
+        {
+            var normalized = NormalizeColumnId(columnId);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(phoneNumber))
+            {
+                _logger.LogDebug("No {Context} for TikCounter {TikCounter}; column {ColumnId} left empty", context, tikCounter, normalized);
+                return;
+            }
+
+            columnValues[normalized] = new { phone = phoneNumber, countryShortName = "IL" };
+            _logger.LogDebug("Including {Context} for TikCounter {TikCounter} on column {ColumnId}", context, tikCounter, normalized);
+        }
+
+        private static void TryAddHourColumn(Dictionary<string, object> columnValues, string? columnId, TimeSpan? value)
+        {
+            var normalized = NormalizeColumnId(columnId);
+            if (string.IsNullOrWhiteSpace(normalized) || value is null)
+            {
+                return;
+            }
+
+            columnValues[normalized] = value.Value.ToString(@"hh\:mm", CultureInfo.InvariantCulture);
+        }
+
+        private static void TryAddStatusLabelColumn(Dictionary<string, object> columnValues, string? columnId, string? label)
+        {
+            var normalized = NormalizeColumnId(columnId);
+            if (string.IsNullOrWhiteSpace(normalized) || string.IsNullOrWhiteSpace(label))
+            {
+                return;
+            }
+
+            columnValues[normalized] = new { label };
         }
 
         private string ResolveClientPhoneColumnId()
@@ -468,6 +546,17 @@ namespace Odmon.Worker.Services
             return string.IsNullOrWhiteSpace(_mondaySettings.ClientEmailColumnId)
                 ? DefaultClientEmailColumnId
                 : _mondaySettings.ClientEmailColumnId!;
+        }
+
+        private static string? NormalizeColumnId(string? columnId)
+        {
+            if (string.IsNullOrWhiteSpace(columnId))
+            {
+                return null;
+            }
+
+            var parts = columnId.Split('_', 2, StringSplitOptions.RemoveEmptyEntries);
+            return parts.Length > 0 ? parts[0] : columnId;
         }
 
         private static bool IsMappingTestCompatible(MondayItemMapping mapping)

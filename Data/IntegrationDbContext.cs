@@ -49,7 +49,7 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.ClientPhone);
                 b.Property(x => x.ClientEmail);
                 b.Property(x => x.EventDate);
-                b.Property(x => x.ClaimAmount);
+                b.Property(x => x.RequestedClaimAmount);
             });
 
             base.OnModelCreating(modelBuilder);

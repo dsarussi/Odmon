@@ -6,6 +6,7 @@ namespace Odmon.Worker.Models
         public string VisualID { get; set; } = string.Empty;
         public string? Mobile { get; set; }
         public string? Email { get; set; }
+        public string? FullAddress { get; set; }
     }
 }
 
