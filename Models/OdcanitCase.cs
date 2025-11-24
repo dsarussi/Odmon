@@ -20,7 +20,9 @@ namespace Odmon.Worker.Models
         public string? ClientPhone { get; set; }
         [NotMapped]
         public string? ClientEmail { get; set; }
+        [NotMapped]
         public DateTime? EventDate { get; set; }
+        [NotMapped]
         public decimal? ClaimAmount { get; set; }
     }
 }
