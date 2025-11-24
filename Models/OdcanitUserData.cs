@@ -11,7 +11,7 @@ namespace Odmon.Worker.Models
         public DateTime? dateData { get; set; }
         public double? numData { get; set; }
         public string? Data { get; set; }
-        public int? RowNum { get; set; }
+        public long RowNum { get; set; }
     }
 }
 
