@@ -61,7 +61,7 @@ namespace Odmon.Worker.Services
             var safetySection = _config.GetSection("Safety");
             var testMode = safetySection.GetValue<bool>("TestMode", false);
             var testBoardId = safetySection.GetValue<long>("TestBoardId", 0);
-            var testGroupId = safetySection["TestGroupId"];
+            var testGroupId = _mondaySettings.TestGroupId;
 
             var casesBoardId = _mondaySettings.CasesBoardId;
             var defaultGroupId = _mondaySettings.ToDoGroupId;

@@ -6,6 +6,7 @@ namespace Odmon.Worker.Monday
         public long BoardId { get; set; }
         public long CasesBoardId { get; set; }
         public string? ToDoGroupId { get; set; }
+        public string? TestGroupId { get; set; }
         public string? ClientPhoneColumnId { get; set; } = "phone_mkwe10tx";
         public string? ClientEmailColumnId { get; set; } = "email_mkwefwgy";
     }
