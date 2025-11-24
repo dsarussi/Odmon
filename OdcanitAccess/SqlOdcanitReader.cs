@@ -110,10 +110,15 @@ namespace Odmon.Worker.OdcanitAccess
         {
             _logger.LogDebug("Enriching cases with sides from vwSides.");
 
-            var sides = await _db.Sides
+            var tikCounterSet = new HashSet<int>(tikCounters);
+
+            var sidesFromDb = await _db.Sides
                 .AsNoTracking()
-                .Where(s => tikCounters.Contains(s.TikCounter))
                 .ToListAsync(ct);
+
+            var sides = sidesFromDb
+                .Where(s => tikCounterSet.Contains(s.TikCounter))
+                .ToList();
 
             var sidesByCase = sides
                 .GroupBy(s => s.TikCounter)
@@ -155,10 +160,15 @@ namespace Odmon.Worker.OdcanitAccess
         {
             _logger.LogDebug("Enriching cases with diary events.");
 
-            var diaryEvents = await _db.DiaryEvents
+            var tikCounterSet = new HashSet<int>(tikCounters);
+
+            var diaryEventsFromDb = await _db.DiaryEvents
                 .AsNoTracking()
-                .Where(d => tikCounters.Contains(d.TikCounter))
                 .ToListAsync(ct);
+
+            var diaryEvents = diaryEventsFromDb
+                .Where(d => tikCounterSet.Contains(d.TikCounter))
+                .ToList();
 
             var diaryByCase = diaryEvents
                 .GroupBy(d => d.TikCounter)
@@ -201,10 +211,16 @@ namespace Odmon.Worker.OdcanitAccess
         {
             _logger.LogDebug("Enriching cases with Dor screen user data.");
 
-            var userDataRows = await _db.UserData
+            var tikCounterSet = new HashSet<int>(tikCounters);
+
+            var userDataRowsFromDb = await _db.UserData
                 .AsNoTracking()
-                .Where(u => tikCounters.Contains(u.TikCounter) && u.PageName == DorScreenPageName)
+                .Where(u => u.PageName == DorScreenPageName)
                 .ToListAsync(ct);
+
+            var userDataRows = userDataRowsFromDb
+                .Where(u => tikCounterSet.Contains(u.TikCounter))
+                .ToList();
 
             var userDataByCase = userDataRows
                 .GroupBy(u => u.TikCounter)
