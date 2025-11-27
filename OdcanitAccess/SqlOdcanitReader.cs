@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Odmon.Worker.Models;
 
@@ -14,14 +15,17 @@ namespace Odmon.Worker.OdcanitAccess
     {
         private readonly OdcanitDbContext _db;
         private readonly ILogger<SqlOdcanitReader> _logger;
+        private readonly bool _isTestMode;
         private const string DorScreenPageName = "פרטי תיק נזיקין מליגל";
         private static readonly StringComparer HebrewComparer = StringComparer.Ordinal;
         private static readonly Dictionary<string, Action<OdcanitCase, OdcanitUserData>> UserDataFieldHandlers = BuildUserDataFieldHandlers();
 
-        public SqlOdcanitReader(OdcanitDbContext db, ILogger<SqlOdcanitReader> logger)
+        public SqlOdcanitReader(OdcanitDbContext db, ILogger<SqlOdcanitReader> logger, IConfiguration configuration)
         {
             _db = db;
             _logger = logger;
+            var safetySection = configuration.GetSection("Safety");
+            _isTestMode = safetySection.GetValue<bool>("TestMode", false);
         }
 
         public async Task<List<OdcanitCase>> GetCasesCreatedOnDateAsync(DateTime date, CancellationToken ct)
@@ -29,9 +33,19 @@ namespace Odmon.Worker.OdcanitAccess
             var startDate = date.Date;
             var endDate = startDate.AddDays(1);
 
-            var cases = await _db.Cases
-                .AsNoTracking()
-                .Where(c => c.tsCreateDate >= startDate && c.tsCreateDate < endDate)
+            var casesQuery = _db.Cases
+                .AsNoTracking();
+
+            if (_isTestMode)
+            {
+                casesQuery = casesQuery.Where(c => c.TikNumber == "9/1329");
+            }
+            else
+            {
+                casesQuery = casesQuery.Where(c => c.tsCreateDate >= startDate && c.tsCreateDate < endDate);
+            }
+
+            var cases = await casesQuery
                 .OrderBy(c => c.tsCreateDate)
                 .ToListAsync(ct);
 
@@ -50,10 +64,6 @@ namespace Odmon.Worker.OdcanitAccess
             await EnrichWithSidesAsync(cases, tikCounters, ct);
             await EnrichWithDiaryEventsAsync(cases, tikCounters, ct);
             await EnrichWithUserDataAsync(cases, tikCounters, ct);
-
-            cases = cases
-                .Where(c => string.Equals(c.TikNumber, "9/1329", StringComparison.OrdinalIgnoreCase))
-                .ToList();
 
             LogCaseEnrichment(cases);
 
