@@ -576,8 +576,7 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            var normalized = phoneNumber.Trim();
-            var payload = BuildPhoneColumnValue(normalized);
+            var payload = BuildPhoneColumnValue(phoneNumber);
             if (payload is null)
             {
                 _logger.LogDebug("No {Context} for TikCounter {TikCounter}; column {ColumnId} left empty after normalization", context, tikCounter, columnId);
@@ -585,21 +584,47 @@ namespace Odmon.Worker.Services
             }
 
             columnValues[columnId] = payload;
-            _logger.LogDebug("Including {Context} for TikCounter {TikCounter} on column {ColumnId} with phone={Phone}, countryShortName=IL", context, tikCounter, columnId, normalized);
+            _logger.LogDebug("Including {Context} for TikCounter {TikCounter} on column {ColumnId} with phone={Phone}, countryShortName=IL", context, tikCounter, columnId, payload.phone);
         }
 
-        private static object? BuildPhoneColumnValue(string? phoneNumber)
+        private static PhoneColumnValue? BuildPhoneColumnValue(string? phoneNumber)
         {
             if (string.IsNullOrWhiteSpace(phoneNumber))
             {
                 return null;
             }
 
-            return new
+            var digits = new string(phoneNumber.Where(char.IsDigit).ToArray());
+            if (string.IsNullOrEmpty(digits))
             {
-                phone = phoneNumber.Trim(),
+                return null;
+            }
+
+            string normalized;
+            if (digits.StartsWith("0") && digits.Length > 1)
+            {
+                normalized = "+972" + digits.Substring(1);
+            }
+            else if (digits.StartsWith("972"))
+            {
+                normalized = "+" + digits;
+            }
+            else
+            {
+                normalized = "+" + digits;
+            }
+
+            return new PhoneColumnValue
+            {
+                phone = normalized,
                 countryShortName = "IL"
             };
+        }
+
+        private sealed class PhoneColumnValue
+        {
+            public string phone { get; set; } = string.Empty;
+            public string countryShortName { get; set; } = "IL";
         }
 
         private static void TryAddHourColumn(Dictionary<string, object> columnValues, string? columnId, TimeSpan? value)
