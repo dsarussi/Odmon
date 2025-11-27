@@ -433,12 +433,12 @@ namespace Odmon.Worker.Services
             TryAddDropdownColumn(columnValues, _mondaySettings.ClientNumberColumnId, c.ClientVisualID);
             TryAddStringColumn(columnValues, _mondaySettings.ClaimNumberColumnId, c.HozlapTikNumber);
 
-            var primaryPhone = !string.IsNullOrWhiteSpace(c.PolicyHolderPhone)
-                ? c.PolicyHolderPhone
-                : !string.IsNullOrWhiteSpace(c.DriverPhone)
-                    ? c.DriverPhone
-                    : c.ClientPhone;
-            TryAddPhoneColumn(columnValues, ResolveClientPhoneColumnId(), primaryPhone, c.TikCounter, "Primary phone");
+            var normalizedPolicyHolderPhone = string.IsNullOrWhiteSpace(c.PolicyHolderPhone)
+                ? null
+                : c.PolicyHolderPhone.Trim();
+
+            var mainPhoneColumnId = ResolveClientPhoneColumnId();
+            TryAddPhoneColumn(columnValues, mainPhoneColumnId, normalizedPolicyHolderPhone, c.TikCounter, "Policy holder phone (טלפון column)");
             TryAddStringColumn(columnValues, ResolveClientEmailColumnId(), c.ClientEmail);
 
             TryAddDateColumn(columnValues, _mondaySettings.CaseOpenDateColumnId, c.tsCreateDate);
@@ -457,7 +457,7 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderNameColumnId, c.PolicyHolderName);
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderIdColumnId, c.PolicyHolderId);
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderAddressColumnId, c.PolicyHolderAddress);
-            TryAddPhoneColumn(columnValues, _mondaySettings.PolicyHolderPhoneColumnId, c.PolicyHolderPhone, c.TikCounter, "Policy holder phone");
+            TryAddPhoneColumn(columnValues, _mondaySettings.PolicyHolderPhoneColumnId, normalizedPolicyHolderPhone, c.TikCounter, "Policy holder phone");
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderEmailColumnId, c.PolicyHolderEmail);
             TryAddStringColumn(columnValues, _mondaySettings.MainCarNumberColumnId, c.MainCarNumber);
             TryAddStringColumn(columnValues, _mondaySettings.DriverNameColumnId, c.DriverName);
@@ -512,6 +512,15 @@ namespace Odmon.Worker.Services
                     var statusIndex = MapStatusIndex(c.StatusName);
                     columnValues[statusColumnId] = new { index = statusIndex };
                 }
+            }
+
+            if (columnValues.TryGetValue(mainPhoneColumnId, out var phoneColumnValue))
+            {
+                _logger.LogDebug("Policy holder phone payload for TikCounter {TikCounter}: column {ColumnId} value={Value}", c.TikCounter, mainPhoneColumnId, phoneColumnValue ?? "<null>");
+            }
+            else
+            {
+                _logger.LogDebug("Policy holder phone payload for TikCounter {TikCounter}: column {ColumnId} left empty", c.TikCounter, mainPhoneColumnId);
             }
 
             var payloadJson = JsonSerializer.Serialize(columnValues);
