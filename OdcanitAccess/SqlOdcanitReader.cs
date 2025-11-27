@@ -50,6 +50,11 @@ namespace Odmon.Worker.OdcanitAccess
             await EnrichWithSidesAsync(cases, tikCounters, ct);
             await EnrichWithDiaryEventsAsync(cases, tikCounters, ct);
             await EnrichWithUserDataAsync(cases, tikCounters, ct);
+
+            cases = cases
+                .Where(c => string.Equals(c.TikNumber, "9/1329", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
             LogCaseEnrichment(cases);
 
             return cases;

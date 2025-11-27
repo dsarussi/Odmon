@@ -370,13 +370,24 @@ namespace Odmon.Worker.Services
             var tikNumber = (c.TikNumber ?? string.Empty).Trim();
             var clientName = (c.ClientName ?? string.Empty).Trim();
             var tikName = (c.TikName ?? string.Empty).Trim();
+            var policyHolderName = (c.PolicyHolderName ?? string.Empty).Trim();
             var referenceNumber = !string.IsNullOrEmpty(tikNumber)
                 ? tikNumber
                 : c.TikCounter.ToString(CultureInfo.InvariantCulture);
 
+            if (!string.IsNullOrEmpty(clientName) && !string.IsNullOrEmpty(policyHolderName))
+            {
+                return $"{clientName} - שם בעל פוליסה: {policyHolderName} ({referenceNumber})";
+            }
+
             if (!string.IsNullOrEmpty(clientName))
             {
                 return $"{clientName} ({referenceNumber})";
+            }
+
+            if (!string.IsNullOrEmpty(policyHolderName))
+            {
+                return $"{policyHolderName} ({referenceNumber})";
             }
 
             if (!string.IsNullOrEmpty(tikName))
@@ -395,7 +406,12 @@ namespace Odmon.Worker.Services
             TryAddDropdownColumn(columnValues, _mondaySettings.ClientNumberColumnId, c.ClientVisualID);
             TryAddStringColumn(columnValues, _mondaySettings.ClaimNumberColumnId, c.HozlapTikNumber);
 
-            TryAddPhoneColumn(columnValues, ResolveClientPhoneColumnId(), c.ClientPhone, c.TikCounter, "Client phone");
+            var primaryPhone = !string.IsNullOrWhiteSpace(c.PolicyHolderPhone)
+                ? c.PolicyHolderPhone
+                : !string.IsNullOrWhiteSpace(c.DriverPhone)
+                    ? c.DriverPhone
+                    : c.ClientPhone;
+            TryAddPhoneColumn(columnValues, ResolveClientPhoneColumnId(), primaryPhone, c.TikCounter, "Primary phone");
             TryAddStringColumn(columnValues, ResolveClientEmailColumnId(), c.ClientEmail);
 
             TryAddDateColumn(columnValues, _mondaySettings.CaseOpenDateColumnId, c.tsCreateDate);
