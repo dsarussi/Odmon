@@ -577,8 +577,29 @@ namespace Odmon.Worker.Services
             }
 
             var normalized = phoneNumber.Trim();
-            columnValues[columnId] = normalized;
-            _logger.LogDebug("Including {Context} for TikCounter {TikCounter} on column {ColumnId} with value {Phone}", context, tikCounter, columnId, normalized);
+            var payload = BuildPhoneColumnValue(normalized);
+            if (payload is null)
+            {
+                _logger.LogDebug("No {Context} for TikCounter {TikCounter}; column {ColumnId} left empty after normalization", context, tikCounter, columnId);
+                return;
+            }
+
+            columnValues[columnId] = payload;
+            _logger.LogDebug("Including {Context} for TikCounter {TikCounter} on column {ColumnId} with phone={Phone}, countryShortName=IL", context, tikCounter, columnId, normalized);
+        }
+
+        private static object? BuildPhoneColumnValue(string? phoneNumber)
+        {
+            if (string.IsNullOrWhiteSpace(phoneNumber))
+            {
+                return null;
+            }
+
+            return new
+            {
+                phone = phoneNumber.Trim(),
+                countryShortName = "IL"
+            };
         }
 
         private static void TryAddHourColumn(Dictionary<string, object> columnValues, string? columnId, TimeSpan? value)
