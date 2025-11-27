@@ -1,3 +1,5 @@
+using System;
+
 namespace Odmon.Worker.Models
 {
     public class MondayItemMapping
@@ -9,6 +11,7 @@ namespace Odmon.Worker.Models
         public DateTime? LastSyncFromMondayUtc { get; set; }
         public string? OdcanitVersion { get; set; }
         public string? MondayChecksum { get; set; }
+        public bool IsTest { get; set; }
     }
 }
 

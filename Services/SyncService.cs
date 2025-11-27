@@ -98,7 +98,7 @@ namespace Odmon.Worker.Services
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
             int created = 0, updated = 0;
-            int skippedNonTest = 0, skippedExistingNonTest = 0, skippedNoChange = 0;
+            int skippedNonTest = 0, skippedExistingNonTest = 0, skippedNoChange = 0, skippedNonDemo = 0;
             int failed = 0;
 
             foreach (var c in batch)
@@ -128,20 +128,43 @@ namespace Odmon.Worker.Services
                 // Explicit override for the single test case (TikCounter == 31490)
                 bool isExplicitTestCase = c.TikCounter == 31490;
                 bool isSafeTestCase = _safetyPolicy.IsTestCase(c) || isExplicitTestCase;
-
-                if (!isInDemoWindow && !isSafeTestCase)
-                {
-                    action = "skipped_non_test";
-                    skippedNonTest++;
-
-                    processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, 0, wasNoChange, errorMessage));
-                    continue;
-                }
+                bool shouldEnforceSafety = !isInDemoWindow && !isSafeTestCase;
 
                 var mapping = await _integrationDb.MondayItemMappings
                     .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter, ct);
 
                 long mondayIdForLog = mapping?.MondayItemId ?? 0;
+
+                if (!testMode && shouldEnforceSafety)
+                {
+                    action = "skipped_non_demo";
+                    skippedNonDemo++;
+
+                    processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+                    continue;
+                }
+
+                if (testMode && shouldEnforceSafety)
+                {
+                    var hasMapping = mapping != null;
+                    var mappingIsTest = mapping?.IsTest ?? false;
+
+                    if (hasMapping && !mappingIsTest)
+                    {
+                        action = "skipped_non_test";
+                        skippedNonTest++;
+                        _logger.LogDebug(
+                            "Skipping non-test case in TestMode: TikCounter={TikCounter}, TikNumber={TikNumber}, testMode={TestMode}, hasMapping={HasMapping}, mappingIsTest={MappingIsTest}",
+                            c.TikCounter,
+                            c.TikNumber,
+                            testMode,
+                            hasMapping,
+                            mappingIsTest);
+
+                        processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+                        continue;
+                    }
+                }
 
                 if (mapping != null && testMode && !IsMappingTestCompatible(mapping))
                 {
@@ -170,7 +193,8 @@ namespace Odmon.Worker.Services
                                 MondayItemId = mondayIdForLog,
                                 LastSyncFromOdcanitUtc = DateTime.UtcNow,
                                 OdcanitVersion = odcanitVersion,
-                                MondayChecksum = itemName
+                                MondayChecksum = itemName,
+                                IsTest = testMode
                             };
                             _integrationDb.MondayItemMappings.Add(newMapping);
                         }
@@ -232,6 +256,7 @@ namespace Odmon.Worker.Services
                         {
                             mapping.LastSyncFromOdcanitUtc = DateTime.UtcNow;
                             mapping.MondayChecksum = itemName;
+                            mapping.IsTest = testMode;
                         }
 
                         updated++;
@@ -251,6 +276,7 @@ namespace Odmon.Worker.Services
                 Updated = updated,
                 SkippedNonTest = skippedNonTest,
                 SkippedExistingNonTestMapping = skippedExistingNonTest,
+                SkippedNonDemo = skippedNonDemo,
                 SkippedNoChange = skippedNoChange,
                 Failed = failed,
                 Processed = processed
@@ -261,19 +287,20 @@ namespace Odmon.Worker.Services
                 CreatedAtUtc = DateTime.UtcNow,
                 Source = "SyncService",
                 Level = "Info",
-                Message = $"Run {runId} summary: created={created}, updated={updated}, skipped_non_test={skippedNonTest}, skipped_existing_non_test_mapping={skippedExistingNonTest}, skipped_no_change={skippedNoChange}, failed={failed}, batch={batch.Count}",
+                Message = $"Run {runId} summary: created={created}, updated={updated}, skipped_non_test={skippedNonTest}, skipped_existing_non_test_mapping={skippedExistingNonTest}, skipped_non_demo={skippedNonDemo}, skipped_no_change={skippedNoChange}, failed={failed}, batch={batch.Count}",
                 Details = JsonSerializer.Serialize(runSummary)
             });
 
             await _integrationDb.SaveChangesAsync(ct);
 
             _logger.LogInformation(
-                "Run {RunId}: created={Created}, updated={Updated}, skipped_non_test={SkippedNonTest}, skipped_existing_non_test_mapping={SkippedExistingNonTest}, skipped_no_change={SkippedNoChange}, failed={Failed}, batch={Batch}",
+                "Run {RunId}: created={Created}, updated={Updated}, skipped_non_test={SkippedNonTest}, skipped_existing_non_test_mapping={SkippedExistingNonTest}, skipped_non_demo={SkippedNonDemo}, skipped_no_change={SkippedNoChange}, failed={Failed}, batch={Batch}",
                 runId,
                 created,
                 updated,
                 skippedNonTest,
                 skippedExistingNonTest,
+                skippedNonDemo,
                 skippedNoChange,
                 failed,
                 batch.Count);
