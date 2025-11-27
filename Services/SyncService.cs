@@ -567,11 +567,9 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            var phoneValue = new { phone = phoneNumber, countryShortName = "IL" };
-            var serialized = JsonSerializer.Serialize(phoneValue);
-
-            columnValues[columnId] = serialized;
-            _logger.LogDebug("Including {Context} for TikCounter {TikCounter} on column {ColumnId} with value {Phone}", context, tikCounter, columnId, phoneNumber);
+            var normalized = phoneNumber.Trim();
+            columnValues[columnId] = new { phone = normalized, countryShortName = "IL" };
+            _logger.LogDebug("Including {Context} for TikCounter {TikCounter} on column {ColumnId} with value {Phone}", context, tikCounter, columnId, normalized);
         }
 
         private static void TryAddHourColumn(Dictionary<string, object> columnValues, string? columnId, TimeSpan? value)
