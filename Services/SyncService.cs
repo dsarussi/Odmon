@@ -353,20 +353,38 @@ namespace Odmon.Worker.Services
 
         private static (string ItemName, bool PrefixApplied) BuildItemName(OdcanitCase c, bool testMode)
         {
+            var baseName = BuildBaseItemName(c);
+            var prefixApplied = false;
+
+            if (testMode && !baseName.StartsWith("[TEST] ", StringComparison.Ordinal))
+            {
+                baseName = $"[TEST] {baseName}";
+                prefixApplied = true;
+            }
+
+            return (baseName, prefixApplied);
+        }
+
+        private static string BuildBaseItemName(OdcanitCase c)
+        {
             var tikNumber = (c.TikNumber ?? string.Empty).Trim();
-            var baseName = tikNumber;
+            var clientName = (c.ClientName ?? string.Empty).Trim();
+            var tikName = (c.TikName ?? string.Empty).Trim();
+            var referenceNumber = !string.IsNullOrEmpty(tikNumber)
+                ? tikNumber
+                : c.TikCounter.ToString(CultureInfo.InvariantCulture);
 
-            if (!testMode)
+            if (!string.IsNullOrEmpty(clientName))
             {
-                return (baseName, false);
+                return $"{clientName} ({referenceNumber})";
             }
 
-            if (baseName.StartsWith("[TEST] ", StringComparison.Ordinal))
+            if (!string.IsNullOrEmpty(tikName))
             {
-                return (baseName, false);
+                return $"{tikName} ({referenceNumber})";
             }
 
-            return ($"[TEST] {baseName}", true);
+            return referenceNumber;
         }
 
         private string BuildColumnValuesJson(OdcanitCase c, bool forceNotStartedStatus = false)
