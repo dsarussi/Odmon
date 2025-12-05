@@ -410,7 +410,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("Court fee (I+II)", (c, row) => c.CourtFeeTotal = ExtractDecimal(row) ?? c.CourtFeeTotal);
             Add("מ.אגרה I", (c, row) => c.CourtFeePartOne = ExtractDecimal(row) ?? c.CourtFeePartOne);
             Add("שם עד", (c, row) => c.WitnessName = row.strData);
-            Add("סלולרי עד", (c, row) => c.DriverMobile = row.strData);
+            Add("סלולרי עד", (c, row) => c.DriverPhone = row.strData);
             Add("שם נהג", (c, row) => c.DriverName = row.strData);
             Add("Driver: name", (c, row) => c.DriverName = row.strData);
             Add("תעודת זהות נהג", (c, row) => c.DriverId = row.strData);
