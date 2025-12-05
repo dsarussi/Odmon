@@ -66,7 +66,6 @@ namespace Odmon.Worker.Monday
         public string? ClaimStreetColumnId { get; set; } = "text_mkxwzxcq";
         public string? ComplaintReceivedDateColumnId { get; set; } = "date_mkxeapah";
         public string? CaseFolderIdColumnId { get; set; } = "text_mkxe3vhk";
-        public string? ResultStatusColumnId { get; set; } = "color_mkwj7qp7";
         public string? TaskTypeStatusColumnId { get; set; } = "color_mkwyq310";
         public string? ResponsibleTextColumnId { get; set; } = "text_mkxz6j9y";
     }

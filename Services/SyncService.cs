@@ -61,6 +61,7 @@ namespace Odmon.Worker.Services
 
             var dryRun = _config.GetValue<bool>("Sync:DryRun", false);
             var maxItems = _config.GetValue<int>("Sync:MaxItemsPerRun", 50);
+            var useTodayOnly = _config.GetValue<bool>("Sync:UseTodayOnly", true);
 
             var safetySection = _config.GetSection("Safety");
             var testMode = safetySection.GetValue<bool>("TestMode", false);
@@ -90,13 +91,23 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            // DEMO: load cases created today directly from Odcanit.
+            // Load cases created today (or all cases if UseTodayOnly is false)
             var today = DateTime.Today;
             var tomorrow = today.AddDays(1);
 
-            var newOrUpdatedCases = await _odcanitReader.GetCasesCreatedOnDateAsync(today, ct);
-
-            _logger.LogInformation("DEMO: total cases from Odcanit for today: {Count}", newOrUpdatedCases.Count);
+            List<OdcanitCase> newOrUpdatedCases;
+            if (useTodayOnly)
+            {
+                newOrUpdatedCases = await _odcanitReader.GetCasesCreatedOnDateAsync(today, ct);
+                _logger.LogInformation("Loaded cases created today from Odcanit: {Count}", newOrUpdatedCases.Count);
+            }
+            else
+            {
+                // Fallback: load all cases (for future use if needed)
+                _logger.LogWarning("UseTodayOnly is disabled - loading all cases. This is not recommended for production.");
+                newOrUpdatedCases = await _odcanitReader.GetCasesCreatedOnDateAsync(DateTime.MinValue, ct);
+                _logger.LogInformation("Loaded all cases from Odcanit: {Count}", newOrUpdatedCases.Count);
+            }
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();

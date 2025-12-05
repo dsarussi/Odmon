@@ -30,18 +30,14 @@ namespace Odmon.Worker.OdcanitAccess
 
         public async Task<List<OdcanitCase>> GetCasesCreatedOnDateAsync(DateTime date, CancellationToken ct)
         {
-            var startDate = date.Date;
-            var endDate = startDate.AddDays(1);
-
             var casesQuery = _db.Cases
                 .AsNoTracking();
 
-            if (_isTestMode)
+            // Apply date filter unless date is DateTime.MinValue (which means "load all")
+            if (date != DateTime.MinValue)
             {
-                casesQuery = casesQuery.Where(c => c.TikNumber == "9/1329");
-            }
-            else
-            {
+                var startDate = date.Date;
+                var endDate = startDate.AddDays(1);
                 casesQuery = casesQuery.Where(c => c.tsCreateDate >= startDate && c.tsCreateDate < endDate);
             }
 
