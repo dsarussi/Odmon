@@ -21,6 +21,7 @@ namespace Odmon.Worker.Services
         private readonly IOdcanitReader _odcanitReader;
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
+        private readonly IMondayMetadataProvider _mondayMetadataProvider;
         private readonly IConfiguration _config;
         private readonly ILogger<SyncService> _logger;
         private readonly ITestSafetyPolicy _safetyPolicy;
@@ -30,6 +31,7 @@ namespace Odmon.Worker.Services
             IOdcanitReader odcanitReader,
             IntegrationDbContext integrationDb,
             IMondayClient mondayClient,
+            IMondayMetadataProvider mondayMetadataProvider,
             IConfiguration config,
             ILogger<SyncService> logger,
             ITestSafetyPolicy safetyPolicy,
@@ -38,6 +40,7 @@ namespace Odmon.Worker.Services
             _odcanitReader = odcanitReader;
             _integrationDb = integrationDb;
             _mondayClient = mondayClient;
+            _mondayMetadataProvider = mondayMetadataProvider;
             _config = config;
             _logger = logger;
             _safetyPolicy = safetyPolicy;
@@ -179,7 +182,7 @@ namespace Odmon.Worker.Services
 
                 if (mapping == null)
                 {
-                    var columnValuesJson = BuildColumnValuesJson(c, forceNotStartedStatus: true);
+                    var columnValuesJson = await BuildColumnValuesJsonAsync(caseBoardId, c, forceNotStartedStatus: true, ct);
                     action = dryRun ? "dry-create" : "created";
                     if (!dryRun)
                     {
@@ -212,7 +215,7 @@ namespace Odmon.Worker.Services
                 else
                 {
                     var requiresUpdate = mapping.OdcanitVersion != odcanitVersion;
-                    var columnValuesJson = BuildColumnValuesJson(c);
+                    var columnValuesJson = await BuildColumnValuesJsonAsync(caseBoardId, c, forceNotStartedStatus: false, ct);
                     var requiresNameUpdate = mapping.MondayChecksum != itemName;
                     mondayIdForLog = mapping.MondayItemId;
 
@@ -425,7 +428,7 @@ namespace Odmon.Worker.Services
             return referenceNumber;
         }
 
-        private string BuildColumnValuesJson(OdcanitCase c, bool forceNotStartedStatus = false)
+        private async Task<string> BuildColumnValuesJsonAsync(long boardId, OdcanitCase c, bool forceNotStartedStatus = false, CancellationToken ct = default)
         {
             var columnValues = new Dictionary<string, object>();
 
@@ -454,7 +457,10 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.NotesColumnId, c.Notes);
             TryAddStringColumn(columnValues, _mondaySettings.ClientAddressColumnId, c.ClientAddress);
             TryAddStringColumn(columnValues, _mondaySettings.ClientTaxIdColumnId, c.ClientTaxId);
-            TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderNameColumnId, c.PolicyHolderName);
+            
+            // Resolve policy holder name column ID dynamically by title
+            var policyHolderNameColumnId = await _mondayMetadataProvider.GetColumnIdByTitleAsync(boardId, "שם בעל פוליסה", ct);
+            TryAddStringColumn(columnValues, policyHolderNameColumnId, c.PolicyHolderName);
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderIdColumnId, c.PolicyHolderId);
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderAddressColumnId, c.PolicyHolderAddress);
             TryAddPhoneColumn(columnValues, _mondaySettings.PolicyHolderPhoneColumnId, normalizedPolicyHolderPhone, c.TikCounter, "Policy holder phone");

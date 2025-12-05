@@ -103,6 +103,11 @@ hostBuilder.ConfigureServices((context, services) =>
         client.BaseAddress = new Uri("https://api.monday.com/v2/");
     });
 
+    services.AddHttpClient<IMondayMetadataProvider, MondayMetadataProvider>(client =>
+    {
+        client.BaseAddress = new Uri("https://api.monday.com/v2/");
+    });
+
     services.AddScoped<SyncService>();
     services.AddHostedService<SyncWorker>();
 });
