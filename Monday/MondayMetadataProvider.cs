@@ -81,7 +81,7 @@ namespace Odmon.Worker.Monday
                 }
             }
 
-            var query = @"query ($boardIds: [Int]) {
+            var query = @"query ($boardIds: [ID!]) {
                 boards (ids: $boardIds) {
                     id
                     columns {
@@ -93,7 +93,7 @@ namespace Odmon.Worker.Monday
 
             var variables = new Dictionary<string, object>
             {
-                ["boardIds"] = new[] { (int)boardId }
+                ["boardIds"] = new[] { boardId.ToString() }
             };
 
             var payload = JsonSerializer.Serialize(new { query, variables });
