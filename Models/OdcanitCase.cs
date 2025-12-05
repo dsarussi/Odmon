@@ -36,8 +36,11 @@ namespace Odmon.Worker.Models
         public string? Notes { get; set; }
         public string? ClientVisualID { get; set; }
         public string? HozlapTikNumber { get; set; }
+        public string? Additional { get; set; }
         [NotMapped]
         public string? ClientPhone { get; set; }
+        [NotMapped]
+        public string? DriverMobile { get; set; }
         [NotMapped]
         public string? ClientEmail { get; set; }
         [NotMapped]

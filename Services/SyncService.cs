@@ -431,7 +431,7 @@ namespace Odmon.Worker.Services
 
             TryAddStringColumn(columnValues, _mondaySettings.CaseNumberColumnId, c.TikNumber);
             TryAddDropdownColumn(columnValues, _mondaySettings.ClientNumberColumnId, c.ClientVisualID);
-            TryAddStringColumn(columnValues, _mondaySettings.ClaimNumberColumnId, c.HozlapTikNumber);
+            TryAddStringColumn(columnValues, _mondaySettings.ClaimNumberColumnId, c.Additional ?? c.HozlapTikNumber);
 
             var normalizedPolicyHolderPhone = string.IsNullOrWhiteSpace(c.PolicyHolderPhone)
                 ? null

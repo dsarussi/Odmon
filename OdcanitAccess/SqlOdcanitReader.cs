@@ -64,6 +64,7 @@ namespace Odmon.Worker.OdcanitAccess
             await EnrichWithSidesAsync(cases, tikCounters, ct);
             await EnrichWithDiaryEventsAsync(cases, tikCounters, ct);
             await EnrichWithUserDataAsync(cases, tikCounters, ct);
+            await EnrichWithHozlapMainDataAsync(cases, tikCounters, ct);
 
             LogCaseEnrichment(cases);
 
@@ -245,10 +246,45 @@ namespace Odmon.Worker.OdcanitAccess
 
                 odcanitCase.CourtName = hearing.CourtName ?? hearing.CourtCodeName;
                 odcanitCase.CourtCity = hearing.City;
-                odcanitCase.CourtCaseNumber = hearing.IDInCourt ?? hearing.GlobCourtNum;
                 odcanitCase.JudgeName = hearing.JudgeName;
                 odcanitCase.HearingDate = hearing.StartDate;
                 odcanitCase.HearingTime = hearing.FromTime?.TimeOfDay ?? hearing.ToTime?.TimeOfDay;
+            }
+        }
+
+        private async Task EnrichWithHozlapMainDataAsync(List<OdcanitCase> cases, List<int> tikCounters, CancellationToken ct)
+        {
+            _logger.LogDebug("Enriching cases with Hozlap main data for court case numbers.");
+
+            var tikCounterSet = new HashSet<int>(tikCounters);
+
+            var hozlapDataFromDb = await _db.HozlapMainData
+                .AsNoTracking()
+                .Where(h => tikCounterSet.Contains(h.TikCounter))
+                .ToListAsync(ct);
+
+            _logger.LogDebug("Loaded {TotalHozlap} Hozlap main data rows.", hozlapDataFromDb.Count);
+
+            var hozlapByCase = hozlapDataFromDb
+                .GroupBy(h => h.TikCounter)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            foreach (var odcanitCase in cases)
+            {
+                if (!hozlapByCase.TryGetValue(odcanitCase.TikCounter, out var hozlapData))
+                {
+                    continue;
+                }
+
+                // Build court case number from clcCourtNum + CourtName
+                var courtCaseDisplay = string.IsNullOrWhiteSpace(hozlapData.clcCourtNum)
+                    ? hozlapData.CourtName
+                    : $"{hozlapData.clcCourtNum} {hozlapData.CourtName}";
+
+                if (!string.IsNullOrWhiteSpace(courtCaseDisplay))
+                {
+                    odcanitCase.CourtCaseNumber = courtCaseDisplay.Trim();
+                }
             }
         }
 
@@ -374,7 +410,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("Court fee (I+II)", (c, row) => c.CourtFeeTotal = ExtractDecimal(row) ?? c.CourtFeeTotal);
             Add("מ.אגרה I", (c, row) => c.CourtFeePartOne = ExtractDecimal(row) ?? c.CourtFeePartOne);
             Add("שם עד", (c, row) => c.WitnessName = row.strData);
-            Add("סלולרי עד", (c, row) => c.WitnessPhone = row.strData);
+            Add("סלולרי עד", (c, row) => c.DriverMobile = row.strData);
             Add("שם נהג", (c, row) => c.DriverName = row.strData);
             Add("Driver: name", (c, row) => c.DriverName = row.strData);
             Add("תעודת זהות נהג", (c, row) => c.DriverId = row.strData);
@@ -384,6 +420,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("שם בעל פוליסה", (c, row) => c.PolicyHolderName = row.strData);
             Add("Policy holder: name", (c, row) => c.PolicyHolderName = row.strData);
             Add("ת.ז. בעל פוליסה", (c, row) => c.PolicyHolderId = row.strData);
+            Add("תעודת זהות בעל פוליסה", (c, row) => c.PolicyHolderId = row.strData);
             Add("Policy holder: id", (c, row) => c.PolicyHolderId = row.strData);
             Add("כתובת בעל פוליסה", (c, row) => c.PolicyHolderAddress = row.strData);
             Add("Policy holder: address", (c, row) => c.PolicyHolderAddress = row.strData);
