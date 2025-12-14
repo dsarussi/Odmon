@@ -17,9 +17,18 @@ namespace Odmon.Worker.OdcanitAccess
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
-            modelBuilder.Entity<OdcanitCase>()
-                .ToView("vwExportToOuterSystems_Files")
-                .HasNoKey();
+            modelBuilder.Entity<OdcanitCase>(entity =>
+            {
+                entity.ToView("vwExportToOuterSystems_Files")
+                    .HasNoKey();
+
+                // Explicitly configure decimal precision for monetary values to avoid silent truncation
+                // Even though RequestedClaimAmount is [NotMapped] (populated from user data, not the view),
+                // EF Core still validates decimal properties during model building and requires explicit precision
+                // to prevent silent truncation warnings. Using decimal(18,2) which is standard for monetary values.
+                entity.Property(e => e.RequestedClaimAmount)
+                    .HasPrecision(18, 2);
+            });
 
             modelBuilder.Entity<OdcanitUser>()
                 .ToView("vwExportToOuterSystems_LoginUsers")

@@ -88,34 +88,47 @@ namespace Odmon.Worker.Monday
                 ["columnVals"] = columnValuesJson,
             };
 
-            var payload = JsonSerializer.Serialize(new { query, variables });
-            var content = new StringContent(payload, Encoding.UTF8, "application/json");
-
-            var resp = await _httpClient.PostAsync("", content, ct);
-            resp.EnsureSuccessStatusCode();
-            var body = await resp.Content.ReadAsStringAsync(ct);
-
-            using var doc = JsonDocument.Parse(body);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("errors", out var errors))
+            try
             {
-                throw new InvalidOperationException($"Monday.com API error: {errors}");
-            }
+                using var doc = await ExecuteGraphQLRequestAsync(query, variables, ct, "create_item", boardId, null, columnValuesJson);
+                var root = doc.RootElement;
 
-            if (!root.TryGetProperty("data", out var data) ||
-                !data.TryGetProperty("create_item", out var createItem) ||
-                !createItem.TryGetProperty("id", out var idElement))
+                if (!root.TryGetProperty("data", out var data) ||
+                    !data.TryGetProperty("create_item", out var createItem) ||
+                    !createItem.TryGetProperty("id", out var idElement))
+                {
+                    throw new MondayApiException(
+                        "Monday.com unexpected response: missing create_item.id in response",
+                        operation: "create_item",
+                        boardId: boardId,
+                        columnValuesSnippet: columnValuesJson);
+                }
+
+                var idString = idElement.GetString();
+                if (string.IsNullOrWhiteSpace(idString))
+                {
+                    throw new MondayApiException(
+                        "Monday.com API returned empty id",
+                        operation: "create_item",
+                        boardId: boardId,
+                        columnValuesSnippet: columnValuesJson);
+                }
+
+                return long.Parse(idString);
+            }
+            catch (MondayApiException)
             {
-                throw new InvalidOperationException($"Monday.com unexpected response: {body}");
+                throw;
             }
-
-            var idString = idElement.GetString();
-            if (string.IsNullOrWhiteSpace(idString))
+            catch (Exception ex) when (!(ex is MondayApiException))
             {
-                throw new InvalidOperationException($"Monday.com API returned empty id. Response: {body}");
+                throw new MondayApiException(
+                    $"Unexpected error during create_item: {ex.Message}",
+                    ex,
+                    operation: "create_item",
+                    boardId: boardId,
+                    columnValuesSnippet: columnValuesJson);
             }
-
-            return long.Parse(idString);
         }
 
         public async Task UpdateItemAsync(long boardId, long itemId, string columnValuesJson, CancellationToken ct)
@@ -126,32 +139,44 @@ namespace Odmon.Worker.Monday
                 }
             }";
 
+            var effectiveBoardId = boardId > 0 ? boardId : _boardId;
             var variables = new Dictionary<string, object>
             {
                 ["itemId"] = itemId.ToString(),
-                ["boardId"] = (boardId > 0 ? boardId : _boardId).ToString(),
+                ["boardId"] = effectiveBoardId.ToString(),
                 ["columnVals"] = columnValuesJson,
             };
 
-            var payload = JsonSerializer.Serialize(new { query, variables });
-            var content = new StringContent(payload, Encoding.UTF8, "application/json");
-
-            var resp = await _httpClient.PostAsync("", content, ct);
-            resp.EnsureSuccessStatusCode();
-            var body = await resp.Content.ReadAsStringAsync(ct);
-
-            using var doc = JsonDocument.Parse(body);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("errors", out var errors))
+            try
             {
-                throw new InvalidOperationException($"Monday.com API error: {errors}");
+                using var doc = await ExecuteGraphQLRequestAsync(query, variables, ct, "change_multiple_column_values", effectiveBoardId, itemId, columnValuesJson);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("data", out var data) ||
+                    !data.TryGetProperty("change_multiple_column_values", out var change) ||
+                    !change.TryGetProperty("id", out _))
+                {
+                    throw new MondayApiException(
+                        "Monday.com unexpected response: missing change_multiple_column_values.id in response",
+                        operation: "change_multiple_column_values",
+                        boardId: effectiveBoardId,
+                        itemId: itemId,
+                        columnValuesSnippet: columnValuesJson);
+                }
             }
-
-            if (!root.TryGetProperty("data", out var data) ||
-                !data.TryGetProperty("change_multiple_column_values", out var change) ||
-                !change.TryGetProperty("id", out _))
+            catch (MondayApiException)
             {
-                throw new InvalidOperationException($"Monday.com unexpected response: {body}");
+                throw;
+            }
+            catch (Exception ex) when (!(ex is MondayApiException))
+            {
+                throw new MondayApiException(
+                    $"Unexpected error during change_multiple_column_values: {ex.Message}",
+                    ex,
+                    operation: "change_multiple_column_values",
+                    boardId: effectiveBoardId,
+                    itemId: itemId,
+                    columnValuesSnippet: columnValuesJson);
             }
         }
 
@@ -164,33 +189,43 @@ namespace Odmon.Worker.Monday
                 }
             }";
 
+            var effectiveBoardId = boardId > 0 ? boardId : _boardId;
             var variables = new Dictionary<string, object>
             {
                 ["itemId"] = itemId.ToString(),
-                ["boardId"] = (boardId > 0 ? boardId : _boardId).ToString(),
+                ["boardId"] = effectiveBoardId.ToString(),
                 ["columnId"] = "name",
                 ["value"] = name,
             };
 
-            var payload = JsonSerializer.Serialize(new { query, variables });
-            var content = new StringContent(payload, Encoding.UTF8, "application/json");
-
-            var resp = await _httpClient.PostAsync("", content, ct);
-            resp.EnsureSuccessStatusCode();
-            var body = await resp.Content.ReadAsStringAsync(ct);
-
-            using var doc = JsonDocument.Parse(body);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("errors", out var errors))
+            try
             {
-                throw new InvalidOperationException($"Monday.com API error: {errors}");
+                using var doc = await ExecuteGraphQLRequestAsync(query, variables, ct, "change_simple_column_value", effectiveBoardId, itemId, null);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("data", out var data) ||
+                    !data.TryGetProperty("change_simple_column_value", out var change) ||
+                    !change.TryGetProperty("id", out _))
+                {
+                    throw new MondayApiException(
+                        "Monday.com unexpected response: missing change_simple_column_value.id in response",
+                        operation: "change_simple_column_value",
+                        boardId: effectiveBoardId,
+                        itemId: itemId);
+                }
             }
-
-            if (!root.TryGetProperty("data", out var data) ||
-                !data.TryGetProperty("change_simple_column_value", out var change) ||
-                !change.TryGetProperty("id", out _))
+            catch (MondayApiException)
             {
-                throw new InvalidOperationException($"Monday.com unexpected response: {body}");
+                throw;
+            }
+            catch (Exception ex) when (!(ex is MondayApiException))
+            {
+                throw new MondayApiException(
+                    $"Unexpected error during change_simple_column_value: {ex.Message}",
+                    ex,
+                    operation: "change_simple_column_value",
+                    boardId: effectiveBoardId,
+                    itemId: itemId);
             }
         }
 
@@ -215,20 +250,8 @@ namespace Odmon.Worker.Monday
                 ["columnValue"] = columnValue,
             };
 
-            var payload = JsonSerializer.Serialize(new { query, variables });
-            var content = new StringContent(payload, Encoding.UTF8, "application/json");
-
-            var resp = await _httpClient.PostAsync("", content, ct);
-            resp.EnsureSuccessStatusCode();
-            var body = await resp.Content.ReadAsStringAsync(ct);
-
-            using var doc = JsonDocument.Parse(body);
+            using var doc = await ExecuteGraphQLRequestAsync(query, variables, ct, "items_page_by_column_values", boardId, null, null);
             var root = doc.RootElement;
-
-            if (root.TryGetProperty("errors", out var errors))
-            {
-                throw new InvalidOperationException($"Monday.com API error: {errors}");
-            }
 
             if (!root.TryGetProperty("data", out var data) ||
                 !data.TryGetProperty("boards", out var boards) ||
@@ -239,7 +262,7 @@ namespace Odmon.Worker.Monday
             }
 
             var board = boards[0];
-            if (!board.TryGetProperty("items_page", out var itemsPage) ||
+            if (!board.TryGetProperty("items_page_by_column_values", out var itemsPage) ||
                 !itemsPage.TryGetProperty("items", out var items) ||
                 items.ValueKind != System.Text.Json.JsonValueKind.Array ||
                 items.GetArrayLength() == 0)
@@ -260,6 +283,132 @@ namespace Odmon.Worker.Monday
             }
 
             return long.Parse(idString);
+        }
+
+        private async Task<JsonDocument> ExecuteGraphQLRequestAsync(
+            string query,
+            Dictionary<string, object> variables,
+            CancellationToken ct,
+            string? operation = null,
+            long? boardId = null,
+            long? itemId = null,
+            string? columnValuesJson = null)
+        {
+            var payload = JsonSerializer.Serialize(new { query, variables });
+            var content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+            HttpResponseMessage resp;
+            string body;
+            try
+            {
+                resp = await _httpClient.PostAsync("", content, ct);
+                resp.EnsureSuccessStatusCode();
+                body = await resp.Content.ReadAsStringAsync(ct);
+            }
+            catch (HttpRequestException ex)
+            {
+                _logger.LogError(ex,
+                    "Monday.com HTTP request failed. Operation={Operation}, BoardId={BoardId}, ItemId={ItemId}",
+                    operation ?? "unknown", boardId, itemId);
+                throw new MondayApiException(
+                    $"Monday.com HTTP request failed: {ex.Message}",
+                    ex,
+                    operation: operation,
+                    boardId: boardId,
+                    itemId: itemId,
+                    columnValuesSnippet: columnValuesJson);
+            }
+
+            JsonDocument doc;
+            try
+            {
+                doc = JsonDocument.Parse(body);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogError(ex,
+                    "Monday.com API returned invalid JSON. Operation={Operation}, BoardId={BoardId}, ItemId={ItemId}, Response={Response}",
+                    operation ?? "unknown", boardId, itemId, body);
+                throw new MondayApiException(
+                    $"Monday.com API returned invalid JSON: {ex.Message}",
+                    ex,
+                    operation: operation,
+                    boardId: boardId,
+                    itemId: itemId,
+                    columnValuesSnippet: columnValuesJson);
+            }
+
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out var errors))
+            {
+                var errorJson = errors.ToString();
+                doc.Dispose();
+
+                // Try to extract a more readable error message
+                string errorMessage = ExtractErrorMessage(errors, errorJson);
+
+                _logger.LogError(
+                    "Monday.com GraphQL API error. Operation={Operation}, BoardId={BoardId}, ItemId={ItemId}, Errors={Errors}",
+                    operation ?? "unknown", boardId, itemId, errorJson);
+
+                throw new MondayApiException(
+                    $"Monday.com API error: {errorMessage}",
+                    rawErrorJson: errorJson,
+                    operation: operation,
+                    boardId: boardId,
+                    itemId: itemId,
+                    columnValuesSnippet: columnValuesJson);
+            }
+
+            return doc;
+        }
+
+        private static string ExtractErrorMessage(JsonElement errors, string fallbackJson)
+        {
+            try
+            {
+                if (errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() > 0)
+                {
+                    var firstError = errors[0];
+                    if (firstError.TryGetProperty("message", out var messageElement))
+                    {
+                        var message = messageElement.GetString();
+                        if (!string.IsNullOrWhiteSpace(message))
+                        {
+                            // Try to get column-specific error details
+                            if (firstError.TryGetProperty("extensions", out var extensions))
+                            {
+                                if (extensions.TryGetProperty("error_data", out var errorData))
+                                {
+                                    var details = new List<string> { message };
+                                    
+                                    if (errorData.TryGetProperty("column_id", out var columnId))
+                                        details.Add($"Column ID: {columnId.GetString()}");
+                                    
+                                    if (errorData.TryGetProperty("column_name", out var columnName))
+                                        details.Add($"Column: {columnName.GetString()}");
+                                    
+                                    if (errorData.TryGetProperty("column_type", out var columnType))
+                                        details.Add($"Type: {columnType.GetString()}");
+                                    
+                                    if (errorData.TryGetProperty("column_value", out var columnValue))
+                                        details.Add($"Value: {columnValue.GetString()}");
+                                    
+                                    return string.Join("; ", details);
+                                }
+                            }
+                            return message;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Fall through to return fallback
+            }
+
+            return fallbackJson;
         }
     }
 }

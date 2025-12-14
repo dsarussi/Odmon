@@ -135,7 +135,7 @@ namespace Odmon.Worker.Services
                 }
 
                 var (itemName, prefixApplied) = BuildItemName(c, testMode);
-                string action;
+                string action = "unknown";
                 bool wasNoChange = false;
                 string? errorMessage = null;
 
@@ -144,50 +144,9 @@ namespace Odmon.Worker.Services
                 bool isSafeTestCase = _safetyPolicy.IsTestCase(c) || isExplicitTestCase;
                 bool shouldEnforceSafety = !isInDemoWindow && !isSafeTestCase;
 
-                // First, try to find mapping by TikNumber (preferred) or TikCounter (fallback)
-                var mapping = await _integrationDb.MondayItemMappings
-                    .FirstOrDefaultAsync(m => 
-                        (!string.IsNullOrWhiteSpace(c.TikNumber) && m.TikNumber == c.TikNumber && m.BoardId == caseBoardId) ||
-                        (m.TikCounter == c.TikCounter), ct);
-
+                // Find or create mapping for this case
+                var mapping = await FindOrCreateMappingAsync(c, caseBoardId, itemName, testMode, dryRun, ct);
                 long mondayIdForLog = mapping?.MondayItemId ?? 0;
-
-                // If no mapping found by TikNumber, try to find existing item in Monday by TikNumber
-                if (mapping == null && !string.IsNullOrWhiteSpace(c.TikNumber) && !dryRun)
-                {
-                    try
-                    {
-                        var existingItemId = await _mondayClient.FindItemIdByColumnValueAsync(
-                            caseBoardId, 
-                            _mondaySettings.CaseNumberColumnId!, 
-                            c.TikNumber, 
-                            ct);
-                        
-                        if (existingItemId.HasValue)
-                        {
-                            // Found existing item in Monday - create mapping for it
-                            mapping = new MondayItemMapping
-                            {
-                                TikCounter = c.TikCounter,
-                                TikNumber = c.TikNumber,
-                                BoardId = caseBoardId,
-                                MondayItemId = existingItemId.Value,
-                                LastSyncFromOdcanitUtc = DateTime.UtcNow,
-                                OdcanitVersion = c.tsModifyDate.ToString("o"),
-                                MondayChecksum = itemName,
-                                IsTest = testMode
-                            };
-                            _integrationDb.MondayItemMappings.Add(mapping);
-                            await _integrationDb.SaveChangesAsync(ct);
-                            mondayIdForLog = existingItemId.Value;
-                            _logger.LogInformation("Found existing Monday item {ItemId} for TikNumber {TikNumber} via API lookup", existingItemId.Value, c.TikNumber);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to query Monday API for existing item with TikNumber {TikNumber}, will create new item", c.TikNumber);
-                    }
-                }
 
                 if (!testMode && shouldEnforceSafety)
                 {
@@ -229,104 +188,118 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
-                var odcanitVersion = c.tsModifyDate.ToString("o");
+                // Determine whether to create, update, or skip
+                var syncAction = DetermineSyncAction(mapping, c, caseBoardId, itemName);
+                mondayIdForLog = mapping?.MondayItemId ?? mondayIdForLog;
 
-                if (mapping == null)
+                switch (syncAction.Action)
                 {
-                    var columnValuesJson = await BuildColumnValuesJsonAsync(caseBoardId, c, forceNotStartedStatus: true, ct);
-                    action = dryRun ? "dry-create" : "created";
-                    if (!dryRun)
-                    {
-                        try
-                        {
-                            mondayIdForLog = await _mondayClient.CreateItemAsync(caseBoardId, caseGroupId!, itemName, columnValuesJson, ct);
-
-                            var newMapping = new MondayItemMapping
-                            {
-                                TikCounter = c.TikCounter,
-                                TikNumber = c.TikNumber,
-                                BoardId = caseBoardId,
-                                MondayItemId = mondayIdForLog,
-                                LastSyncFromOdcanitUtc = DateTime.UtcNow,
-                                OdcanitVersion = odcanitVersion,
-                                MondayChecksum = itemName,
-                                IsTest = testMode
-                            };
-                            _integrationDb.MondayItemMappings.Add(newMapping);
-                        }
-                        catch (Exception ex)
-                        {
-                            action = "failed_create";
-                            failed++;
-                            errorMessage = ex.Message;
-                            processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
-                            continue;
-                        }
-                    }
-                    created++;
-                }
-                else
-                {
-                    // Update mapping with TikNumber and BoardId if missing
-                    if (string.IsNullOrWhiteSpace(mapping.TikNumber) && !string.IsNullOrWhiteSpace(c.TikNumber))
-                    {
-                        mapping.TikNumber = c.TikNumber;
-                    }
-                    if (mapping.BoardId == 0)
-                    {
-                        mapping.BoardId = caseBoardId;
-                    }
-
-                    var requiresUpdate = mapping.OdcanitVersion != odcanitVersion;
-                    var columnValuesJson = await BuildColumnValuesJsonAsync(caseBoardId, c, forceNotStartedStatus: false, ct);
-                    var requiresNameUpdate = mapping.MondayChecksum != itemName;
-                    mondayIdForLog = mapping.MondayItemId;
-
-                    if (!requiresUpdate && !requiresNameUpdate)
-                    {
-                        action = "skipped_no_change";
-                        wasNoChange = true;
-                        skippedNoChange++;
-                    }
-                    else
-                    {
-                        action = dryRun ? "dry-update" : "updated";
+                    case "create":
+                        action = dryRun ? "dry-create" : "created";
+                        _logger.LogInformation(
+                            "Creating new Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, ItemName={ItemName}",
+                            c.TikNumber, c.TikCounter, caseBoardId, itemName);
                         if (!dryRun)
                         {
                             try
                             {
-                                // Update item name if it has changed
-                                if (requiresNameUpdate)
-                                {
-                                    await _mondayClient.UpdateItemNameAsync(caseBoardId, mapping.MondayItemId, itemName, ct);
-                                }
+                                mondayIdForLog = await CreateMondayItemAsync(c, caseBoardId, caseGroupId!, itemName, testMode, ct);
+                                created++;
+                                _logger.LogInformation(
+                                    "Successfully created Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
+                                    c.TikNumber, c.TikCounter, mondayIdForLog);
+                            }
+                            catch (Monday.MondayApiException mondayEx)
+                            {
+                                action = "failed_create";
+                                failed++;
+                                errorMessage = mondayEx.Message;
+                                
+                                // Log with full context from MondayApiException
+                                _logger.LogError(mondayEx,
+                                    "Monday API error during create_item: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, Operation={Operation}, ItemId={ItemId}, Error={Error}, ColumnValuesSnippet={ColumnValuesSnippet}",
+                                    c.TikNumber, c.TikCounter, caseBoardId, mondayEx.Operation ?? "create_item", mondayEx.ItemId, mondayEx.Message, mondayEx.ColumnValuesSnippet ?? "<none>");
+                                
+                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+                                continue;
+                            }
+                            catch (Exception ex)
+                            {
+                                action = "failed_create";
+                                failed++;
+                                errorMessage = ex.Message;
+                                
+                                _logger.LogError(ex,
+                                    "Unexpected error during create_item: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, Error={Error}",
+                                    c.TikNumber, c.TikCounter, caseBoardId, ex.Message);
+                                
+                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            created++;
+                        }
+                        break;
 
-                                // Update column values if data has changed
-                                if (requiresUpdate)
-                                {
-                                    await _mondayClient.UpdateItemAsync(caseBoardId, mapping.MondayItemId, columnValuesJson, ct);
-                                    mapping.OdcanitVersion = odcanitVersion;
-                                }
+                    case "update":
+                        action = dryRun ? "dry-update" : "updated";
+                        _logger.LogInformation(
+                            "Updating existing Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}",
+                            c.TikNumber, c.TikCounter, mapping!.MondayItemId, caseBoardId, syncAction.RequiresDataUpdate, syncAction.RequiresNameUpdate);
+                        if (!dryRun)
+                        {
+                            try
+                            {
+                                await UpdateMondayItemAsync(mapping!, c, caseBoardId, itemName, syncAction.RequiresNameUpdate, syncAction.RequiresDataUpdate, testMode, ct);
+                                updated++;
+                                _logger.LogInformation(
+                                    "Successfully updated Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
+                                    c.TikNumber, c.TikCounter, mapping.MondayItemId);
+                            }
+                            catch (Monday.MondayApiException mondayEx)
+                            {
+                                action = "failed_update";
+                                failed++;
+                                errorMessage = mondayEx.Message;
+                                
+                                // Log with full context from MondayApiException
+                                _logger.LogError(mondayEx,
+                                    "Monday API error during update: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, Operation={Operation}, Error={Error}, ColumnValuesSnippet={ColumnValuesSnippet}",
+                                    c.TikNumber, c.TikCounter, mapping.MondayItemId, caseBoardId, mondayEx.Operation ?? "change_multiple_column_values", mondayEx.Message, mondayEx.ColumnValuesSnippet ?? "<none>");
+                                
+                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+                                continue;
                             }
                             catch (Exception ex)
                             {
                                 action = "failed_update";
                                 failed++;
                                 errorMessage = ex.Message;
+                                
+                                _logger.LogError(ex,
+                                    "Unexpected error during update: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, Error={Error}",
+                                    c.TikNumber, c.TikCounter, mapping.MondayItemId, caseBoardId, ex.Message);
+                                
                                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
                                 continue;
                             }
                         }
-
-                        if (!dryRun)
+                        else
                         {
-                            mapping.LastSyncFromOdcanitUtc = DateTime.UtcNow;
-                            mapping.MondayChecksum = itemName;
-                            mapping.IsTest = testMode;
+                            updated++;
                         }
+                        break;
 
-                        updated++;
-                    }
+                    case "skip":
+                        action = "skipped_no_change";
+                        wasNoChange = true;
+                        skippedNoChange++;
+                        _logger.LogDebug(
+                            "Skipping item (no changes): TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
+                            c.TikNumber, c.TikCounter, mapping?.MondayItemId ?? 0);
+                        break;
                 }
 
                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
@@ -360,7 +333,7 @@ namespace Odmon.Worker.Services
             await _integrationDb.SaveChangesAsync(ct);
 
             _logger.LogInformation(
-                "Run {RunId}: created={Created}, updated={Updated}, skipped_non_test={SkippedNonTest}, skipped_existing_non_test_mapping={SkippedExistingNonTest}, skipped_non_demo={SkippedNonDemo}, skipped_no_change={SkippedNoChange}, failed={Failed}, batch={Batch}",
+                "Sync run {RunId} completed: created={Created}, updated={Updated}, skipped_non_test={SkippedNonTest}, skipped_existing_non_test_mapping={SkippedExistingNonTest}, skipped_non_demo={SkippedNonDemo}, skipped_no_change={SkippedNoChange}, failed={Failed}, total_processed={TotalProcessed}",
                 runId,
                 created,
                 updated,
@@ -370,6 +343,13 @@ namespace Odmon.Worker.Services
                 skippedNoChange,
                 failed,
                 batch.Count);
+            
+            if (failed > 0)
+            {
+                _logger.LogWarning(
+                    "Sync run {RunId} completed with {FailedCount} failure(s). Review error logs above for details.",
+                    runId, failed);
+            }
         }
 
         private object LogCase(
@@ -855,6 +835,319 @@ namespace Odmon.Worker.Services
         {
             // Not implemented yet; for two-way sync later.
             throw new NotImplementedException();
+        }
+
+        private async Task<MondayItemMapping?> FindOrCreateMappingAsync(
+            OdcanitCase c,
+            long boardId,
+            string itemName,
+            bool testMode,
+            bool dryRun,
+            CancellationToken ct)
+        {
+            MondayItemMapping? mapping = null;
+            string lookupMethod = "none";
+
+            // Priority 1: Find mapping by TikNumber + BoardId (preferred method)
+            if (!string.IsNullOrWhiteSpace(c.TikNumber))
+            {
+                mapping = await _integrationDb.MondayItemMappings
+                    .FirstOrDefaultAsync(m => m.TikNumber == c.TikNumber && m.BoardId == boardId, ct);
+                
+                if (mapping != null)
+                {
+                    lookupMethod = "mapping_by_tiknumber_boardid";
+                    _logger.LogDebug(
+                        "Found mapping by TikNumber+BoardId: TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikCounter={TikCounter}",
+                        c.TikNumber, boardId, mapping.MondayItemId, mapping.TikCounter);
+                }
+            }
+
+            // Priority 2: Fallback to mapping by TikCounter only (for legacy mappings)
+            if (mapping == null)
+            {
+                mapping = await _integrationDb.MondayItemMappings
+                    .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter, ct);
+                
+                if (mapping != null)
+                {
+                    lookupMethod = "mapping_by_tikcounter_fallback";
+                    _logger.LogDebug(
+                        "Found mapping by TikCounter fallback: TikCounter={TikCounter}, MondayItemId={MondayItemId}, ExistingTikNumber={ExistingTikNumber}, BoardId={BoardId}",
+                        c.TikCounter, mapping.MondayItemId, mapping.TikNumber ?? "<null>", mapping.BoardId);
+                    
+                    // Verify the Monday item has the correct TikNumber if we have one
+                    if (!string.IsNullOrWhiteSpace(c.TikNumber) && !dryRun)
+                    {
+                        // If mapping has a null or different TikNumber, we need to check Monday to see which is correct
+                        bool needsVerification = string.IsNullOrWhiteSpace(mapping.TikNumber) || mapping.TikNumber != c.TikNumber;
+                        
+                        if (needsVerification)
+                        {
+                            if (!string.IsNullOrWhiteSpace(mapping.TikNumber))
+                            {
+                                _logger.LogWarning(
+                                    "Mapping found by TikCounter has different TikNumber: MappingTikNumber={MappingTikNumber}, CaseTikNumber={CaseTikNumber}, MondayItemId={MondayItemId}. Will verify via Monday API.",
+                                    mapping.TikNumber, c.TikNumber, mapping.MondayItemId);
+                            }
+                            else
+                            {
+                                _logger.LogDebug(
+                                    "Mapping found by TikCounter has null TikNumber. CaseTikNumber={CaseTikNumber}, MondayItemId={MondayItemId}. Will verify via Monday API.",
+                                    c.TikNumber, mapping.MondayItemId);
+                            }
+                            
+                            // Check if there's a Monday item with the correct TikNumber
+                            try
+                            {
+                                var correctItemId = await _mondayClient.FindItemIdByColumnValueAsync(
+                                    boardId,
+                                    _mondaySettings.CaseNumberColumnId!,
+                                    c.TikNumber,
+                                    ct);
+                                
+                                if (correctItemId.HasValue && correctItemId.Value != mapping.MondayItemId)
+                                {
+                                    // Found a different item with the correct TikNumber - use that instead
+                                    _logger.LogInformation(
+                                        "Found different Monday item with correct TikNumber: ExistingMappingItemId={ExistingItemId}, CorrectItemId={CorrectItemId}, TikNumber={TikNumber}. Updating mapping.",
+                                        mapping.MondayItemId, correctItemId.Value, c.TikNumber);
+                                    
+                                    // Update the mapping to point to the correct item
+                                    mapping.MondayItemId = correctItemId.Value;
+                                    mapping.TikNumber = c.TikNumber;
+                                    mapping.BoardId = boardId;
+                                    lookupMethod = "mapping_updated_via_api_verification";
+                                }
+                                else if (correctItemId.HasValue && correctItemId.Value == mapping.MondayItemId)
+                                {
+                                    // The mapping points to the correct item, just update TikNumber
+                                    _logger.LogInformation(
+                                        "Mapping points to correct Monday item. Updating TikNumber: TikNumber={TikNumber}, MondayItemId={MondayItemId}",
+                                        c.TikNumber, mapping.MondayItemId);
+                                    mapping.TikNumber = c.TikNumber;
+                                    mapping.BoardId = boardId;
+                                    lookupMethod = "mapping_verified_and_updated";
+                                }
+                                else
+                                {
+                                    // No item found with correct TikNumber - update mapping with TikNumber from case
+                                    _logger.LogDebug(
+                                        "No Monday item found with TikNumber={TikNumber}. Updating mapping with case TikNumber. MondayItemId={MondayItemId}",
+                                        c.TikNumber, mapping.MondayItemId);
+                                    mapping.TikNumber = c.TikNumber;
+                                    mapping.BoardId = boardId;
+                                    lookupMethod = "mapping_updated_with_tiknumber";
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "Failed to verify Monday item TikNumber for mapping. Will use existing mapping and update TikNumber.");
+                                // Still update the mapping with TikNumber even if verification failed
+                                if (string.IsNullOrWhiteSpace(mapping.TikNumber))
+                                {
+                                    mapping.TikNumber = c.TikNumber;
+                                    mapping.BoardId = boardId;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Priority 3: If no mapping found and we have TikNumber, search Monday API for existing item
+            if (mapping == null && !string.IsNullOrWhiteSpace(c.TikNumber) && !dryRun)
+            {
+                try
+                {
+                    var existingItemId = await _mondayClient.FindItemIdByColumnValueAsync(
+                        boardId,
+                        _mondaySettings.CaseNumberColumnId!,
+                        c.TikNumber,
+                        ct);
+
+                    if (existingItemId.HasValue)
+                    {
+                        // Found existing item in Monday - create mapping for it
+                        mapping = new MondayItemMapping
+                        {
+                            TikCounter = c.TikCounter,
+                            TikNumber = c.TikNumber,
+                            BoardId = boardId,
+                            MondayItemId = existingItemId.Value,
+                            LastSyncFromOdcanitUtc = DateTime.UtcNow,
+                            OdcanitVersion = c.tsModifyDate.ToString("o"),
+                            MondayChecksum = itemName,
+                            IsTest = testMode
+                        };
+                        _integrationDb.MondayItemMappings.Add(mapping);
+                        await _integrationDb.SaveChangesAsync(ct);
+                        lookupMethod = "api_lookup_created_mapping";
+                        _logger.LogInformation(
+                            "Found existing Monday item via API lookup and created mapping: TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikCounter={TikCounter}",
+                            c.TikNumber, boardId, existingItemId.Value, c.TikCounter);
+                    }
+                    else
+                    {
+                        _logger.LogDebug("No existing Monday item found for TikNumber={TikNumber} on BoardId={BoardId}. Will create new item.", c.TikNumber, boardId);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to query Monday API for existing item with TikNumber {TikNumber}, will create new item", c.TikNumber);
+                }
+            }
+
+            // Log the lookup method used for this case
+            if (mapping != null)
+            {
+                _logger.LogDebug(
+                    "Mapping lookup result: Method={LookupMethod}, TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
+                    lookupMethod, c.TikNumber, c.TikCounter, mapping.MondayItemId);
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "No mapping found: TikNumber={TikNumber}, TikCounter={TikCounter}. Will create new Monday item.",
+                    c.TikNumber, c.TikCounter);
+            }
+
+            return mapping;
+        }
+
+        private SyncAction DetermineSyncAction(MondayItemMapping? mapping, OdcanitCase c, long boardId, string itemName)
+        {
+            if (mapping == null)
+            {
+                _logger.LogDebug(
+                    "DetermineSyncAction: No mapping found for TikNumber={TikNumber}, TikCounter={TikCounter}. Action=create",
+                    c.TikNumber, c.TikCounter);
+                return new SyncAction { Action = "create" };
+            }
+
+            // Update mapping with TikNumber and BoardId if missing (for legacy mappings)
+            bool mappingUpdated = false;
+            if (string.IsNullOrWhiteSpace(mapping.TikNumber) && !string.IsNullOrWhiteSpace(c.TikNumber))
+            {
+                mapping.TikNumber = c.TikNumber;
+                mappingUpdated = true;
+                _logger.LogDebug(
+                    "Updated mapping with TikNumber: TikCounter={TikCounter}, TikNumber={TikNumber}, MondayItemId={MondayItemId}",
+                    c.TikCounter, c.TikNumber, mapping.MondayItemId);
+            }
+            if (mapping.BoardId == 0)
+            {
+                mapping.BoardId = boardId;
+                mappingUpdated = true;
+                _logger.LogDebug(
+                    "Updated mapping with BoardId: TikCounter={TikCounter}, BoardId={BoardId}, MondayItemId={MondayItemId}",
+                    c.TikCounter, boardId, mapping.MondayItemId);
+            }
+
+            var odcanitVersion = c.tsModifyDate.ToString("o");
+            var requiresDataUpdate = mapping.OdcanitVersion != odcanitVersion;
+            var requiresNameUpdate = mapping.MondayChecksum != itemName;
+
+            if (!requiresDataUpdate && !requiresNameUpdate)
+            {
+                if (mappingUpdated)
+                {
+                    // Even if no data/name update needed, we should save the mapping updates
+                    _logger.LogDebug(
+                        "DetermineSyncAction: Mapping metadata updated but no data changes. TikNumber={TikNumber}, TikCounter={TikCounter}. Action=skip (mapping will be saved)",
+                        c.TikNumber, c.TikCounter);
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "DetermineSyncAction: No changes detected. TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}. Action=skip",
+                        c.TikNumber, c.TikCounter, mapping.MondayItemId);
+                }
+                return new SyncAction { Action = "skip" };
+            }
+
+            _logger.LogDebug(
+                "DetermineSyncAction: Changes detected. TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}. Action=update",
+                c.TikNumber, c.TikCounter, mapping.MondayItemId, requiresDataUpdate, requiresNameUpdate);
+
+            return new SyncAction
+            {
+                Action = "update",
+                RequiresDataUpdate = requiresDataUpdate,
+                RequiresNameUpdate = requiresNameUpdate
+            };
+        }
+
+        private async Task<long> CreateMondayItemAsync(
+            OdcanitCase c,
+            long boardId,
+            string groupId,
+            string itemName,
+            bool testMode,
+            CancellationToken ct)
+        {
+            var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: true, ct);
+            var mondayItemId = await _mondayClient.CreateItemAsync(boardId, groupId, itemName, columnValuesJson, ct);
+
+            var newMapping = new MondayItemMapping
+            {
+                TikCounter = c.TikCounter,
+                TikNumber = c.TikNumber,
+                BoardId = boardId,
+                MondayItemId = mondayItemId,
+                LastSyncFromOdcanitUtc = DateTime.UtcNow,
+                OdcanitVersion = c.tsModifyDate.ToString("o"),
+                MondayChecksum = itemName,
+                IsTest = testMode
+            };
+            _integrationDb.MondayItemMappings.Add(newMapping);
+
+            return mondayItemId;
+        }
+
+        private async Task UpdateMondayItemAsync(
+            MondayItemMapping mapping,
+            OdcanitCase c,
+            long boardId,
+            string itemName,
+            bool requiresNameUpdate,
+            bool requiresDataUpdate,
+            bool testMode,
+            CancellationToken ct)
+        {
+            // Update item name if it has changed
+            if (requiresNameUpdate)
+            {
+                await _mondayClient.UpdateItemNameAsync(boardId, mapping.MondayItemId, itemName, ct);
+            }
+
+            // Update column values if data has changed
+            if (requiresDataUpdate)
+            {
+                var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: false, ct);
+                await _mondayClient.UpdateItemAsync(boardId, mapping.MondayItemId, columnValuesJson, ct);
+                mapping.OdcanitVersion = c.tsModifyDate.ToString("o");
+            }
+
+            // Update mapping metadata (including TikNumber and BoardId if they were missing)
+            if (string.IsNullOrWhiteSpace(mapping.TikNumber) && !string.IsNullOrWhiteSpace(c.TikNumber))
+            {
+                mapping.TikNumber = c.TikNumber;
+            }
+            if (mapping.BoardId == 0)
+            {
+                mapping.BoardId = boardId;
+            }
+            mapping.LastSyncFromOdcanitUtc = DateTime.UtcNow;
+            mapping.MondayChecksum = itemName;
+            mapping.IsTest = testMode;
+        }
+
+        private class SyncAction
+        {
+            public string Action { get; set; } = string.Empty; // "create", "update", or "skip"
+            public bool RequiresNameUpdate { get; set; }
+            public bool RequiresDataUpdate { get; set; }
         }
     }
 }
