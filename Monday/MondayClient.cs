@@ -193,6 +193,74 @@ namespace Odmon.Worker.Monday
                 throw new InvalidOperationException($"Monday.com unexpected response: {body}");
             }
         }
+
+        public async Task<long?> FindItemIdByColumnValueAsync(long boardId, string columnId, string columnValue, CancellationToken ct)
+        {
+            // Query Monday.com to find items where the specified column matches the value
+            // Using items_page_by_column_values for exact match
+            var query = @"query ($boardIds: [ID!], $columnId: String!, $columnValue: String!) {
+                boards (ids: $boardIds) {
+                    items_page_by_column_values (limit: 1, column_id: $columnId, column_values: [$columnValue]) {
+                        items {
+                            id
+                        }
+                    }
+                }
+            }";
+
+            var variables = new Dictionary<string, object>
+            {
+                ["boardIds"] = new[] { boardId.ToString() },
+                ["columnId"] = columnId,
+                ["columnValue"] = columnValue,
+            };
+
+            var payload = JsonSerializer.Serialize(new { query, variables });
+            var content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+            var resp = await _httpClient.PostAsync("", content, ct);
+            resp.EnsureSuccessStatusCode();
+            var body = await resp.Content.ReadAsStringAsync(ct);
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out var errors))
+            {
+                throw new InvalidOperationException($"Monday.com API error: {errors}");
+            }
+
+            if (!root.TryGetProperty("data", out var data) ||
+                !data.TryGetProperty("boards", out var boards) ||
+                boards.ValueKind != System.Text.Json.JsonValueKind.Array ||
+                boards.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            var board = boards[0];
+            if (!board.TryGetProperty("items_page", out var itemsPage) ||
+                !itemsPage.TryGetProperty("items", out var items) ||
+                items.ValueKind != System.Text.Json.JsonValueKind.Array ||
+                items.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            var firstItem = items[0];
+            if (!firstItem.TryGetProperty("id", out var idElement))
+            {
+                return null;
+            }
+
+            var idString = idElement.GetString();
+            if (string.IsNullOrWhiteSpace(idString))
+            {
+                return null;
+            }
+
+            return long.Parse(idString);
+        }
     }
 }
 

@@ -144,10 +144,50 @@ namespace Odmon.Worker.Services
                 bool isSafeTestCase = _safetyPolicy.IsTestCase(c) || isExplicitTestCase;
                 bool shouldEnforceSafety = !isInDemoWindow && !isSafeTestCase;
 
+                // First, try to find mapping by TikNumber (preferred) or TikCounter (fallback)
                 var mapping = await _integrationDb.MondayItemMappings
-                    .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter, ct);
+                    .FirstOrDefaultAsync(m => 
+                        (!string.IsNullOrWhiteSpace(c.TikNumber) && m.TikNumber == c.TikNumber && m.BoardId == caseBoardId) ||
+                        (m.TikCounter == c.TikCounter), ct);
 
                 long mondayIdForLog = mapping?.MondayItemId ?? 0;
+
+                // If no mapping found by TikNumber, try to find existing item in Monday by TikNumber
+                if (mapping == null && !string.IsNullOrWhiteSpace(c.TikNumber) && !dryRun)
+                {
+                    try
+                    {
+                        var existingItemId = await _mondayClient.FindItemIdByColumnValueAsync(
+                            caseBoardId, 
+                            _mondaySettings.CaseNumberColumnId!, 
+                            c.TikNumber, 
+                            ct);
+                        
+                        if (existingItemId.HasValue)
+                        {
+                            // Found existing item in Monday - create mapping for it
+                            mapping = new MondayItemMapping
+                            {
+                                TikCounter = c.TikCounter,
+                                TikNumber = c.TikNumber,
+                                BoardId = caseBoardId,
+                                MondayItemId = existingItemId.Value,
+                                LastSyncFromOdcanitUtc = DateTime.UtcNow,
+                                OdcanitVersion = c.tsModifyDate.ToString("o"),
+                                MondayChecksum = itemName,
+                                IsTest = testMode
+                            };
+                            _integrationDb.MondayItemMappings.Add(mapping);
+                            await _integrationDb.SaveChangesAsync(ct);
+                            mondayIdForLog = existingItemId.Value;
+                            _logger.LogInformation("Found existing Monday item {ItemId} for TikNumber {TikNumber} via API lookup", existingItemId.Value, c.TikNumber);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to query Monday API for existing item with TikNumber {TikNumber}, will create new item", c.TikNumber);
+                    }
+                }
 
                 if (!testMode && shouldEnforceSafety)
                 {
@@ -204,6 +244,8 @@ namespace Odmon.Worker.Services
                             var newMapping = new MondayItemMapping
                             {
                                 TikCounter = c.TikCounter,
+                                TikNumber = c.TikNumber,
+                                BoardId = caseBoardId,
                                 MondayItemId = mondayIdForLog,
                                 LastSyncFromOdcanitUtc = DateTime.UtcNow,
                                 OdcanitVersion = odcanitVersion,
@@ -225,6 +267,16 @@ namespace Odmon.Worker.Services
                 }
                 else
                 {
+                    // Update mapping with TikNumber and BoardId if missing
+                    if (string.IsNullOrWhiteSpace(mapping.TikNumber) && !string.IsNullOrWhiteSpace(c.TikNumber))
+                    {
+                        mapping.TikNumber = c.TikNumber;
+                    }
+                    if (mapping.BoardId == 0)
+                    {
+                        mapping.BoardId = caseBoardId;
+                    }
+
                     var requiresUpdate = mapping.OdcanitVersion != odcanitVersion;
                     var columnValuesJson = await BuildColumnValuesJsonAsync(caseBoardId, c, forceNotStartedStatus: false, ct);
                     var requiresNameUpdate = mapping.MondayChecksum != itemName;
@@ -517,6 +569,13 @@ namespace Odmon.Worker.Services
             TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
             TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
 
+            // Set document type based on client number
+            var documentType = DetermineDocumentType(c.ClientVisualID);
+            if (!string.IsNullOrWhiteSpace(documentType))
+            {
+                TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
+            }
+
             var statusColumnId = _mondaySettings.CaseStatusColumnId;
             if (!string.IsNullOrWhiteSpace(statusColumnId))
             {
@@ -705,6 +764,35 @@ namespace Odmon.Worker.Services
             }
 
             return "טיפול בתיק";
+        }
+
+        private static string? DetermineDocumentType(string? clientVisualID)
+        {
+            if (string.IsNullOrWhiteSpace(clientVisualID))
+            {
+                return null;
+            }
+
+            // Try to parse as integer
+            if (!int.TryParse(clientVisualID.Trim(), out var clientNumber))
+            {
+                return null;
+            }
+
+            // Client number == 1 → "כתב הגנה" (defense)
+            if (clientNumber == 1)
+            {
+                return "כתב הגנה";
+            }
+
+            // Client number in {4, 7, 9} OR has 3+ digits → "כתב תביעה" (claim)
+            if (clientNumber == 4 || clientNumber == 7 || clientNumber == 9 || clientNumber >= 100)
+            {
+                return "כתב תביעה";
+            }
+
+            // For all other client numbers, leave empty
+            return null;
         }
 
         private static string? DetermineResponsibleText(OdcanitCase c)

@@ -68,6 +68,7 @@ namespace Odmon.Worker.Monday
         public string? CaseFolderIdColumnId { get; set; } = "text_mkxe3vhk";
         public string? TaskTypeStatusColumnId { get; set; } = "color_mkwyq310";
         public string? ResponsibleTextColumnId { get; set; } = "text_mkxz6j9y";
+        public string? DocumentTypeStatusColumnId { get; set; } = "color_mkxhq546";
     }
 }
 

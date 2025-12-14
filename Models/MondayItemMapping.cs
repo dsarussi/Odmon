@@ -6,7 +6,9 @@ namespace Odmon.Worker.Models
     {
         public int Id { get; set; }
         public int TikCounter { get; set; }
+        public string? TikNumber { get; set; }
         public long MondayItemId { get; set; }
+        public long BoardId { get; set; }
         public DateTime? LastSyncFromOdcanitUtc { get; set; }
         public DateTime? LastSyncFromMondayUtc { get; set; }
         public string? OdcanitVersion { get; set; }

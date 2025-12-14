@@ -21,6 +21,8 @@ namespace Odmon.Worker.Data
                 .IsUnique();
             modelBuilder.Entity<MondayItemMapping>()
                 .HasIndex(m => m.MondayItemId);
+            modelBuilder.Entity<MondayItemMapping>()
+                .HasIndex(m => new { m.TikNumber, m.BoardId });
 
             modelBuilder.Entity<SyncLog>()
                 .HasKey(l => l.Id);
