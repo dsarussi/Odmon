@@ -547,6 +547,10 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.ClaimStreetColumnId, c.ClaimStreet);
             TryAddStringColumn(columnValues, _mondaySettings.CaseFolderIdColumnId, c.CaseFolderId);
             TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
+
+            // Dor screen: צד תובע / צד נתבע -> Monday status columns
+            TryAddStatusLabelColumn(columnValues, "color_mkxh8gsq", MapPlaintiffSideLabel(c.PlaintiffSideRaw));
+            TryAddStatusLabelColumn(columnValues, "color_mkxh5x31", MapDefendantSideLabel(c.DefendantSideRaw));
             TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
 
             // Set document type based on client number
@@ -793,6 +797,40 @@ namespace Odmon.Worker.Services
             }
 
             return null;
+        }
+
+        private static string MapPlaintiffSideLabel(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return "תובע";
+            }
+
+            return raw switch
+            {
+                "תובע" => "תובע",
+                "תובעת" => "תובעת",
+                "תובעים" => "תובעים",
+                "תובעות" => "תובעות",
+                _ => "תובע"
+            };
+        }
+
+        private static string MapDefendantSideLabel(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return "נתבע";
+            }
+
+            return raw switch
+            {
+                "נתבע" => "נתבע",
+                "נתבעת" => "נתבעת",
+                "נתבעים" => "נתבעים",
+                "נתבעות" => "נתבעות",
+                _ => "נתבע"
+            };
         }
 
         private string ResolveClientPhoneColumnId()

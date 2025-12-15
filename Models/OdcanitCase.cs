@@ -169,6 +169,10 @@ namespace Odmon.Worker.Models
         public DateTime? ComplaintReceivedDate { get; set; }
         [NotMapped]
         public string? CaseFolderId { get; set; }
+        [NotMapped]
+        public string? PlaintiffSideRaw { get; set; }
+        [NotMapped]
+        public string? DefendantSideRaw { get; set; }
     }
 }
 

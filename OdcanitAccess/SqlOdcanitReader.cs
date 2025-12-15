@@ -452,6 +452,8 @@ namespace Odmon.Worker.OdcanitAccess
             Add("כתובת דוא\"ל תובע", (c, row) => c.PlaintiffEmail = row.strData);
             Add("שם נתבע", (c, row) => c.DefendantName = row.strData);
             Add("פקס", (c, row) => c.DefendantFax = row.strData);
+            Add("צד תובע", (c, row) => c.PlaintiffSideRaw = row.strData);
+            Add("צד נתבע", (c, row) => c.DefendantSideRaw = row.strData);
             Add("מרחוב (תביעה)", (c, row) => c.ClaimStreet = row.strData);
             Add("מרחוב (הגנה)", (c, row) => c.DefenseStreet = row.strData);
             Add("Event date", (c, row) => c.EventDate = ExtractDate(row) ?? c.EventDate);
