@@ -28,7 +28,7 @@ ODMON is a .NET 8 Worker Service that synchronizes case data from the Odcanit/Od
     - Client contact information (phone, email, address)
     - Case sides (plaintiff, defendant, third party)
     - Diary events (court hearings, dates)
-    - User data from "Dor screen" (policy holder, driver, vehicle info)
+    - Legal user data from UserData view vwExportToOuterSystems_UserData (policy holder, driver, vehicle info)
     - Hozlap main data (court case numbers)
 
 - **MondayClient**: GraphQL API client for Monday.com
@@ -67,7 +67,7 @@ ODMON is a .NET 8 Worker Service that synchronizes case data from the Odcanit/Od
 - **Client Enrichment**: Loads client contact info (phone, email, address) from vwExportToOuterSystems_UserData
 - **Sides Enrichment**: Loads case sides (plaintiff, defendant, third party) from vwSides
 - **Diary Events Enrichment**: Loads court hearings and events from vwDiaryEvents
-- **User Data Enrichment**: Loads "Dor screen" data including:
+- **User Data Enrichment**: Loads legal user data (UserData view vwExportToOuterSystems_UserData, PageName = "פרטי תיק נזיקין מליגל") including:
   - Policy holder information (name, ID, address, phone, email)
   - Driver information (name, ID, mobile phone)
   - Vehicle numbers (main car, second car, third party car)

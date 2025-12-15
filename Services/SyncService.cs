@@ -91,8 +91,8 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            // TEMP: Load cases created yesterday (or all cases if UseTodayOnly is false)
-            var today = DateTime.Today.AddDays(-1);
+            // Load cases created today (or all cases if UseTodayOnly is false)
+            var today = DateTime.Today;
             var tomorrow = today.AddDays(1);
 
             List<OdcanitCase> newOrUpdatedCases;
@@ -548,7 +548,7 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.CaseFolderIdColumnId, c.CaseFolderId);
             TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
 
-            // Dor screen: צד תובע / צד נתבע -> Monday status columns
+            // Legal user data (UserData view vwExportToOuterSystems_UserData): צד תובע / צד נתבע -> Monday status columns
             TryAddStatusLabelColumn(columnValues, "color_mkxh8gsq", MapPlaintiffSideLabel(c.PlaintiffSideRaw));
             TryAddStatusLabelColumn(columnValues, "color_mkxh5x31", MapDefendantSideLabel(c.DefendantSideRaw));
             TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
@@ -799,11 +799,11 @@ namespace Odmon.Worker.Services
             return null;
         }
 
-        private static string MapPlaintiffSideLabel(string? raw)
+        private static string? MapPlaintiffSideLabel(string? raw)
         {
             if (string.IsNullOrWhiteSpace(raw))
             {
-                return "תובע";
+                return null;
             }
 
             return raw switch
@@ -812,15 +812,15 @@ namespace Odmon.Worker.Services
                 "תובעת" => "תובעת",
                 "תובעים" => "תובעים",
                 "תובעות" => "תובעות",
-                _ => "תובע"
+                _ => null
             };
         }
 
-        private static string MapDefendantSideLabel(string? raw)
+        private static string? MapDefendantSideLabel(string? raw)
         {
             if (string.IsNullOrWhiteSpace(raw))
             {
-                return "נתבע";
+                return null;
             }
 
             return raw switch
@@ -829,7 +829,7 @@ namespace Odmon.Worker.Services
                 "נתבעת" => "נתבעת",
                 "נתבעים" => "נתבעים",
                 "נתבעות" => "נתבעות",
-                _ => "נתבע"
+                _ => null
             };
         }
 

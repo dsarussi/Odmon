@@ -16,7 +16,7 @@ namespace Odmon.Worker.OdcanitAccess
         private readonly OdcanitDbContext _db;
         private readonly ILogger<SqlOdcanitReader> _logger;
         private readonly bool _isTestMode;
-        private const string DorScreenPageName = "פרטי תיק נזיקין מליגל";
+        private const string LegalUserDataPageName = "פרטי תיק נזיקין מליגל";
         private static readonly StringComparer HebrewComparer = StringComparer.Ordinal;
         private static readonly Dictionary<string, Action<OdcanitCase, OdcanitUserData>> UserDataFieldHandlers = BuildUserDataFieldHandlers();
 
@@ -286,7 +286,7 @@ namespace Odmon.Worker.OdcanitAccess
 
         private async Task EnrichWithUserDataAsync(List<OdcanitCase> cases, List<int> tikCounters, CancellationToken ct)
         {
-            _logger.LogDebug("Enriching cases with Dor screen user data.");
+            _logger.LogDebug("Enriching cases with legal user data from vwExportToOuterSystems_UserData.");
 
             var tikCounterSet = new HashSet<int>(tikCounters);
 
@@ -295,21 +295,21 @@ namespace Odmon.Worker.OdcanitAccess
                 .Where(u => tikCounterSet.Contains(u.TikCounter))
                 .ToListAsync(ct);
 
-            var dorRows = userDataRows
-                .Where(u => u.PageName == DorScreenPageName)
+            var legalUserDataRows = userDataRows
+                .Where(u => u.PageName == LegalUserDataPageName)
                 .ToList();
 
             _logger.LogDebug(
-                "Loaded {TotalUserData} rows for TikCounters, Dor screen rows={DorRows}, Distinct pages={Pages}",
+                "Loaded {TotalUserData} rows for TikCounters, legal user data rows={LegalUserDataRows}, Distinct pages={Pages}",
                 userDataRows.Count,
-                dorRows.Count,
+                legalUserDataRows.Count,
                 userDataRows.Select(u => u.PageName).Distinct().ToArray());
 
             var userDataAllByCase = userDataRows
                 .GroupBy(u => u.TikCounter)
                 .ToDictionary(g => g.Key, g => g.ToList());
 
-            var userDataByCase = dorRows
+            var userDataByCase = legalUserDataRows
                 .GroupBy(u => u.TikCounter)
                 .ToDictionary(g => g.Key, g => g.ToList());
 
@@ -330,7 +330,10 @@ namespace Odmon.Worker.OdcanitAccess
                     if (userDataAllByCase.TryGetValue(tikCounterKey, out var allRows))
                     {
                         var availablePages = allRows.Select(r => r.PageName ?? "<null>").Distinct().ToArray();
-                        _logger.LogDebug("No Dor page rows for TikCounter {TikCounter}. Available PageNames: {Pages}", odcanitCase.TikCounter, availablePages);
+                        _logger.LogDebug(
+                            "No legal user data rows for TikCounter {TikCounter}. Available PageNames: {Pages}",
+                            odcanitCase.TikCounter,
+                            availablePages);
                     }
                     else
                     {
