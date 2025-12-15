@@ -91,8 +91,8 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            // Load cases created today (or all cases if UseTodayOnly is false)
-            var today = DateTime.Today;
+            // TEMP: Load cases created yesterday (or all cases if UseTodayOnly is false)
+            var today = DateTime.Today.AddDays(-1);
             var tomorrow = today.AddDays(1);
 
             List<OdcanitCase> newOrUpdatedCases;
