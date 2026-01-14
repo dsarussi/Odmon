@@ -18,6 +18,11 @@ namespace Odmon.Worker.Monday
         public string? RequestedClaimAmountColumnId { get; set; } = "numeric_mkxw7s29";
         public string? ProvenClaimAmountColumnId { get; set; } = "numeric_mkwjcrwk";
         public string? JudgmentAmountColumnId { get; set; } = "numeric_mkwj6mnw";
+        public string? AppraiserFeeAmountColumnId { get; set; } = "numeric_mky2n7hz";
+        public string? DirectDamageAmountColumnId { get; set; } = "numeric_mky1jccw";
+        public string? OtherLossesAmountColumnId { get; set; } = "numeric_mky1tv4r";
+        public string? LossOfValueAmountColumnId { get; set; } = "numeric_mky23vbb";
+        public string? ResidualValueAmountColumnId { get; set; } = "numeric_mkzjw4z7";
         public string? NotesColumnId { get; set; } = "long_text_mkwe5h8v";
         public string? CaseStatusColumnId { get; set; } = "color_mkwefnbx";
         public string? ClientAddressColumnId { get; set; } = "text_mkwjcc69";

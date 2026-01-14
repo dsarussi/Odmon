@@ -198,44 +198,37 @@ namespace Odmon.Worker.OdcanitAccess
 
         private async Task EnrichWithDiaryEventsAsync(List<OdcanitCase> cases, List<int> tikCounters, CancellationToken ct)
         {
-            _logger.LogDebug("Enriching cases with diary events.");
+            _logger.LogDebug("Enriching cases with upcoming active hearings from vwExportToOuterSystems_YomanData.");
 
             var tikCounterSet = new HashSet<int>(tikCounters);
+            var now = DateTime.Now;
 
-            var diaryEventsFromDb = await _db.DiaryEvents
+            // Only consider active (MeetStatus = 0) and future (StartDate >= GETDATE()) hearings
+            var diaryEventsQuery = _db.DiaryEvents
                 .AsNoTracking()
-                .ToListAsync(ct);
+                .Where(d =>
+                    d.TikCounter.HasValue &&
+                    tikCounterSet.Contains(d.TikCounter.Value) &&
+                    d.MeetStatus == 0 &&
+                    d.StartDate.HasValue &&
+                    d.StartDate.Value >= now);
 
-            var diaryEvents = diaryEventsFromDb
-                .Where(d => d.TikCounter.HasValue && tikCounterSet.Contains(d.TikCounter.Value))
-                .ToList();
+            var diaryEvents = await diaryEventsQuery.ToListAsync(ct);
 
-            _logger.LogDebug("Loaded {TotalDiary} diary rows; matched {MatchedDiary} to cases.", diaryEventsFromDb.Count, diaryEvents.Count);
+            _logger.LogDebug("Loaded {MatchedDiary} upcoming active diary rows for current TikCounters.", diaryEvents.Count);
 
-            var diaryByCase = diaryEvents
+            // For each TikCounter, select the nearest upcoming hearing (MIN(StartDate))
+            var hearingsByCase = diaryEvents
                 .GroupBy(d => d.TikCounter!.Value)
-                .ToDictionary(g => g.Key, g => g
-                    .Where(e => e != null)
-                    .OrderBy(e => e.StartDate ?? DateTime.MaxValue)
-                    .ToList());
+                .ToDictionary(
+                    g => g.Key,
+                    g => g
+                        .OrderBy(e => e.StartDate!.Value)
+                        .First());
 
             foreach (var odcanitCase in cases)
             {
-                if (!diaryByCase.TryGetValue(odcanitCase.TikCounter, out var events))
-                {
-                    continue;
-                }
-
-                var hearing = events.FirstOrDefault(e =>
-                    (!string.IsNullOrWhiteSpace(e.CourtName) || !string.IsNullOrWhiteSpace(e.IDInCourt)) &&
-                    e.StartDate.HasValue);
-
-                if (hearing == null)
-                {
-                    hearing = events.FirstOrDefault();
-                }
-
-                if (hearing == null)
+                if (!hearingsByCase.TryGetValue(odcanitCase.TikCounter, out var hearing))
                 {
                     continue;
                 }
@@ -243,8 +236,16 @@ namespace Odmon.Worker.OdcanitAccess
                 odcanitCase.CourtName = hearing.CourtName ?? hearing.CourtCodeName;
                 odcanitCase.CourtCity = hearing.City;
                 odcanitCase.JudgeName = hearing.JudgeName;
-                odcanitCase.HearingDate = hearing.StartDate;
-                odcanitCase.HearingTime = hearing.FromTime?.TimeOfDay ?? hearing.ToTime?.TimeOfDay;
+                odcanitCase.HearingDate = hearing.StartDate?.Date;
+                odcanitCase.HearingTime = hearing.StartDate?.TimeOfDay;
+
+                // Incorporate hearing modification time into the case change version so that
+                // Monday updates are triggered when the hearing changes but remain idempotent otherwise.
+                if (hearing.tsModifyDate.HasValue)
+                {
+                    var maxTicks = Math.Max(odcanitCase.tsModifyDate.Ticks, hearing.tsModifyDate.Value.Ticks);
+                    odcanitCase.tsModifyDate = new DateTime(maxTicks, odcanitCase.tsModifyDate.Kind);
+                }
             }
         }
 
@@ -402,6 +403,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("הפסדים", (c, row) => c.OtherLossesAmount = ExtractDecimal(row) ?? c.OtherLossesAmount);
             Add("שכ\"ט שמאי", (c, row) => c.AppraiserFeeAmount = ExtractDecimal(row) ?? c.AppraiserFeeAmount);
             Add("נזק ישיר", (c, row) => c.DirectDamageAmount = ExtractDecimal(row) ?? c.DirectDamageAmount);
+            Add("סכום נזק ישיר", (c, row) => c.DirectDamageAmount = ExtractDecimal(row) ?? c.DirectDamageAmount);
             Add("סכום פסק דין", (c, row) => c.JudgmentAmount = ExtractDecimal(row) ?? c.JudgmentAmount);
             Add("סכום תביעה מוכח", (c, row) => c.ProvenClaimAmount = ExtractDecimal(row) ?? c.ProvenClaimAmount);
             Add("אגרת בית משפט ( I+II )", (c, row) => c.CourtFeeTotal = ExtractDecimal(row) ?? c.CourtFeeTotal);
@@ -465,6 +467,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("folderID", (c, row) => c.CaseFolderId = row.strData);
             Add("שם עורך דין", (c, row) => c.AttorneyName = row.strData);
             Add("פקס", (c, row) => c.DefendantFax = row.strData);
+            Add("שווי שרידים", (c, row) => c.ResidualValueAmount = ExtractDecimal(row) ?? c.ResidualValueAmount);
 
             return dict;
         }

@@ -497,6 +497,11 @@ namespace Odmon.Worker.Services
             TryAddDecimalColumn(columnValues, _mondaySettings.RequestedClaimAmountColumnId, c.RequestedClaimAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.ProvenClaimAmountColumnId, c.ProvenClaimAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.JudgmentAmountColumnId, c.JudgmentAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.AppraiserFeeAmountColumnId, c.AppraiserFeeAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.DirectDamageAmountColumnId, c.DirectDamageAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.OtherLossesAmountColumnId, c.OtherLossesAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.LossOfValueAmountColumnId, c.LossOfValueAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.ResidualValueAmountColumnId, c.ResidualValueAmount);
             TryAddStringColumn(columnValues, _mondaySettings.NotesColumnId, c.Notes);
             TryAddStringColumn(columnValues, _mondaySettings.ClientAddressColumnId, c.ClientAddress);
             TryAddStringColumn(columnValues, _mondaySettings.ClientTaxIdColumnId, c.ClientTaxId);

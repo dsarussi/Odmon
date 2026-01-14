@@ -64,6 +64,8 @@ namespace Odmon.Worker.Models
         [NotMapped]
         public decimal? JudgmentAmount { get; set; }
         [NotMapped]
+        public decimal? ResidualValueAmount { get; set; }
+        [NotMapped]
         public decimal? CourtFeeTotal { get; set; }
         [NotMapped]
         public decimal? CourtFeePartOne { get; set; }
