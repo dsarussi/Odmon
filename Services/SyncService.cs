@@ -754,12 +754,17 @@ namespace Odmon.Worker.Services
                     tikCounter);
             }
 
-            // Set the value
-            var formattedTime = value.Value.ToString(@"hh\:mm", CultureInfo.InvariantCulture);
-            columnValues[columnId] = formattedTime;
+            // Set the value as an object with hour and minute properties (Monday.com hour column format)
+            var hourValue = new
+            {
+                hour = value.Value.Hours.ToString("00", CultureInfo.InvariantCulture),
+                minute = value.Value.Minutes.ToString("00", CultureInfo.InvariantCulture)
+            };
+            columnValues[columnId] = hourValue;
             _logger.LogDebug(
-                "Set hearing hour {HearingTime} for TikCounter {TikCounter} on column {ColumnId}",
-                formattedTime,
+                "Set hearing hour {Hour}:{Minute} (object format) for TikCounter {TikCounter} on column {ColumnId}",
+                hourValue.hour,
+                hourValue.minute,
                 tikCounter,
                 columnId);
         }
@@ -769,11 +774,13 @@ namespace Odmon.Worker.Services
             try
             {
                 // Try to resolve the column by expected title to verify our configured ID matches
+                // The column title on the board is "שעה" (not "שעת דיון")
                 string? resolvedColumnId = null;
                 string? availableColumnsInfo = null;
+                const string expectedColumnTitle = "שעה";
                 try
                 {
-                    resolvedColumnId = await _mondayMetadataProvider.GetColumnIdByTitleAsync(boardId, "שעת דיון", ct);
+                    resolvedColumnId = await _mondayMetadataProvider.GetColumnIdByTitleAsync(boardId, expectedColumnTitle, ct);
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -789,7 +796,8 @@ namespace Odmon.Worker.Services
                     }
 
                     _logger.LogDebug(
-                        "Could not resolve hearing hour column by title 'שעת דיון' on board {BoardId}. {Message}. Will validate by ID {ColumnId} directly.",
+                        "Could not resolve hearing hour column by title '{ExpectedTitle}' on board {BoardId}. {Message}. Will validate by ID {ColumnId} directly.",
+                        expectedColumnTitle,
                         boardId,
                         message,
                         columnId);
@@ -797,7 +805,8 @@ namespace Odmon.Worker.Services
                 catch (Exception ex)
                 {
                     _logger.LogDebug(ex,
-                        "Exception while resolving hearing hour column by title 'שעת דיון' on board {BoardId}. Will validate by ID {ColumnId} directly.",
+                        "Exception while resolving hearing hour column by title '{ExpectedTitle}' on board {BoardId}. Will validate by ID {ColumnId} directly.",
+                        expectedColumnTitle,
                         boardId,
                         columnId);
                 }
@@ -808,7 +817,7 @@ namespace Odmon.Worker.Services
                     return new ColumnValidationResult
                     {
                         IsValid = false,
-                        Reason = $"Configured column ID '{columnId}' does not match the column ID resolved by title 'שעת דיון' ('{resolvedColumnId}')",
+                        Reason = $"Configured column ID '{columnId}' does not match the column ID resolved by title '{expectedColumnTitle}' ('{resolvedColumnId}')",
                         AvailableColumnsInfo = availableColumnsInfo ?? $"Resolved ID: {resolvedColumnId}, Configured ID: {columnId}"
                     };
                 }
