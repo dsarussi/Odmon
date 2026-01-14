@@ -492,7 +492,7 @@ namespace Odmon.Worker.Services
             TryAddDateColumn(columnValues, _mondaySettings.CaseCloseDateColumnId, c.TikCloseDate);
             TryAddDateColumn(columnValues, _mondaySettings.ComplaintReceivedDateColumnId, c.ComplaintReceivedDate);
             TryAddDateColumn(columnValues, _mondaySettings.HearingDateColumnId, c.HearingDate);
-            TryAddHourColumn(columnValues, _mondaySettings.HearingHourColumnId, c.HearingTime);
+            await TryAddHourColumnAsync(columnValues, boardId, _mondaySettings.HearingHourColumnId, c.HearingTime, c.TikCounter, ct);
 
             TryAddDecimalColumn(columnValues, _mondaySettings.RequestedClaimAmountColumnId, c.RequestedClaimAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.ProvenClaimAmountColumnId, c.ProvenClaimAmount);
@@ -692,14 +692,170 @@ namespace Odmon.Worker.Services
             public string countryShortName { get; set; } = "IL";
         }
 
-        private static void TryAddHourColumn(Dictionary<string, object> columnValues, string? columnId, TimeSpan? value)
+        private async Task TryAddHourColumnAsync(
+            Dictionary<string, object> columnValues,
+            long boardId,
+            string? columnId,
+            TimeSpan? value,
+            int tikCounter,
+            CancellationToken ct)
         {
-            if (string.IsNullOrWhiteSpace(columnId) || value is null)
+            // Check if column ID is configured
+            if (string.IsNullOrWhiteSpace(columnId))
             {
+                _logger.LogWarning(
+                    "Hearing hour column ID is not configured for TikCounter {TikCounter}. Hearing hour will not be set in Monday.",
+                    tikCounter);
                 return;
             }
 
-            columnValues[columnId] = value.Value.ToString(@"hh\:mm", CultureInfo.InvariantCulture);
+            // Check if value is available
+            if (value is null)
+            {
+                _logger.LogDebug(
+                    "Hearing time is null for TikCounter {TikCounter}. Hearing hour column {ColumnId} will not be updated in Monday.",
+                    tikCounter,
+                    columnId);
+                return;
+            }
+
+            // Validate that the column exists on the board (optional validation, logs if not found)
+            try
+            {
+                var validationResult = await ValidateHearingHourColumnAsync(boardId, columnId, ct);
+                if (!validationResult.IsValid)
+                {
+                    _logger.LogWarning(
+                        "Hearing hour column validation failed for TikCounter {TikCounter} on board {BoardId}: {Reason}. Available columns: {AvailableColumns}. Hearing hour will not be set.",
+                        tikCounter,
+                        boardId,
+                        validationResult.Reason ?? "Column not found",
+                        validationResult.AvailableColumnsInfo ?? "unknown");
+                    return;
+                }
+
+                if (!string.IsNullOrWhiteSpace(validationResult.Warning))
+                {
+                    _logger.LogWarning(
+                        "Hearing hour column {ColumnId} validation warning for TikCounter {TikCounter} on board {BoardId}: {Warning}",
+                        columnId,
+                        tikCounter,
+                        boardId,
+                        validationResult.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log but don't fail - column validation is best-effort
+                _logger.LogWarning(ex,
+                    "Failed to validate hearing hour column {ColumnId} on board {BoardId} for TikCounter {TikCounter}. Will attempt to set value anyway.",
+                    columnId,
+                    boardId,
+                    tikCounter);
+            }
+
+            // Set the value
+            var formattedTime = value.Value.ToString(@"hh\:mm", CultureInfo.InvariantCulture);
+            columnValues[columnId] = formattedTime;
+            _logger.LogDebug(
+                "Set hearing hour {HearingTime} for TikCounter {TikCounter} on column {ColumnId}",
+                formattedTime,
+                tikCounter,
+                columnId);
+        }
+
+        private async Task<ColumnValidationResult> ValidateHearingHourColumnAsync(long boardId, string columnId, CancellationToken ct)
+        {
+            try
+            {
+                // Try to resolve the column by expected title to verify our configured ID matches
+                string? resolvedColumnId = null;
+                string? availableColumnsInfo = null;
+                try
+                {
+                    resolvedColumnId = await _mondayMetadataProvider.GetColumnIdByTitleAsync(boardId, "שעת דיון", ct);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    // Extract available columns from the exception message if present
+                    var message = ex.Message;
+                    if (message.Contains("Available columns:"))
+                    {
+                        var availableColumnsStart = message.IndexOf("Available columns:", StringComparison.Ordinal);
+                        if (availableColumnsStart >= 0)
+                        {
+                            availableColumnsInfo = message.Substring(availableColumnsStart);
+                        }
+                    }
+
+                    _logger.LogDebug(
+                        "Could not resolve hearing hour column by title 'שעת דיון' on board {BoardId}. {Message}. Will validate by ID {ColumnId} directly.",
+                        boardId,
+                        message,
+                        columnId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex,
+                        "Exception while resolving hearing hour column by title 'שעת דיון' on board {BoardId}. Will validate by ID {ColumnId} directly.",
+                        boardId,
+                        columnId);
+                }
+
+                // If we resolved by title and it doesn't match, that's a problem
+                if (!string.IsNullOrWhiteSpace(resolvedColumnId) && resolvedColumnId != columnId)
+                {
+                    return new ColumnValidationResult
+                    {
+                        IsValid = false,
+                        Reason = $"Configured column ID '{columnId}' does not match the column ID resolved by title 'שעת דיון' ('{resolvedColumnId}')",
+                        AvailableColumnsInfo = availableColumnsInfo ?? $"Resolved ID: {resolvedColumnId}, Configured ID: {columnId}"
+                    };
+                }
+
+                // If resolved ID matches, we're good
+                if (resolvedColumnId == columnId)
+                {
+                    return new ColumnValidationResult { IsValid = true };
+                }
+
+                // If we couldn't resolve by title, we can't fully validate, but that's okay
+                // The column might exist with a different title or the metadata provider might have issues
+                // We'll log this as a debug message and proceed
+                _logger.LogDebug(
+                    "Could not validate hearing hour column {ColumnId} by title resolution on board {BoardId}. {AvailableColumnsInfo}. Will proceed with configured column ID.",
+                    columnId,
+                    boardId,
+                    availableColumnsInfo ?? "Column metadata unavailable");
+
+                return new ColumnValidationResult
+                {
+                    IsValid = true,
+                    Warning = "Column validation by title resolution unavailable",
+                    AvailableColumnsInfo = availableColumnsInfo
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Exception while validating hearing hour column {ColumnId} on board {BoardId}",
+                    columnId,
+                    boardId);
+                // Return valid but with warning - we don't want to block on validation failures
+                return new ColumnValidationResult
+                {
+                    IsValid = true,
+                    Warning = $"Validation error: {ex.Message}"
+                };
+            }
+        }
+
+        private class ColumnValidationResult
+        {
+            public bool IsValid { get; set; }
+            public string? Reason { get; set; }
+            public string? Warning { get; set; }
+            public string? AvailableColumnsInfo { get; set; }
         }
 
         private static void TryAddStatusLabelColumn(Dictionary<string, object> columnValues, string? columnId, string? label)

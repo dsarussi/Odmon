@@ -232,10 +232,15 @@ namespace Odmon.Worker.Monday
         public async Task<long?> FindItemIdByColumnValueAsync(long boardId, string columnId, string columnValue, CancellationToken ct)
         {
             // Query Monday.com to find items where the specified column matches the value
-            // Using items_page_by_column_values for exact match
-            var query = @"query ($boardIds: [ID!], $columnId: String!, $columnValue: String!) {
-                boards (ids: $boardIds) {
-                    items_page_by_column_values (limit: 1, column_id: $columnId, column_values: [$columnValue]) {
+            // Using items_page with query_params for exact match
+            var query = @"query ($boardId: ID!, $columnId: String!, $columnValue: String!) {
+                boards (ids: [$boardId]) {
+                    items_page (limit: 1, query_params: {
+                        rules: [{
+                            column_id: $columnId,
+                            compare_value: [$columnValue]
+                        }]
+                    }) {
                         items {
                             id
                         }
@@ -245,12 +250,14 @@ namespace Odmon.Worker.Monday
 
             var variables = new Dictionary<string, object>
             {
-                ["boardIds"] = new[] { boardId.ToString() },
+                ["boardId"] = boardId.ToString(),
                 ["columnId"] = columnId,
                 ["columnValue"] = columnValue,
             };
 
-            using var doc = await ExecuteGraphQLRequestAsync(query, variables, ct, "items_page_by_column_values", boardId, null, null);
+            _logger.LogDebug("Searching Monday board {BoardId} for item with column {ColumnId} = {ColumnValue}", boardId, columnId, columnValue);
+
+            using var doc = await ExecuteGraphQLRequestAsync(query, variables, ct, "items_page", boardId, null, null);
             var root = doc.RootElement;
 
             if (!root.TryGetProperty("data", out var data) ||
@@ -258,31 +265,37 @@ namespace Odmon.Worker.Monday
                 boards.ValueKind != System.Text.Json.JsonValueKind.Array ||
                 boards.GetArrayLength() == 0)
             {
+                _logger.LogDebug("No boards found in response for board {BoardId}", boardId);
                 return null;
             }
 
             var board = boards[0];
-            if (!board.TryGetProperty("items_page_by_column_values", out var itemsPage) ||
+            if (!board.TryGetProperty("items_page", out var itemsPage) ||
                 !itemsPage.TryGetProperty("items", out var items) ||
                 items.ValueKind != System.Text.Json.JsonValueKind.Array ||
                 items.GetArrayLength() == 0)
             {
+                _logger.LogDebug("No items found matching column {ColumnId} = {ColumnValue} on board {BoardId}", columnId, columnValue, boardId);
                 return null;
             }
 
             var firstItem = items[0];
             if (!firstItem.TryGetProperty("id", out var idElement))
             {
+                _logger.LogDebug("Item found but missing id property for column {ColumnId} = {ColumnValue} on board {BoardId}", columnId, columnValue, boardId);
                 return null;
             }
 
             var idString = idElement.GetString();
             if (string.IsNullOrWhiteSpace(idString))
             {
+                _logger.LogDebug("Item found but id is empty for column {ColumnId} = {ColumnValue} on board {BoardId}", columnId, columnValue, boardId);
                 return null;
             }
 
-            return long.Parse(idString);
+            var itemId = long.Parse(idString);
+            _logger.LogDebug("Found Monday item {ItemId} with column {ColumnId} = {ColumnValue} on board {BoardId}", itemId, columnId, columnValue, boardId);
+            return itemId;
         }
 
         private async Task<JsonDocument> ExecuteGraphQLRequestAsync(
