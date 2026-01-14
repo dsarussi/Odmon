@@ -588,6 +588,9 @@ namespace Odmon.Worker.Services
                 _logger.LogDebug("Policy holder phone payload for TikCounter {TikCounter}: column {ColumnId} left empty", c.TikCounter, mainPhoneColumnId);
             }
 
+            // Validate hour column values before serialization
+            ValidateHourColumnValues(columnValues, c.TikCounter);
+
             var payloadJson = JsonSerializer.Serialize(columnValues);
             _logger.LogDebug("Monday payload for TikCounter {TikCounter}: {Payload}", c.TikCounter, payloadJson);
             return payloadJson;
@@ -755,16 +758,40 @@ namespace Odmon.Worker.Services
             }
 
             // Set the value as an object with hour and minute properties (Monday.com hour column format)
+            // Monday.com requires integers, not strings
+            var hour = value.Value.Hours;
+            var minute = value.Value.Minutes;
+
+            // Validate hour and minute ranges
+            if (hour < 0 || hour > 23)
+            {
+                _logger.LogWarning(
+                    "Invalid hour value {Hour} for TikCounter {TikCounter}. Hour must be between 0 and 23. Hearing hour will not be set.",
+                    hour,
+                    tikCounter);
+                return;
+            }
+
+            if (minute < 0 || minute > 59)
+            {
+                _logger.LogWarning(
+                    "Invalid minute value {Minute} for TikCounter {TikCounter}. Minute must be between 0 and 59. Hearing hour will not be set.",
+                    minute,
+                    tikCounter);
+                return;
+            }
+
+            // Create the hour value object with integers (Monday.com requirement)
             var hourValue = new
             {
-                hour = value.Value.Hours.ToString("00", CultureInfo.InvariantCulture),
-                minute = value.Value.Minutes.ToString("00", CultureInfo.InvariantCulture)
+                hour = hour,
+                minute = minute
             };
             columnValues[columnId] = hourValue;
             _logger.LogDebug(
-                "Set hearing hour {Hour}:{Minute} (object format) for TikCounter {TikCounter} on column {ColumnId}",
-                hourValue.hour,
-                hourValue.minute,
+                "Set hearing hour {Hour}:{Minute:00} (object format with integers) for TikCounter {TikCounter} on column {ColumnId}",
+                hour,
+                minute,
                 tikCounter,
                 columnId);
         }
@@ -865,6 +892,166 @@ namespace Odmon.Worker.Services
             public string? Reason { get; set; }
             public string? Warning { get; set; }
             public string? AvailableColumnsInfo { get; set; }
+        }
+
+        private void ValidateHourColumnValues(Dictionary<string, object> columnValues, int tikCounter)
+        {
+            // Check if the hearing hour column is in the payload and validate it
+            var hearingHourColumnId = _mondaySettings.HearingHourColumnId;
+            if (string.IsNullOrWhiteSpace(hearingHourColumnId))
+            {
+                return; // No hour column configured, nothing to validate
+            }
+
+            if (!columnValues.TryGetValue(hearingHourColumnId, out var hourValue))
+            {
+                return; // Hour column not in payload, nothing to validate
+            }
+
+            // Validate that the value is an object with numeric hour and minute properties
+            if (hourValue == null)
+            {
+                _logger.LogWarning(
+                    "Hour column {ColumnId} value is null for TikCounter {TikCounter}. Removing from payload.",
+                    hearingHourColumnId,
+                    tikCounter);
+                columnValues.Remove(hearingHourColumnId);
+                return;
+            }
+
+            // Serialize only the hour column value to JSON and validate via JsonDocument
+            try
+            {
+                var hourValueJson = JsonSerializer.Serialize(hourValue);
+                using var doc = JsonDocument.Parse(hourValueJson);
+                var root = doc.RootElement;
+
+                // Validate it's an object (not array, string, number, etc.)
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    _logger.LogWarning(
+                        "Hour column {ColumnId} value for TikCounter {TikCounter} is not a valid hour object (expected object, got {ValueKind}). Removing from payload.",
+                        hearingHourColumnId,
+                        tikCounter,
+                        root.ValueKind);
+                    columnValues.Remove(hearingHourColumnId);
+                    return;
+                }
+
+                // Validate it contains hour property
+                if (!root.TryGetProperty("hour", out var hourElement))
+                {
+                    _logger.LogWarning(
+                        "Hour column {ColumnId} value for TikCounter {TikCounter} is missing 'hour' property. Removing from payload.",
+                        hearingHourColumnId,
+                        tikCounter);
+                    columnValues.Remove(hearingHourColumnId);
+                    return;
+                }
+
+                // Validate it contains minute property
+                if (!root.TryGetProperty("minute", out var minuteElement))
+                {
+                    _logger.LogWarning(
+                        "Hour column {ColumnId} value for TikCounter {TikCounter} is missing 'minute' property. Removing from payload.",
+                        hearingHourColumnId,
+                        tikCounter);
+                    columnValues.Remove(hearingHourColumnId);
+                    return;
+                }
+
+                // Validate hour is numeric
+                if (hourElement.ValueKind != JsonValueKind.Number)
+                {
+                    _logger.LogWarning(
+                        "Hour column {ColumnId} value for TikCounter {TikCounter} has non-numeric hour property (got {ValueKind}). Removing from payload.",
+                        hearingHourColumnId,
+                        tikCounter,
+                        hourElement.ValueKind);
+                    columnValues.Remove(hearingHourColumnId);
+                    return;
+                }
+
+                // Validate minute is numeric
+                if (minuteElement.ValueKind != JsonValueKind.Number)
+                {
+                    _logger.LogWarning(
+                        "Hour column {ColumnId} value for TikCounter {TikCounter} has non-numeric minute property (got {ValueKind}). Removing from payload.",
+                        hearingHourColumnId,
+                        tikCounter,
+                        minuteElement.ValueKind);
+                    columnValues.Remove(hearingHourColumnId);
+                    return;
+                }
+
+                // Get integer values
+                if (!hourElement.TryGetInt32(out var hour))
+                {
+                    _logger.LogWarning(
+                        "Hour column {ColumnId} value for TikCounter {TikCounter} has hour value that cannot be parsed as integer. Removing from payload.",
+                        hearingHourColumnId,
+                        tikCounter);
+                    columnValues.Remove(hearingHourColumnId);
+                    return;
+                }
+
+                if (!minuteElement.TryGetInt32(out var minute))
+                {
+                    _logger.LogWarning(
+                        "Hour column {ColumnId} value for TikCounter {TikCounter} has minute value that cannot be parsed as integer. Removing from payload.",
+                        hearingHourColumnId,
+                        tikCounter);
+                    columnValues.Remove(hearingHourColumnId);
+                    return;
+                }
+
+                // Validate ranges
+                if (hour < 0 || hour > 23)
+                {
+                    _logger.LogWarning(
+                        "Hour column {ColumnId} value for TikCounter {TikCounter} has invalid hour {Hour} (must be 0-23). Removing from payload.",
+                        hearingHourColumnId,
+                        tikCounter,
+                        hour);
+                    columnValues.Remove(hearingHourColumnId);
+                    return;
+                }
+
+                if (minute < 0 || minute > 59)
+                {
+                    _logger.LogWarning(
+                        "Hour column {ColumnId} value for TikCounter {TikCounter} has invalid minute {Minute} (must be 0-59). Removing from payload.",
+                        hearingHourColumnId,
+                        tikCounter,
+                        minute);
+                    columnValues.Remove(hearingHourColumnId);
+                    return;
+                }
+
+                // Validation passed - log success at debug level
+                _logger.LogDebug(
+                    "Hour column {ColumnId} value validated for TikCounter {TikCounter}: hour={Hour}, minute={Minute}",
+                    hearingHourColumnId,
+                    tikCounter,
+                    hour,
+                    minute);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogWarning(ex,
+                    "Hour column {ColumnId} value for TikCounter {TikCounter} could not be serialized/parsed as JSON. Removing from payload.",
+                    hearingHourColumnId,
+                    tikCounter);
+                columnValues.Remove(hearingHourColumnId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Unexpected error validating hour column {ColumnId} value for TikCounter {TikCounter}. Removing from payload.",
+                    hearingHourColumnId,
+                    tikCounter);
+                columnValues.Remove(hearingHourColumnId);
+            }
         }
 
         private static void TryAddStatusLabelColumn(Dictionary<string, object> columnValues, string? columnId, string? label)
