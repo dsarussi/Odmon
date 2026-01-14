@@ -1,12 +1,17 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Globalization;
 using Odmon.Worker.OdcanitAccess;
 using Odmon.Worker.Data;
 using Odmon.Worker.Monday;
 using Odmon.Worker.Models;
+using Odmon.Worker.Security;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -18,6 +23,7 @@ namespace Odmon.Worker.Services
     {
         private const string DefaultClientPhoneColumnId = "phone_mkwe10tx";
         private const string DefaultClientEmailColumnId = "email_mkwefwgy";
+        private static readonly TimeSpan ColumnCacheTtl = TimeSpan.FromMinutes(30);
         private readonly IOdcanitReader _odcanitReader;
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
@@ -26,6 +32,8 @@ namespace Odmon.Worker.Services
         private readonly ILogger<SyncService> _logger;
         private readonly ITestSafetyPolicy _safetyPolicy;
         private readonly MondaySettings _mondaySettings;
+        private readonly ISecretProvider _secretProvider;
+        private readonly ConcurrentDictionary<long, ColumnCacheEntry> _columnIdCache = new();
 
         public SyncService(
             IOdcanitReader odcanitReader,
@@ -35,7 +43,8 @@ namespace Odmon.Worker.Services
             IConfiguration config,
             ILogger<SyncService> logger,
             ITestSafetyPolicy safetyPolicy,
-            IOptions<MondaySettings> mondayOptions)
+            IOptions<MondaySettings> mondayOptions,
+            ISecretProvider secretProvider)
         {
             _odcanitReader = odcanitReader;
             _integrationDb = integrationDb;
@@ -45,6 +54,7 @@ namespace Odmon.Worker.Services
             _logger = logger;
             _safetyPolicy = safetyPolicy;
             _mondaySettings = mondayOptions.Value ?? new MondaySettings();
+            _secretProvider = secretProvider;
         }
 
         public async Task SyncOdcanitToMondayAsync(CancellationToken ct)
@@ -591,6 +601,9 @@ namespace Odmon.Worker.Services
             // Validate hour column values before serialization
             ValidateHourColumnValues(columnValues, c.TikCounter);
 
+            // Filter out invalid column IDs before serialization
+            await FilterInvalidColumnsAsync(boardId, columnValues, c, ct);
+
             var payloadJson = JsonSerializer.Serialize(columnValues);
             _logger.LogDebug("Monday payload for TikCounter {TikCounter}: {Payload}", c.TikCounter, payloadJson);
             return payloadJson;
@@ -894,6 +907,12 @@ namespace Odmon.Worker.Services
             public string? AvailableColumnsInfo { get; set; }
         }
 
+        private class ColumnCacheEntry
+        {
+            public HashSet<string> ColumnIds { get; set; } = new();
+            public DateTime Timestamp { get; set; }
+        }
+
         private void ValidateHourColumnValues(Dictionary<string, object> columnValues, int tikCounter)
         {
             // Check if the hearing hour column is in the payload and validate it
@@ -1052,6 +1071,301 @@ namespace Odmon.Worker.Services
                     tikCounter);
                 columnValues.Remove(hearingHourColumnId);
             }
+        }
+
+        private async Task<HashSet<string>> GetValidColumnIdsAsync(long boardId, CancellationToken ct)
+        {
+            // Check cache first
+            if (_columnIdCache.TryGetValue(boardId, out var cachedEntry))
+            {
+                var age = DateTime.UtcNow - cachedEntry.Timestamp;
+                if (age < ColumnCacheTtl)
+                {
+                    _logger.LogDebug("Using cached column IDs for board {BoardId} (age: {Age})", boardId, age);
+                    return cachedEntry.ColumnIds;
+                }
+                else
+                {
+                    _logger.LogDebug("Column ID cache expired for board {BoardId} (age: {Age}), refreshing", boardId, age);
+                    _columnIdCache.TryRemove(boardId, out _);
+                }
+            }
+
+            // Fetch from Monday API
+            try
+            {
+                var query = @"query ($boardIds: [ID!]) {
+                    boards (ids: $boardIds) {
+                        id
+                        columns {
+                            id
+                            title
+                        }
+                    }
+                }";
+
+                var variables = new Dictionary<string, object>
+                {
+                    ["boardIds"] = new[] { boardId.ToString() }
+                };
+
+                var payload = JsonSerializer.Serialize(new { query, variables });
+                var content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+                // Use HTTP client with API token from secret provider (same pattern as MondayMetadataProvider)
+                using var httpClient = new HttpClient();
+                httpClient.BaseAddress = new Uri("https://api.monday.com/v2/");
+
+                var apiToken = _secretProvider.GetSecret("Monday__ApiToken");
+                if (string.IsNullOrWhiteSpace(apiToken) || IsPlaceholderValue(apiToken))
+                {
+                    var fallback = _config["Monday:ApiToken"];
+                    if (!string.IsNullOrWhiteSpace(fallback) && !IsPlaceholderValue(fallback))
+                    {
+                        apiToken = fallback;
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(apiToken) && !IsPlaceholderValue(apiToken))
+                {
+                    httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiToken);
+                }
+
+                var resp = await httpClient.PostAsync("", content, ct);
+                resp.EnsureSuccessStatusCode();
+                var body = await resp.Content.ReadAsStringAsync(ct);
+
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("errors", out var errors))
+                {
+                    _logger.LogWarning("Monday.com API error while fetching column metadata for board {BoardId}: {Errors}", boardId, errors.ToString());
+                    throw new InvalidOperationException($"Monday.com API error while fetching column metadata: {errors}");
+                }
+
+                if (!root.TryGetProperty("data", out var data) ||
+                    !data.TryGetProperty("boards", out var boards) ||
+                    boards.ValueKind != JsonValueKind.Array ||
+                    boards.GetArrayLength() == 0)
+                {
+                    throw new InvalidOperationException($"Monday.com unexpected response when fetching board metadata for board {boardId}: {body}");
+                }
+
+                var board = boards[0];
+                if (!board.TryGetProperty("columns", out var columns) ||
+                    columns.ValueKind != JsonValueKind.Array)
+                {
+                    throw new InvalidOperationException($"Monday.com board {boardId} has no columns in response: {body}");
+                }
+
+                var columnIds = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var column in columns.EnumerateArray())
+                {
+                    if (column.TryGetProperty("id", out var columnId))
+                    {
+                        var columnIdValue = columnId.GetString();
+                        if (!string.IsNullOrWhiteSpace(columnIdValue))
+                        {
+                            columnIds.Add(columnIdValue);
+                        }
+                    }
+                }
+
+                // Cache the result
+                var cacheEntry = new ColumnCacheEntry
+                {
+                    ColumnIds = columnIds,
+                    Timestamp = DateTime.UtcNow
+                };
+                _columnIdCache.AddOrUpdate(boardId, cacheEntry, (key, oldValue) => cacheEntry);
+
+                _logger.LogDebug("Fetched and cached {Count} valid column IDs for board {BoardId}", columnIds.Count, boardId);
+                return columnIds;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to fetch valid column IDs for board {BoardId}", boardId);
+                throw;
+            }
+        }
+
+        private static bool IsPlaceholderValue(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return true;
+            }
+
+            if (value.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("__USE_SECRET__", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (value.Contains("__", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private async Task FilterInvalidColumnsAsync(long boardId, Dictionary<string, object> columnValues, OdcanitCase c, CancellationToken ct)
+        {
+            if (columnValues.Count == 0)
+            {
+                return; // Nothing to filter
+            }
+
+            try
+            {
+                var validColumnIds = await GetValidColumnIdsAsync(boardId, ct);
+                var removedColumns = new List<string>();
+
+                // Filter out invalid column IDs
+                foreach (var columnId in columnValues.Keys.ToList())
+                {
+                    if (!validColumnIds.Contains(columnId))
+                    {
+                        var valuePreview = GetValuePreview(columnValues[columnId]);
+                        columnValues.Remove(columnId);
+                        removedColumns.Add(columnId);
+
+                        _logger.LogWarning(
+                            "Removed invalid column ID from payload for TikCounter {TikCounter}, TikNumber {TikNumber}, BoardId {BoardId}: ColumnId={ColumnId}, ValuePreview={ValuePreview}",
+                            c.TikCounter,
+                            c.TikNumber ?? "<null>",
+                            boardId,
+                            columnId,
+                            valuePreview);
+                    }
+                }
+
+                if (removedColumns.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Removed {Count} invalid column ID(s) from payload for TikCounter {TikCounter}, TikNumber {TikNumber}, BoardId {BoardId}: {ColumnIds}",
+                        removedColumns.Count,
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>",
+                        boardId,
+                        string.Join(", ", removedColumns));
+                }
+
+                // Check for missing critical columns
+                await ValidateCriticalColumnsAsync(boardId, validColumnIds, c, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to filter invalid columns for TikCounter {TikCounter}, TikNumber {TikNumber}, BoardId {BoardId}. Proceeding with original payload.",
+                    c.TikCounter,
+                    c.TikNumber ?? "<null>",
+                    boardId);
+                // Continue with original payload if filtering fails
+            }
+        }
+
+        private static string GetValuePreview(object? value)
+        {
+            if (value == null)
+            {
+                return "<null>";
+            }
+
+            try
+            {
+                var json = JsonSerializer.Serialize(value);
+                if (json.Length > 100)
+                {
+                    return json.Substring(0, 97) + "...";
+                }
+                return json;
+            }
+            catch
+            {
+                return value.ToString() ?? "<unknown>";
+            }
+        }
+
+        private async Task ValidateCriticalColumnsAsync(long boardId, HashSet<string> validColumnIds, OdcanitCase c, CancellationToken ct)
+        {
+            var criticalColumns = GetCriticalColumnIds();
+            if (criticalColumns.Count == 0)
+            {
+                return; // No critical columns configured
+            }
+
+            var missingCriticalColumns = new List<string>();
+            foreach (var criticalColumnId in criticalColumns)
+            {
+                if (string.IsNullOrWhiteSpace(criticalColumnId))
+                {
+                    continue;
+                }
+
+                if (!validColumnIds.Contains(criticalColumnId))
+                {
+                    missingCriticalColumns.Add(criticalColumnId);
+                }
+            }
+
+            if (missingCriticalColumns.Count > 0)
+            {
+                var failOnMissing = _config.GetValue<bool>("Monday:FailOnMissingCriticalColumns", false);
+                var logLevel = failOnMissing ? LogLevel.Error : LogLevel.Warning;
+
+                _logger.Log(logLevel,
+                    "Critical column(s) missing from board {BoardId} for TikCounter {TikCounter}, TikNumber {TikNumber}: {MissingColumns}. FailOnMissingCriticalColumns={FailOnMissing}",
+                    boardId,
+                    c.TikCounter,
+                    c.TikNumber ?? "<null>",
+                    string.Join(", ", missingCriticalColumns),
+                    failOnMissing);
+
+                if (failOnMissing)
+                {
+                    throw new InvalidOperationException(
+                        $"Critical column(s) missing from Monday board {boardId}: {string.Join(", ", missingCriticalColumns)}. " +
+                        $"TikCounter={c.TikCounter}, TikNumber={c.TikNumber ?? "<null>"}");
+                }
+            }
+        }
+
+        private List<string> GetCriticalColumnIds()
+        {
+            var criticalColumns = new List<string>();
+
+            // Add configured critical columns from settings
+            if (!string.IsNullOrWhiteSpace(_mondaySettings.CaseNumberColumnId))
+            {
+                criticalColumns.Add(_mondaySettings.CaseNumberColumnId);
+            }
+
+            if (!string.IsNullOrWhiteSpace(_mondaySettings.HearingDateColumnId))
+            {
+                criticalColumns.Add(_mondaySettings.HearingDateColumnId);
+            }
+
+            if (!string.IsNullOrWhiteSpace(_mondaySettings.HearingHourColumnId))
+            {
+                criticalColumns.Add(_mondaySettings.HearingHourColumnId);
+            }
+
+            if (!string.IsNullOrWhiteSpace(_mondaySettings.CourtNameStatusColumnId))
+            {
+                criticalColumns.Add(_mondaySettings.CourtNameStatusColumnId);
+            }
+
+            // Allow additional critical columns from configuration
+            var configCriticalColumns = _config.GetSection("Monday:CriticalColumns").Get<List<string>>();
+            if (configCriticalColumns != null && configCriticalColumns.Count > 0)
+            {
+                criticalColumns.AddRange(configCriticalColumns.Where(c => !string.IsNullOrWhiteSpace(c)));
+            }
+
+            return criticalColumns.Distinct().ToList();
         }
 
         private static void TryAddStatusLabelColumn(Dictionary<string, object> columnValues, string? columnId, string? label)
