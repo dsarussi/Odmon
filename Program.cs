@@ -96,6 +96,8 @@ hostBuilder.ConfigureServices((context, services) =>
         services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
     }
 
+    services.AddScoped<TokenResolverService>();
+
     services.Configure<MondaySettings>(config.GetSection("Monday"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
