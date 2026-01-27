@@ -58,6 +58,15 @@ namespace Odmon.Worker.Services
         /// </summary>
         public async Task<string?> ResolveTokenAsync(int tikCounter, string token, CancellationToken ct)
         {
+            // Defensive check: TikCounter must be valid
+            if (tikCounter <= 0)
+            {
+                _logger.LogWarning(
+                    "Cannot resolve token '{Token}' because TikCounter is invalid ({TikCounter}). TikCounter must be a positive integer from OdcanitCase.TikCounter.",
+                    token, tikCounter);
+                return null;
+            }
+
             // Check ignore list first
             if (IgnoreTokens.Contains(token))
             {

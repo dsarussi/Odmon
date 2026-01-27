@@ -71,7 +71,6 @@ namespace Odmon.Worker.Services
 
             var dryRun = _config.GetValue<bool>("Sync:DryRun", false);
             var maxItems = _config.GetValue<int>("Sync:MaxItemsPerRun", 50);
-            var useTodayOnly = _config.GetValue<bool>("Sync:UseTodayOnly", true);
 
             var safetySection = _config.GetSection("Safety");
             var testMode = safetySection.GetValue<bool>("TestMode", false);
@@ -101,23 +100,20 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            // Load cases created today (or all cases if UseTodayOnly is false)
-            var today = DateTime.Today;
-            var tomorrow = today.AddDays(1);
+            // NEW RULE: Fetch data ONLY by TikCounter - NO date filters
+            var tikCounterSection = _config.GetSection("Sync:TikCounters");
+            var tikCounters = tikCounterSection.Get<int[]>() ?? Array.Empty<int>();
 
-            List<OdcanitCase> newOrUpdatedCases;
-            if (useTodayOnly)
+            if (tikCounters.Length == 0)
             {
-                newOrUpdatedCases = await _odcanitReader.GetCasesCreatedOnDateAsync(today, ct);
-                _logger.LogInformation("Loaded cases created today from Odcanit: {Count}", newOrUpdatedCases.Count);
+                _logger.LogError("Sync:TikCounters configuration is missing or empty. Worker must have explicit TikCounter list to fetch data. No data will be processed.");
+                return;
             }
-            else
-            {
-                // Fallback: load all cases (for future use if needed)
-                _logger.LogWarning("UseTodayOnly is disabled - loading all cases. This is not recommended for production.");
-                newOrUpdatedCases = await _odcanitReader.GetCasesCreatedOnDateAsync(DateTime.MinValue, ct);
-                _logger.LogInformation("Loaded all cases from Odcanit: {Count}", newOrUpdatedCases.Count);
-            }
+
+            _logger.LogInformation("Fetching cases by TikCounter only (ignoring all date filters): {TikCounters}", string.Join(", ", tikCounters));
+
+            List<OdcanitCase> newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
+            _logger.LogInformation("Loaded {Count} cases by TikCounter from Odcanit", newOrUpdatedCases.Count);
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
@@ -129,9 +125,9 @@ namespace Odmon.Worker.Services
             {
                 var caseBoardId = boardIdToUse;
                 var caseGroupId = groupIdToUse;
-                // DEMO: determine if the current case belongs to today's demo window.
-                bool isInDemoWindow = c.tsCreateDate >= today && c.tsCreateDate < tomorrow;
-                if (isInDemoWindow)
+
+                // In TikCounter-only mode, use test board/group if in test mode
+                if (testMode)
                 {
                     if (testBoardId > 0)
                     {
@@ -152,7 +148,8 @@ namespace Odmon.Worker.Services
                 // Explicit override for the single test case (TikCounter == 31490)
                 bool isExplicitTestCase = c.TikCounter == 31490;
                 bool isSafeTestCase = _safetyPolicy.IsTestCase(c) || isExplicitTestCase;
-                bool shouldEnforceSafety = !isInDemoWindow && !isSafeTestCase;
+                // In TikCounter-only mode, skip safety enforcement (all specified TikCounters should be processed)
+                bool shouldEnforceSafety = false;
 
                 // Find or create mapping for this case
                 var mapping = await FindOrCreateMappingAsync(c, caseBoardId, itemName, testMode, dryRun, ct);

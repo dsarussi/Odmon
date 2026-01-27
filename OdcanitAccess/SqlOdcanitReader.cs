@@ -67,6 +67,47 @@ namespace Odmon.Worker.OdcanitAccess
             return cases;
         }
 
+        public async Task<List<OdcanitCase>> GetCasesByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct)
+        {
+            var tikCounterList = tikCounters?.Distinct().ToList() ?? new List<int>();
+
+            if (tikCounterList.Count == 0)
+            {
+                _logger.LogWarning("GetCasesByTikCountersAsync called with empty TikCounter list. Returning empty result.");
+                return new List<OdcanitCase>();
+            }
+
+            // Fetch cases ONLY by TikCounter - NO date filters
+            var cases = await _db.Cases
+                .AsNoTracking()
+                .Where(c => tikCounterList.Contains(c.TikCounter))
+                .ToListAsync(ct);
+
+            if (!cases.Any())
+            {
+                _logger.LogInformation("No cases found for TikCounters: {TikCounters}", string.Join(", ", tikCounterList));
+                return cases;
+            }
+
+            _logger.LogInformation("Loaded {Count} cases by TikCounter from Odcanit: {TikCounters}", cases.Count, string.Join(", ", tikCounterList));
+
+            await EnrichWithClientsAsync(cases, ct);
+
+            var tikCountersForEnrichment = cases
+                .Select(c => c.TikCounter)
+                .Distinct()
+                .ToList();
+
+            await EnrichWithSidesAsync(cases, tikCountersForEnrichment, ct);
+            await EnrichWithDiaryEventsAsync(cases, tikCountersForEnrichment, ct);
+            await EnrichWithUserDataAsync(cases, tikCountersForEnrichment, ct);
+            await EnrichWithHozlapMainDataAsync(cases, tikCountersForEnrichment, ct);
+
+            LogCaseEnrichment(cases);
+
+            return cases;
+        }
+
         private async Task EnrichWithClientsAsync(List<OdcanitCase> cases, CancellationToken ct)
         {
             _logger.LogDebug("Enriching {Count} cases with client contact info.", cases.Count);
@@ -289,6 +330,17 @@ namespace Odmon.Worker.OdcanitAccess
         {
             _logger.LogDebug("Enriching cases with legal user data from vwExportToOuterSystems_UserData.");
 
+            // Defensive check: warn if any case has TikNumber but missing/invalid TikCounter
+            foreach (var c in cases)
+            {
+                if (!string.IsNullOrWhiteSpace(c.TikNumber) && c.TikCounter <= 0)
+                {
+                    _logger.LogWarning(
+                        "Case has TikNumber '{TikNumber}' but TikCounter is invalid ({TikCounter}). UserData enrichment may fail. This should not happen from vwExportToOuterSystems_Files.",
+                        c.TikNumber, c.TikCounter);
+                }
+            }
+
             var tikCounterSet = new HashSet<int>(tikCounters);
 
             var userDataRows = await _db.UserData
@@ -296,8 +348,22 @@ namespace Odmon.Worker.OdcanitAccess
                 .Where(u => tikCounterSet.Contains(u.TikCounter))
                 .ToListAsync(ct);
 
+            static string Norm(string? s)
+            {
+                if (string.IsNullOrWhiteSpace(s)) return "";
+                // Normalize: replace NBSP, trim, collapse spaces
+                return string.Join(" ",
+                    s.Replace('\u00A0', ' ')
+                     .Trim()
+                     .Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries));
+            }
+
+            var targetPage = Norm(LegalUserDataPageName);
+
+            _logger.LogDebug("LegalUserDataPageName raw='{Raw}', normalized='{Normalized}'", LegalUserDataPageName, targetPage);
+
             var legalUserDataRows = userDataRows
-                .Where(u => u.PageName == LegalUserDataPageName)
+                .Where(u => Norm(u.PageName) == targetPage)
                 .ToList();
 
             _logger.LogDebug(
@@ -324,7 +390,16 @@ namespace Odmon.Worker.OdcanitAccess
 
             foreach (var odcanitCase in cases)
             {
+                // Always use TikCounter (internal numeric ID), never parse TikNumber
                 var tikCounterKey = odcanitCase.TikCounter;
+
+                if (tikCounterKey <= 0)
+                {
+                    _logger.LogWarning(
+                        "Skipping UserData enrichment for case with TikNumber '{TikNumber}' because TikCounter is invalid ({TikCounter}).",
+                        odcanitCase.TikNumber, tikCounterKey);
+                    continue;
+                }
 
                 if (!userDataByCase.TryGetValue(tikCounterKey, out var rows))
                 {
@@ -358,6 +433,7 @@ namespace Odmon.Worker.OdcanitAccess
                 }
             }
         }
+
 
         private static string? NormalizeUserFieldName(string? fieldName)
         {

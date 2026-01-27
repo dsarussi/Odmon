@@ -51,6 +51,15 @@ namespace Odmon.Worker.OdcanitAccess
                 .ToList();
             return Task.FromResult(result);
         }
+
+        public Task<List<OdcanitCase>> GetCasesByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct)
+        {
+            var tikCounterSet = tikCounters?.ToHashSet() ?? new HashSet<int>();
+            var result = _cases
+                .Where(c => tikCounterSet.Contains(c.TikCounter))
+                .ToList();
+            return Task.FromResult(result);
+        }
     }
 }
 
