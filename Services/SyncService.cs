@@ -1682,7 +1682,7 @@ namespace Odmon.Worker.Services
                             BoardId = boardId,
                             MondayItemId = existingItemId.Value,
                             LastSyncFromOdcanitUtc = DateTime.UtcNow,
-                            OdcanitVersion = c.tsModifyDate.ToString("o"),
+                            OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
                             MondayChecksum = itemName,
                             IsTest = testMode
                         };
@@ -1750,7 +1750,7 @@ namespace Odmon.Worker.Services
                     c.TikCounter, boardId, mapping.MondayItemId);
             }
 
-            var odcanitVersion = c.tsModifyDate.ToString("o");
+            var odcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
             var requiresDataUpdate = mapping.OdcanitVersion != odcanitVersion;
             var requiresNameUpdate = mapping.MondayChecksum != itemName;
 
@@ -1795,17 +1795,17 @@ namespace Odmon.Worker.Services
             var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: true, ct);
             var mondayItemId = await _mondayClient.CreateItemAsync(boardId, groupId, itemName, columnValuesJson, ct);
 
-            var newMapping = new MondayItemMapping
-            {
-                TikCounter = c.TikCounter,
-                TikNumber = c.TikNumber,
-                BoardId = boardId,
-                MondayItemId = mondayItemId,
-                LastSyncFromOdcanitUtc = DateTime.UtcNow,
-                OdcanitVersion = c.tsModifyDate.ToString("o"),
-                MondayChecksum = itemName,
-                IsTest = testMode
-            };
+                        var newMapping = new MondayItemMapping
+                        {
+                            TikCounter = c.TikCounter,
+                            TikNumber = c.TikNumber,
+                            BoardId = boardId,
+                            MondayItemId = mondayItemId,
+                            LastSyncFromOdcanitUtc = DateTime.UtcNow,
+                            OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
+                            MondayChecksum = itemName,
+                            IsTest = testMode
+                        };
             _integrationDb.MondayItemMappings.Add(newMapping);
 
             return mondayItemId;
@@ -1832,7 +1832,7 @@ namespace Odmon.Worker.Services
             {
                 var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: false, ct);
                 await _mondayClient.UpdateItemAsync(boardId, mapping.MondayItemId, columnValuesJson, ct);
-                mapping.OdcanitVersion = c.tsModifyDate.ToString("o");
+                mapping.OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
             }
 
             // Update mapping metadata (including TikNumber and BoardId if they were missing)

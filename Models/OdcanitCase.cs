@@ -13,8 +13,8 @@ namespace Odmon.Worker.Models
         public string ClientName { get; set; } = string.Empty;
         public string StatusName { get; set; } = string.Empty;
         public int? TikOwner { get; set; }
-        public DateTime tsCreateDate { get; set; }
-        public DateTime tsModifyDate { get; set; }
+        public DateTime? tsCreateDate { get; set; }
+        public DateTime? tsModifyDate { get; set; }
         public DateTime? TikCloseDate { get; set; }
         public DateTime? StatusChangedDate { get; set; }
         public DateTime? HozlapOpenDate { get; set; }

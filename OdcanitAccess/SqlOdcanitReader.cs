@@ -38,7 +38,10 @@ namespace Odmon.Worker.OdcanitAccess
             {
                 var startDate = date.Date;
                 var endDate = startDate.AddDays(1);
-                casesQuery = casesQuery.Where(c => c.tsCreateDate >= startDate && c.tsCreateDate < endDate);
+                casesQuery = casesQuery.Where(c =>
+                    c.tsCreateDate.HasValue &&
+                    c.tsCreateDate.Value >= startDate &&
+                    c.tsCreateDate.Value < endDate);
             }
 
             var cases = await casesQuery
@@ -76,6 +79,8 @@ namespace Odmon.Worker.OdcanitAccess
                 _logger.LogWarning("GetCasesByTikCountersAsync called with empty TikCounter list. Returning empty result.");
                 return new List<OdcanitCase>();
             }
+
+            _logger.LogDebug("Fetching Odcanit cases by TikCounter from vwExportToOuterSystems_Files for TikCounters: {TikCounters}", string.Join(", ", tikCounterList));
 
             // Fetch cases ONLY by TikCounter - NO date filters
             var cases = await _db.Cases
@@ -284,8 +289,10 @@ namespace Odmon.Worker.OdcanitAccess
                 // Monday updates are triggered when the hearing changes but remain idempotent otherwise.
                 if (hearing.tsModifyDate.HasValue)
                 {
-                    var maxTicks = Math.Max(odcanitCase.tsModifyDate.Ticks, hearing.tsModifyDate.Value.Ticks);
-                    odcanitCase.tsModifyDate = new DateTime(maxTicks, odcanitCase.tsModifyDate.Kind);
+                    if (!odcanitCase.tsModifyDate.HasValue || hearing.tsModifyDate.Value > odcanitCase.tsModifyDate.Value)
+                    {
+                        odcanitCase.tsModifyDate = hearing.tsModifyDate.Value;
+                    }
                 }
             }
         }
