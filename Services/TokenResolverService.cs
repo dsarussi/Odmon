@@ -33,18 +33,25 @@ namespace Odmon.Worker.Services
             "התייקרות פוליסה",
             "מ.אגרה I",
             "אגרת בית משפט ( I+II )",
-            "אגרהI"
+            "אגרהI",
+            "אגרת בית משפט"
         };
 
         // Token to UserData FieldName mapping (for tokens that don't match FieldName exactly)
         private static readonly Dictionary<string, string> TokenToFieldNameMap = new Dictionary<string, string>(HebrewComparer)
         {
-            ["נזק ישיר"] = "סכום נזק ישיר"
+            // Amounts
+            ["נזק ישיר"] = "סכום נזק ישיר",
+
+            // Defendant address: token {{רחוב נתבע}} backed by UserData "כתובת נתבע"
+            ["רחוב נתבע"] = "כתובת נתבע",
+
+            // Third-party car plate: token {{מספר רישוי צד ג}} backed by UserData "מספר רישוי רכב ג'"
+            ["מספר רישוי צד ג"] = "מספר רישוי רכב ג'"
         };
 
         private readonly OdcanitDbContext _odcanitDb;
         private readonly ILogger<TokenResolverService> _logger;
-        private readonly Dictionary<int, Dictionary<string, OdcanitUserData>> _userDataCache = new();
 
         public TokenResolverService(OdcanitDbContext odcanitDb, ILogger<TokenResolverService> logger)
         {
@@ -58,78 +65,9 @@ namespace Odmon.Worker.Services
         /// </summary>
         public async Task<string?> ResolveTokenAsync(int tikCounter, string token, CancellationToken ct)
         {
-            // Defensive check: TikCounter must be valid
-            if (tikCounter <= 0)
-            {
-                _logger.LogWarning(
-                    "Cannot resolve token '{Token}' because TikCounter is invalid ({TikCounter}). TikCounter must be a positive integer from OdcanitCase.TikCounter.",
-                    token, tikCounter);
-                return null;
-            }
-
-            // Check ignore list first
-            if (IgnoreTokens.Contains(token))
-            {
-                _logger.LogDebug("Token '{Token}' is in ignore list for TikCounter {TikCounter}", token, tikCounter);
-                return string.Empty;
-            }
-
-            // Load and cache UserData for this TikCounter if not already loaded
-            if (!_userDataCache.TryGetValue(tikCounter, out var fieldMap))
-            {
-                fieldMap = await LoadUserDataForTikAsync(tikCounter, ct);
-                _userDataCache[tikCounter] = fieldMap;
-            }
-
-            // Resolve field name (check mapping first, then use token as-is)
-            var fieldName = TokenToFieldNameMap.TryGetValue(token, out var mapped)
-                ? mapped
-                : token;
-
-            // Normalize field name (same logic as SqlOdcanitReader)
-            var normalizedFieldName = NormalizeUserFieldName(fieldName);
-            if (normalizedFieldName == null)
-            {
-                _logger.LogDebug("Token '{Token}' normalized to null for TikCounter {TikCounter}", token, tikCounter);
-                return null;
-            }
-
-            // Look up in cached UserData
-            if (!fieldMap.TryGetValue(normalizedFieldName, out var userDataRow))
-            {
-                _logger.LogDebug("Token '{Token}' (FieldName: '{FieldName}') not found in UserData for TikCounter {TikCounter}", token, fieldName, tikCounter);
-                return null;
-            }
-
-            // Extract value: prefer numData, fallback to strData
-            string? value = null;
-
-            if (userDataRow.numData.HasValue)
-            {
-                // Format as plain number text (no currency symbols, no decimals if whole number)
-                var numValue = Convert.ToDecimal(userDataRow.numData.Value, CultureInfo.InvariantCulture);
-                if (numValue == Math.Truncate(numValue))
-                {
-                    value = ((long)numValue).ToString(CultureInfo.InvariantCulture);
-                }
-                else
-                {
-                    value = numValue.ToString(CultureInfo.InvariantCulture);
-                }
-            }
-            else if (!string.IsNullOrWhiteSpace(userDataRow.strData))
-            {
-                value = userDataRow.strData.Trim();
-            }
-
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                _logger.LogDebug("Token '{Token}' found in UserData for TikCounter {TikCounter} but value is empty", token, tikCounter);
-                return null;
-            }
-
-            _logger.LogDebug("Resolved token '{Token}' = '{Value}' for TikCounter {TikCounter}", token, value, tikCounter);
-            return value;
+            // For single-token callers, delegate to ResolveTokensAsync to reuse the same normalization pipeline.
+            var dict = await ResolveTokensAsync(tikCounter, new[] { token }, ct);
+            return dict.TryGetValue(token, out var value) ? value : null;
         }
 
         /// <summary>
@@ -142,28 +80,96 @@ namespace Odmon.Worker.Services
             var ignored = 0;
             var unresolved = new List<string>();
 
+            // Defensive check: TikCounter must be valid
+            if (tikCounter <= 0)
+            {
+                _logger.LogWarning(
+                    "Cannot resolve tokens because TikCounter is invalid ({TikCounter}). TikCounter must be a positive integer from OdcanitCase.TikCounter.",
+                    tikCounter);
+                foreach (var token in tokens)
+                {
+                    result[token] = string.Empty;
+                    unresolved.Add(token);
+                }
+                return result;
+            }
+
+            // Load and normalize UserData for this TikCounter ONCE
+            var normalizedUserData = await LoadNormalizedUserDataAsync(tikCounter, ct);
+
             foreach (var token in tokens)
             {
-                var value = await ResolveTokenAsync(tikCounter, token, ct);
-                
-                if (value == string.Empty)
+                // Check ignore list first
+                if (IgnoreTokens.Contains(token))
                 {
-                    // Explicitly ignored
+                    _logger.LogDebug("Token '{Token}' is in ignore list for TikCounter {TikCounter}", token, tikCounter);
                     result[token] = string.Empty;
                     ignored++;
+                    continue;
                 }
-                else if (value != null)
+
+                // Resolve desired field name (mapping first, then token as-is)
+                var desiredFieldName = TokenToFieldNameMap.TryGetValue(token, out var mapped)
+                    ? mapped
+                    : token;
+
+                var normalizedDesired = NormalizeKey(desiredFieldName);
+
+                string? value = null;
+
+                if (!string.IsNullOrWhiteSpace(normalizedDesired) &&
+                    normalizedUserData.TryGetValue(normalizedDesired, out var directValue))
+                {
+                    value = directValue;
+                }
+                else if (token == "מספר רישוי צד ג")
+                {
+                    // Extra safety: try known variants
+                    var alt1 = NormalizeKey("מספר רישוי רכב ג");
+                    var alt2 = NormalizeKey("מספר רישוי רכב ג'");
+
+                    if (!string.IsNullOrWhiteSpace(alt1) &&
+                        normalizedUserData.TryGetValue(alt1, out var altVal1))
+                    {
+                        value = altVal1;
+                    }
+                    else if (!string.IsNullOrWhiteSpace(alt2) &&
+                             normalizedUserData.TryGetValue(alt2, out var altVal2))
+                    {
+                        value = altVal2;
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(value))
                 {
                     result[token] = value;
                     resolvedFromOdcanit++;
                 }
                 else
                 {
-                    // Not found
                     result[token] = string.Empty;
                     unresolved.Add(token);
+
+                    _logger.LogDebug(
+                        "Unresolved token for TikCounter {TikCounter}: token='{Token}', desiredField='{DesiredField}', normalized='{NormalizedDesiredField}'",
+                        tikCounter,
+                        token,
+                        desiredFieldName,
+                        normalizedDesired ?? "<null>");
                 }
             }
+
+            // Targeted debug log for key tokens used in claim templates
+            result.TryGetValue("רחוב נתבע", out var defendantAddress);
+            result.TryGetValue("מספר רישוי צד ג", out var thirdPartyCarNumber);
+            result.TryGetValue("נסיבות התאונה בקצרה", out var accidentCircumstances);
+
+            _logger.LogDebug(
+                "Document tokens for TikCounter {TikCounter}: DefendantAddress='{DefendantAddress}', ThirdPartyCarNumber='{ThirdPartyCarNumber}', AccidentCircumstances='{AccidentCircumstances}'",
+                tikCounter,
+                defendantAddress ?? string.Empty,
+                thirdPartyCarNumber ?? string.Empty,
+                accidentCircumstances ?? string.Empty);
 
             _logger.LogInformation(
                 "Token resolution summary for TikCounter {TikCounter}: Resolved from Odcanit={Resolved}, Ignored={Ignored}, Unresolved={Unresolved}. Unresolved tokens: {UnresolvedTokens}",
@@ -176,51 +182,90 @@ namespace Odmon.Worker.Services
             return result;
         }
 
-        /// <summary>
-        /// Clears the UserData cache. Call this at the start of each document generation run.
-        /// </summary>
-        public void ClearCache()
-        {
-            _userDataCache.Clear();
-            _logger.LogDebug("Cleared UserData cache");
-        }
-
-        private async Task<Dictionary<string, OdcanitUserData>> LoadUserDataForTikAsync(int tikCounter, CancellationToken ct)
+        private async Task<Dictionary<string, string>> LoadNormalizedUserDataAsync(int tikCounter, CancellationToken ct)
         {
             var userDataRows = await _odcanitDb.UserData
                 .AsNoTracking()
                 .Where(u => u.TikCounter == tikCounter && u.PageName == LegalUserDataPageName)
                 .ToListAsync(ct);
 
-            var fieldMap = new Dictionary<string, OdcanitUserData>(HebrewComparer);
+            var fieldMap = new Dictionary<string, string>(HebrewComparer);
 
             foreach (var row in userDataRows)
             {
-                var normalized = NormalizeUserFieldName(row.FieldName);
-                if (normalized != null && !fieldMap.ContainsKey(normalized))
+                var normalizedKey = NormalizeKey(row.FieldName);
+                if (string.IsNullOrWhiteSpace(normalizedKey))
                 {
-                    fieldMap[normalized] = row;
+                    continue;
+                }
+
+                // Prefer first non-empty value for each normalized key
+                if (fieldMap.ContainsKey(normalizedKey))
+                {
+                    continue;
+                }
+
+                string? value = null;
+
+                if (row.numData.HasValue)
+                {
+                    // Format as plain number text (no currency symbols, no decimals if whole number)
+                    var numValue = Convert.ToDecimal(row.numData.Value, CultureInfo.InvariantCulture);
+                    if (numValue == Math.Truncate(numValue))
+                    {
+                        value = ((long)numValue).ToString(CultureInfo.InvariantCulture);
+                    }
+                    else
+                    {
+                        value = numValue.ToString(CultureInfo.InvariantCulture);
+                    }
+                }
+                else if (!string.IsNullOrWhiteSpace(row.strData))
+                {
+                    value = row.strData.Trim();
+                }
+
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    fieldMap[normalizedKey] = value;
                 }
             }
 
-            _logger.LogDebug("Loaded {Count} UserData rows for TikCounter {TikCounter} (PageName: '{PageName}')", userDataRows.Count, tikCounter, LegalUserDataPageName);
+            _logger.LogDebug(
+                "Loaded {Count} normalized UserData fields for TikCounter {TikCounter} (PageName: '{PageName}')",
+                fieldMap.Count,
+                tikCounter,
+                LegalUserDataPageName);
+
             return fieldMap;
         }
 
-        private static string? NormalizeUserFieldName(string? fieldName)
+        private static string? NormalizeKey(string? input)
         {
-            if (string.IsNullOrWhiteSpace(fieldName))
+            if (string.IsNullOrWhiteSpace(input))
             {
                 return null;
             }
 
-            // Use string replacement to avoid character encoding issues
-            var result = fieldName
-                .Replace("\u2019", "'")  // Right single quotation mark -> apostrophe
-                .Replace("\u05F4", "\"") // Hebrew punctuation geresh -> double quote
-                .Trim();
-            
-            return result;
+            // Replace NBSP with regular space
+            var s = input.Replace('\u00A0', ' ');
+
+            // Remove geresh / gershayim (ASCII and Hebrew)
+            s = s
+                .Replace("'", string.Empty)
+                .Replace("\"", string.Empty)
+                .Replace("\u05F3", string.Empty) // Hebrew geresh
+                .Replace("\u05F4", string.Empty); // Hebrew gershayim
+
+            // Trim and collapse internal whitespace
+            s = s.Trim();
+            if (s.Length == 0)
+            {
+                return null;
+            }
+
+            var parts = s.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            return string.Join(" ", parts);
         }
     }
 }
