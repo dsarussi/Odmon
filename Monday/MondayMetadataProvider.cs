@@ -15,9 +15,11 @@ namespace Odmon.Worker.Monday
 {
     public class MondayMetadataProvider : IMondayMetadataProvider
     {
+        private const int DropdownLabelsCacheTtlMinutes = 15;
         private readonly HttpClient _httpClient;
         private readonly ILogger<MondayMetadataProvider> _logger;
         private readonly Dictionary<(long boardId, string title), string> _cache = new();
+        private readonly Dictionary<(long boardId, string columnId), DropdownLabelsCacheEntry> _dropdownLabelsCache = new();
 
         public MondayMetadataProvider(
             HttpClient httpClient,
@@ -146,6 +148,207 @@ namespace Odmon.Worker.Monday
             }
 
             throw new InvalidOperationException($"Column with title '{title}' not found on Monday board {boardId}. Available columns: {string.Join(", ", columns.EnumerateArray().Select(c => c.TryGetProperty("title", out var t) ? t.GetString() : "?"))}");
+        }
+
+        public async Task<HashSet<string>> GetAllowedDropdownLabelsAsync(long boardId, string columnId, CancellationToken ct = default)
+        {
+            var cacheKey = (boardId, columnId);
+            
+            // Check cache with TTL
+            lock (_dropdownLabelsCache)
+            {
+                if (_dropdownLabelsCache.TryGetValue(cacheKey, out var cachedEntry))
+                {
+                    var age = DateTime.UtcNow - cachedEntry.Timestamp;
+                    if (age.TotalMinutes < DropdownLabelsCacheTtlMinutes)
+                    {
+                        _logger.LogDebug("Using cached dropdown labels for column {ColumnId} on board {BoardId} (age: {Age})", columnId, boardId, age);
+                        return cachedEntry.Labels;
+                    }
+                    else
+                    {
+                        _logger.LogDebug("Dropdown labels cache expired for column {ColumnId} on board {BoardId} (age: {Age}), refreshing", columnId, boardId, age);
+                        _dropdownLabelsCache.Remove(cacheKey);
+                    }
+                }
+            }
+
+            try
+            {
+                var query = @"query ($boardIds: [ID!]) {
+                    boards (ids: $boardIds) {
+                        id
+                        columns {
+                            id
+                            type
+                            settings_str
+                        }
+                    }
+                }";
+
+                var variables = new Dictionary<string, object>
+                {
+                    ["boardIds"] = new[] { boardId.ToString() }
+                };
+
+                var payload = JsonSerializer.Serialize(new { query, variables });
+                var content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+                var resp = await _httpClient.PostAsync("", content, ct);
+                resp.EnsureSuccessStatusCode();
+                var body = await resp.Content.ReadAsStringAsync(ct);
+
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("errors", out var errors))
+                {
+                    _logger.LogWarning("Monday.com API error while fetching dropdown metadata for board {BoardId}: {Errors}", boardId, errors.ToString());
+                    throw new InvalidOperationException($"Monday.com API error while fetching dropdown metadata: {errors}");
+                }
+
+                if (!root.TryGetProperty("data", out var data) ||
+                    !data.TryGetProperty("boards", out var boards) ||
+                    boards.ValueKind != JsonValueKind.Array ||
+                    boards.GetArrayLength() == 0)
+                {
+                    throw new InvalidOperationException($"Monday.com unexpected response when fetching dropdown metadata for board {boardId}: {body}");
+                }
+
+                var board = boards[0];
+                if (!board.TryGetProperty("columns", out var columns) ||
+                    columns.ValueKind != JsonValueKind.Array)
+                {
+                    throw new InvalidOperationException($"Monday.com board {boardId} has no columns in dropdown metadata response: {body}");
+                }
+
+                JsonElement? targetColumn = null;
+                foreach (var column in columns.EnumerateArray())
+                {
+                    if (column.TryGetProperty("id", out var idElement))
+                    {
+                        var idValue = idElement.GetString();
+                        if (string.Equals(idValue, columnId, StringComparison.Ordinal))
+                        {
+                            targetColumn = column;
+                            break;
+                        }
+                    }
+                }
+
+                if (targetColumn is null)
+                {
+                    _logger.LogWarning(
+                        "Dropdown column {ColumnId} not found on board {BoardId} when resolving allowed labels.",
+                        columnId,
+                        boardId);
+                    var empty = new HashSet<string>(StringComparer.Ordinal);
+                    lock (_dropdownLabelsCache)
+                    {
+                        _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
+                        {
+                            Labels = empty,
+                            Timestamp = DateTime.UtcNow
+                        };
+                    }
+                    return empty;
+                }
+
+                if (!targetColumn.Value.TryGetProperty("settings_str", out var settingsElement))
+                {
+                    _logger.LogWarning(
+                        "Dropdown column {ColumnId} on board {BoardId} has no settings_str; cannot resolve allowed labels.",
+                        columnId,
+                        boardId);
+                    var empty = new HashSet<string>(StringComparer.Ordinal);
+                    lock (_dropdownLabelsCache)
+                    {
+                        _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
+                        {
+                            Labels = empty,
+                            Timestamp = DateTime.UtcNow
+                        };
+                    }
+                    return empty;
+                }
+
+                var settingsStr = settingsElement.GetString();
+                if (string.IsNullOrWhiteSpace(settingsStr))
+                {
+                    var empty = new HashSet<string>(StringComparer.Ordinal);
+                    lock (_dropdownLabelsCache)
+                    {
+                        _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
+                        {
+                            Labels = empty,
+                            Timestamp = DateTime.UtcNow
+                        };
+                    }
+                    return empty;
+                }
+
+                using var settingsDoc = JsonDocument.Parse(settingsStr);
+                var settingsRoot = settingsDoc.RootElement;
+
+                var labels = new HashSet<string>(StringComparer.Ordinal);
+                if (settingsRoot.TryGetProperty("labels", out var labelsElement) &&
+                    labelsElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var label in labelsElement.EnumerateArray())
+                    {
+                        if (label.TryGetProperty("name", out var nameElement))
+                        {
+                            var name = nameElement.GetString();
+                            if (!string.IsNullOrWhiteSpace(name))
+                            {
+                                labels.Add(name);
+                            }
+                        }
+                    }
+                }
+
+                lock (_dropdownLabelsCache)
+                {
+                    _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
+                    {
+                        Labels = labels,
+                        Timestamp = DateTime.UtcNow
+                    };
+                }
+
+                _logger.LogDebug(
+                    "Resolved {Count} allowed dropdown label(s) for column {ColumnId} on board {BoardId}.",
+                    labels.Count,
+                    columnId,
+                    boardId);
+
+                return labels;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to fetch/parse allowed dropdown labels for column {ColumnId} on board {BoardId}.",
+                    columnId,
+                    boardId);
+
+                var empty = new HashSet<string>(StringComparer.Ordinal);
+                lock (_dropdownLabelsCache)
+                {
+                    _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
+                    {
+                        Labels = empty,
+                        Timestamp = DateTime.UtcNow
+                    };
+                }
+                return empty;
+            }
+        }
+
+        private class DropdownLabelsCacheEntry
+        {
+            public HashSet<string> Labels { get; set; } = new();
+            public DateTime Timestamp { get; set; }
         }
     }
 }

@@ -483,7 +483,7 @@ namespace Odmon.Worker.Services
             var columnValues = new Dictionary<string, object>();
 
             TryAddStringColumn(columnValues, _mondaySettings.CaseNumberColumnId, c.TikNumber);
-            TryAddDropdownColumn(columnValues, _mondaySettings.ClientNumberColumnId, c.ClientVisualID);
+            await TryAddClientNumberDropdownAsync(columnValues, boardId, _mondaySettings.ClientNumberColumnId, c.ClientVisualID, c.TikCounter, c.TikNumber, ct);
             TryAddStringColumn(columnValues, _mondaySettings.ClaimNumberColumnId, c.Additional ?? c.HozlapTikNumber);
 
             var normalizedPolicyHolderPhone = string.IsNullOrWhiteSpace(c.PolicyHolderPhone)
@@ -1383,6 +1383,70 @@ namespace Odmon.Worker.Services
             }
 
             columnValues[columnId] = new { labels = new[] { value } };
+        }
+
+        private async Task TryAddClientNumberDropdownAsync(
+            Dictionary<string, object> columnValues,
+            long boardId,
+            string? columnId,
+            string? clientNumber,
+            int tikCounter,
+            string? tikNumber,
+            CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(columnId))
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(clientNumber))
+            {
+                _logger.LogDebug(
+                    "ClientNumber is null/empty for TikCounter {TikCounter}, TikNumber {TikNumber}; dropdown column {ColumnId} will be omitted.",
+                    tikCounter,
+                    tikNumber ?? "<null>",
+                    columnId);
+                return;
+            }
+
+            var trimmedClientNumber = clientNumber.Trim();
+
+            try
+            {
+                var allowedLabels = await _mondayMetadataProvider.GetAllowedDropdownLabelsAsync(boardId, columnId, ct);
+
+                if (!allowedLabels.Contains(trimmedClientNumber))
+                {
+                    _logger.LogWarning(
+                        "ClientNumber '{ClientNumber}' is not a valid label for dropdown column {ColumnId} on board {BoardId}. TikCounter={TikCounter}, TikNumber={TikNumber}. Column will be omitted.",
+                        trimmedClientNumber,
+                        columnId,
+                        boardId,
+                        tikCounter,
+                        tikNumber ?? "<null>");
+                    return;
+                }
+
+                columnValues[columnId] = new { labels = new[] { trimmedClientNumber } };
+                _logger.LogDebug(
+                    "Including ClientNumber '{ClientNumber}' for TikCounter {TikCounter}, TikNumber {TikNumber} in dropdown column {ColumnId} on board {BoardId}.",
+                    trimmedClientNumber,
+                    tikCounter,
+                    tikNumber ?? "<null>",
+                    columnId,
+                    boardId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to resolve allowed labels for dropdown column {ColumnId} on board {BoardId}. ClientNumber '{ClientNumber}' for TikCounter {TikCounter}, TikNumber {TikNumber} will not be sent.",
+                    columnId,
+                    boardId,
+                    trimmedClientNumber,
+                    tikCounter,
+                    tikNumber ?? "<null>");
+            }
         }
 
         private static string MapTaskTypeLabel(string? tikType)
