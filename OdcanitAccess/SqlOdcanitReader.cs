@@ -321,14 +321,44 @@ namespace Odmon.Worker.OdcanitAccess
                     continue;
                 }
 
-                // Build court case number from clcCourtNum + CourtName
-                var courtCaseDisplay = string.IsNullOrWhiteSpace(hozlapData.clcCourtNum)
-                    ? hozlapData.CourtName
-                    : $"{hozlapData.clcCourtNum} {hozlapData.CourtName}";
-
-                if (!string.IsNullOrWhiteSpace(courtCaseDisplay))
+                // Map court case number and court name independently from Hozlap
+                if (!string.IsNullOrWhiteSpace(hozlapData.clcCourtNum))
                 {
-                    odcanitCase.CourtCaseNumber = courtCaseDisplay.Trim();
+                    var raw = hozlapData.clcCourtNum;
+                    var normalizedCaseNumber = NormalizeCourtCaseNumberAndCity(raw, out var derivedCity);
+                    if (!string.IsNullOrWhiteSpace(normalizedCaseNumber))
+                    {
+                        odcanitCase.CourtCaseNumber = normalizedCaseNumber;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(derivedCity) && string.IsNullOrWhiteSpace(odcanitCase.CourtCity))
+                    {
+                        odcanitCase.CourtCity = derivedCity;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(derivedCity))
+                    {
+                        _logger.LogDebug(
+                            "Split CourtCaseNumber+City from Hozlap for TikCounter {TikCounter}: raw='{Raw}', caseNumber='{CaseNumber}', city='{City}'",
+                            odcanitCase.TikCounter,
+                            raw ?? "<null>",
+                            normalizedCaseNumber ?? "<null>",
+                            derivedCity);
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(hozlapData.CourtName))
+                {
+                    odcanitCase.CourtName = hozlapData.CourtName.Trim();
+
+                    if (string.IsNullOrWhiteSpace(odcanitCase.CourtCity))
+                    {
+                        var cityFromName = DeriveCourtCityFromCourtName(odcanitCase.CourtName);
+                        if (!string.IsNullOrWhiteSpace(cityFromName))
+                        {
+                            odcanitCase.CourtCity = cityFromName;
+                        }
+                    }
                 }
             }
         }
@@ -466,6 +496,13 @@ namespace Odmon.Worker.OdcanitAccess
                     plaintiffAddressFromUserData,
                     defendantNameFromUserData,
                     defendantAddressFromUserData);
+
+                _logger.LogDebug(
+                    "Court fields for TikCounter {TikCounter}: CourtCaseNumber='{CourtCaseNumber}', CourtCity='{CourtCity}', CourtName='{CourtName}'",
+                    odcanitCase.TikCounter,
+                    odcanitCase.CourtCaseNumber ?? "<null>",
+                    odcanitCase.CourtCity ?? "<null>",
+                    odcanitCase.CourtName ?? "<null>");
             }
         }
 
@@ -587,7 +624,115 @@ namespace Odmon.Worker.OdcanitAccess
             Add("פקס", (c, row) => c.DefendantFax = row.strData);
             Add("שווי שרידים", (c, row) => c.ResidualValueAmount = ExtractDecimal(row) ?? c.ResidualValueAmount);
 
+            // Court fields from UserData
+            Add("מספר הליך בית משפט", (c, row) =>
+            {
+                var raw = row.strData;
+                var normalizedCaseNumber = NormalizeCourtCaseNumberAndCity(raw, out var derivedCity);
+                if (!string.IsNullOrWhiteSpace(normalizedCaseNumber))
+                {
+                    c.CourtCaseNumber = normalizedCaseNumber;
+                }
+
+                if (!string.IsNullOrWhiteSpace(derivedCity) && string.IsNullOrWhiteSpace(c.CourtCity))
+                {
+                    c.CourtCity = derivedCity;
+                }
+
+                if (!string.IsNullOrWhiteSpace(derivedCity))
+                {
+                    _logger.LogDebug(
+                        "Split CourtCaseNumber+City from UserData for TikCounter {TikCounter}: raw='{Raw}', caseNumber='{CaseNumber}', city='{City}'",
+                        c.TikCounter,
+                        raw ?? "<null>",
+                        normalizedCaseNumber ?? "<null>",
+                        derivedCity);
+                }
+            });
+
+            Add("שם בית משפט", (c, row) =>
+            {
+                var name = row.strData?.Trim();
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    c.CourtName = name;
+                    var cityFromName = DeriveCourtCityFromCourtName(name);
+                    if (!string.IsNullOrWhiteSpace(cityFromName) && string.IsNullOrWhiteSpace(c.CourtCity))
+                    {
+                        c.CourtCity = cityFromName;
+                    }
+                }
+            });
+
             return dict;
+        }
+
+        private static string? NormalizeCourtCaseNumberAndCity(string? raw, out string? derivedCity)
+        {
+            derivedCity = null;
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+
+            var value = raw.Trim();
+
+            // Case number pattern: 1-6 digits - 2 digits - 4 digits (e.g., 2222-02-2025)
+            var match = System.Text.RegularExpressions.Regex.Match(value, @"\b(\d{1,6}-\d{2}-\d{4})\b");
+            if (!match.Success)
+            {
+                return string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+
+            var caseNumber = match.Groups[1].Value;
+
+            // Anything after the matched case number is treated as potential city (with safeguards)
+            var after = value.Substring(match.Index + match.Length).Trim();
+            if (!string.IsNullOrWhiteSpace(after))
+            {
+                // If trailing text looks like a court name (contains "בית משפט"), do NOT treat as city
+                if (!after.Contains("בית משפט", StringComparison.Ordinal))
+                {
+                    derivedCity = after;
+                }
+            }
+
+            return caseNumber;
+        }
+
+        private static string? DeriveCourtCityFromCourtName(string? courtName)
+        {
+            if (string.IsNullOrWhiteSpace(courtName))
+            {
+                return null;
+            }
+
+            var value = courtName.Trim();
+
+            // Prefer last occurrence of " ב" (space + bet)
+            var idx = value.LastIndexOf(" ב", StringComparison.Ordinal);
+            if (idx >= 0)
+            {
+                idx += 2; // skip the space and the 'ב'
+            }
+            else
+            {
+                // Fallback: last 'ב' anywhere
+                idx = value.LastIndexOf('ב');
+                if (idx >= 0)
+                {
+                    idx += 1;
+                }
+            }
+
+            if (idx < 0 || idx >= value.Length - 1)
+            {
+                return null;
+            }
+
+            var city = value.Substring(idx).Trim().Trim(',', '.', ' ');
+            return string.IsNullOrWhiteSpace(city) ? null : city;
         }
 
         private static DateTime? ExtractDate(OdcanitUserData row)
