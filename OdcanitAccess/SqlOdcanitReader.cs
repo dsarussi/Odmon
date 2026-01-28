@@ -638,16 +638,6 @@ namespace Odmon.Worker.OdcanitAccess
                 {
                     c.CourtCity = derivedCity;
                 }
-
-                if (!string.IsNullOrWhiteSpace(derivedCity))
-                {
-                    _logger.LogDebug(
-                        "Split CourtCaseNumber+City from UserData for TikCounter {TikCounter}: raw='{Raw}', caseNumber='{CaseNumber}', city='{City}'",
-                        c.TikCounter,
-                        raw ?? "<null>",
-                        normalizedCaseNumber ?? "<null>",
-                        derivedCity);
-                }
             });
 
             Add("שם בית משפט", (c, row) =>
