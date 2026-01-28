@@ -6,6 +6,9 @@ namespace Odmon.Worker.Monday
         Task UpdateItemAsync(long boardId, long itemId, string columnValuesJson, CancellationToken ct);
         Task UpdateItemNameAsync(long boardId, long itemId, string name, CancellationToken ct);
         Task<long?> FindItemIdByColumnValueAsync(long boardId, string columnId, string columnValue, CancellationToken ct);
+
+        // Phase-2 hearing approval: read status from Monday
+        Task<string?> GetHearingApprovalStatusAsync(long itemId, CancellationToken ct);
     }
 }
 

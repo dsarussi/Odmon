@@ -267,7 +267,7 @@ namespace Odmon.Worker.Services
                 return null;
             }
 
-            var parts = s.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            var parts = s.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries);
             return string.Join(" ", parts);
         }
     }

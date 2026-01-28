@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using System.Text.Json;
 using System.Net.Http.Headers;
 using Microsoft.Extensions.Logging;
+using System.Globalization;
 using Odmon.Worker.Security;
 
 namespace Odmon.Worker.Monday
@@ -296,6 +297,85 @@ namespace Odmon.Worker.Monday
             var itemId = long.Parse(idString);
             _logger.LogDebug("Found Monday item {ItemId} with column {ColumnId} = {ColumnValue} on board {BoardId}", itemId, columnId, columnValue, boardId);
             return itemId;
+        }
+
+        public async Task<string?> GetHearingApprovalStatusAsync(long itemId, CancellationToken ct)
+        {
+            const string approvalColumnId = "color_mkzbmv1b";
+
+            var query = @"query ($itemIds: [ID!], $columnIds: [String!]) {
+                items(ids: $itemIds) {
+                    id
+                    column_values(ids: $columnIds) {
+                        id
+                        value
+                    }
+                }
+            }";
+
+            var variables = new Dictionary<string, object>
+            {
+                ["itemIds"] = new[] { itemId.ToString() },
+                ["columnIds"] = new[] { approvalColumnId }
+            };
+
+            using var doc = await ExecuteGraphQLRequestAsync(
+                query,
+                variables,
+                ct,
+                operation: "hearing_approval_status",
+                boardId: null,
+                itemId: itemId);
+
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("data", out var data) ||
+                !data.TryGetProperty("items", out var items) ||
+                items.ValueKind != JsonValueKind.Array ||
+                items.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            var item = items[0];
+            if (!item.TryGetProperty("column_values", out var columnValues) ||
+                columnValues.ValueKind != JsonValueKind.Array ||
+                columnValues.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            var col = columnValues[0];
+            if (!col.TryGetProperty("value", out var valueElement) ||
+                valueElement.ValueKind == JsonValueKind.Null)
+            {
+                return null;
+            }
+
+            var raw = valueElement.GetString();
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+
+            try
+            {
+                using var valDoc = JsonDocument.Parse(raw);
+                var valRoot = valDoc.RootElement;
+                if (valRoot.TryGetProperty("index", out var indexElement) &&
+                    indexElement.ValueKind == JsonValueKind.Number &&
+                    indexElement.TryGetInt32(out var idx))
+                {
+                    // Return the index as string: "1", "2", "5"
+                    return idx.ToString(CultureInfo.InvariantCulture);
+                }
+            }
+            catch
+            {
+                // Ignore parse errors and fall through to null
+            }
+
+            return null;
         }
 
         private async Task<JsonDocument> ExecuteGraphQLRequestAsync(

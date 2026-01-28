@@ -11,6 +11,7 @@ namespace Odmon.Worker.Data
         public DbSet<SyncLog> SyncLogs => Set<SyncLog>();
         public DbSet<OdcanitCase> OdcanitMockCases => Set<OdcanitCase>();
         public DbSet<AllowedTik> AllowedTiks => Set<AllowedTik>();
+        public DbSet<MondayHearingApprovalState> MondayHearingApprovalStates => Set<MondayHearingApprovalState>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -31,6 +32,13 @@ namespace Odmon.Worker.Data
             {
                 b.ToTable("AllowedTik");
                 b.HasKey(x => x.TikCounter);
+            });
+
+            modelBuilder.Entity<MondayHearingApprovalState>(b =>
+            {
+                b.ToTable("MondayHearingApprovalStates");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.BoardId, x.MondayItemId }).IsUnique();
             });
 
             modelBuilder.Entity<OdcanitCase>(b =>

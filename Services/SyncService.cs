@@ -33,6 +33,7 @@ namespace Odmon.Worker.Services
         private readonly ITestSafetyPolicy _safetyPolicy;
         private readonly MondaySettings _mondaySettings;
         private readonly ISecretProvider _secretProvider;
+        private readonly HearingApprovalSyncService _hearingApprovalSyncService;
         private readonly ConcurrentDictionary<long, ColumnCacheEntry> _columnIdCache = new();
 
         public SyncService(
@@ -44,7 +45,8 @@ namespace Odmon.Worker.Services
             ILogger<SyncService> logger,
             ITestSafetyPolicy safetyPolicy,
             IOptions<MondaySettings> mondayOptions,
-            ISecretProvider secretProvider)
+            ISecretProvider secretProvider,
+            HearingApprovalSyncService hearingApprovalSyncService)
         {
             _odcanitReader = odcanitReader;
             _integrationDb = integrationDb;
@@ -55,6 +57,7 @@ namespace Odmon.Worker.Services
             _safetyPolicy = safetyPolicy;
             _mondaySettings = mondayOptions.Value ?? new MondaySettings();
             _secretProvider = secretProvider;
+            _hearingApprovalSyncService = hearingApprovalSyncService;
         }
 
         public async Task SyncOdcanitToMondayAsync(CancellationToken ct)
@@ -338,6 +341,9 @@ namespace Odmon.Worker.Services
             });
 
             await _integrationDb.SaveChangesAsync(ct);
+
+            // Phase-2: hearing approval write-back runs even when main sync skips/no-change
+            await _hearingApprovalSyncService.SyncAsync(batch, ct);
 
             _logger.LogInformation(
                 "Sync run {RunId} completed: created={Created}, updated={Updated}, skipped_non_test={SkippedNonTest}, skipped_existing_non_test_mapping={SkippedExistingNonTest}, skipped_non_demo={SkippedNonDemo}, skipped_no_change={SkippedNoChange}, failed={Failed}, total_processed={TotalProcessed}",

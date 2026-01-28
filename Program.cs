@@ -96,6 +96,8 @@ hostBuilder.ConfigureServices((context, services) =>
         services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
     }
 
+    services.AddScoped<IOdcanitWriter, SqlOdcanitWriter>();
+    services.AddScoped<HearingApprovalSyncService>();
     services.AddScoped<TokenResolverService>();
 
     services.Configure<MondaySettings>(config.GetSection("Monday"));
