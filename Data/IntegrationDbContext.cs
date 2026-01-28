@@ -32,6 +32,10 @@ namespace Odmon.Worker.Data
             {
                 b.ToTable("AllowedTik");
                 b.HasKey(x => x.TikCounter);
+                
+                // TikCounter is NOT an identity / auto-generated column
+                b.Property(x => x.TikCounter)
+                 .ValueGeneratedNever();
             });
 
             modelBuilder.Entity<MondayHearingApprovalState>(b =>
