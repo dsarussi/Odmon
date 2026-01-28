@@ -498,8 +498,37 @@ namespace Odmon.Worker.Services
             TryAddDateColumn(columnValues, _mondaySettings.EventDateColumnId, c.EventDate);
             TryAddDateColumn(columnValues, _mondaySettings.CaseCloseDateColumnId, c.TikCloseDate);
             TryAddDateColumn(columnValues, _mondaySettings.ComplaintReceivedDateColumnId, c.ComplaintReceivedDate);
-            TryAddDateColumn(columnValues, _mondaySettings.HearingDateColumnId, c.HearingDate);
-            await TryAddHourColumnAsync(columnValues, boardId, _mondaySettings.HearingHourColumnId, c.HearingTime, c.TikCounter, ct);
+
+            var hasHearingDate = c.HearingDate.HasValue;
+            var hasJudge = !string.IsNullOrWhiteSpace(c.JudgeName);
+            var hasCourtCity = !string.IsNullOrWhiteSpace(c.CourtCity);
+            var canPublishHearing = hasHearingDate && hasJudge && hasCourtCity;
+
+            _logger.LogDebug(
+                "Hearing gating TikCounter {TikCounter}: Date={HasDate}, Judge={HasJudge}, City={HasCity}, CanPublish={CanPublish}",
+                c.TikCounter,
+                hasHearingDate,
+                hasJudge,
+                hasCourtCity,
+                canPublishHearing);
+
+            if (canPublishHearing)
+            {
+                TryAddDateColumn(columnValues, _mondaySettings.HearingDateColumnId, c.HearingDate);
+                await TryAddHourColumnAsync(columnValues, boardId, _mondaySettings.HearingHourColumnId, c.HearingTime, c.TikCounter, ct);
+            }
+            else
+            {
+                if (hasHearingDate || hasJudge || hasCourtCity)
+                {
+                    _logger.LogWarning(
+                        "Hearing update suppressed for TikCounter {TikCounter}: incomplete hearing data (Date={HasDate}, Judge={HasJudge}, City={HasCity})",
+                        c.TikCounter,
+                        hasHearingDate,
+                        hasJudge,
+                        hasCourtCity);
+                }
+            }
 
             TryAddDecimalColumn(columnValues, _mondaySettings.RequestedClaimAmountColumnId, c.RequestedClaimAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.ProvenClaimAmountColumnId, c.ProvenClaimAmount);
