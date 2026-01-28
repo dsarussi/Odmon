@@ -12,6 +12,8 @@ namespace Odmon.Worker.Data
         public DbSet<OdcanitCase> OdcanitMockCases => Set<OdcanitCase>();
         public DbSet<AllowedTik> AllowedTiks => Set<AllowedTik>();
         public DbSet<MondayHearingApprovalState> MondayHearingApprovalStates => Set<MondayHearingApprovalState>();
+        public DbSet<NispahAuditLog> NispahAuditLogs => Set<NispahAuditLog>();
+        public DbSet<NispahDeduplication> NispahDeduplications => Set<NispahDeduplication>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -43,6 +45,22 @@ namespace Odmon.Worker.Data
                 b.ToTable("MondayHearingApprovalStates");
                 b.HasKey(x => x.Id);
                 b.HasIndex(x => new { x.BoardId, x.MondayItemId }).IsUnique();
+            });
+
+            modelBuilder.Entity<NispahAuditLog>(b =>
+            {
+                b.ToTable("NispahAuditLogs");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => x.CorrelationId);
+                b.HasIndex(x => new { x.TikVisualID, x.CreatedAtUtc });
+            });
+
+            modelBuilder.Entity<NispahDeduplication>(b =>
+            {
+                b.ToTable("NispahDeduplications");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.TikVisualID, x.NispahTypeName, x.InfoHash }).IsUnique();
+                b.HasIndex(x => x.CreatedAtUtc);
             });
 
             modelBuilder.Entity<OdcanitCase>(b =>

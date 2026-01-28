@@ -99,8 +99,10 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddScoped<IOdcanitWriter, SqlOdcanitWriter>();
     services.AddScoped<HearingApprovalSyncService>();
     services.AddScoped<TokenResolverService>();
+    services.AddScoped<NispahWriterService>();
 
     services.Configure<MondaySettings>(config.GetSection("Monday"));
+    services.Configure<NispahWriterSettings>(config.GetSection("NispahWriter"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
