@@ -17,8 +17,8 @@ namespace Odmon.Worker.OdcanitAccess
         private readonly OdcanitDbContext _db;
         private readonly ILogger<SqlOdcanitWriter> _logger;
 
-        // TODO: Replace with actual Odcanit Nispah proc name & parameters from Odcanit documentation.
-        private const string AddNispahProcName = "dbo.Odmon_AddNispah";
+        private const string StoredProcedureName = "dbo.Klita_Interface_NispahDetails";
+        private const int CommandTimeoutSeconds = 30;
 
         public SqlOdcanitWriter(OdcanitDbContext db, ILogger<SqlOdcanitWriter> logger)
         {
@@ -28,35 +28,64 @@ namespace Odmon.Worker.OdcanitAccess
 
         public async Task AppendNispahAsync(OdcanitCase c, DateTime nowUtc, string nispahType, string info, CancellationToken ct)
         {
-            var israelTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Israel Standard Time");
-            var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, israelTimeZone);
-
-            var parameters = new[]
+            if (string.IsNullOrWhiteSpace(c.TikNumber))
             {
-                new SqlParameter("@TikCounter", SqlDbType.Int) { Value = c.TikCounter },
-                new SqlParameter("@ClientVisualID", SqlDbType.NVarChar, 50) { Value = (object?)c.ClientVisualID ?? DBNull.Value },
-                new SqlParameter("@ClientName", SqlDbType.NVarChar, 200) { Value = (object?)c.ClientName ?? DBNull.Value },
-                new SqlParameter("@TikNumber", SqlDbType.NVarChar, 50) { Value = (object?)c.TikNumber ?? DBNull.Value },
-                new SqlParameter("@TikName", SqlDbType.NVarChar, 200) { Value = (object?)c.TikName ?? DBNull.Value },
-                new SqlParameter("@NispahDate", SqlDbType.Date) { Value = nowLocal.Date },
-                new SqlParameter("@NispahTime", SqlDbType.Time) { Value = nowLocal.TimeOfDay },
-                new SqlParameter("@NispahType", SqlDbType.NVarChar, 100) { Value = nispahType },
-                new SqlParameter("@Info", SqlDbType.NVarChar, 2000) { Value = info },
-                new SqlParameter("@tsCreateDate", SqlDbType.DateTime2) { Value = nowUtc },
-                new SqlParameter("@tsModifyDate", SqlDbType.DateTime2) { Value = nowUtc },
-                new SqlParameter("@tsCreatedBy", SqlDbType.NVarChar, 50) { Value = "Monday" },
-                new SqlParameter("@tsModifiedBy", SqlDbType.NVarChar, 50) { Value = "Monday" }
-            };
+                throw new ArgumentException($"TikNumber is required but was null or empty for TikCounter={c.TikCounter}", nameof(c));
+            }
 
-            var sql = $"{AddNispahProcName} @TikCounter, @ClientVisualID, @ClientName, @TikNumber, @TikName, @NispahDate, @NispahTime, @NispahType, @Info, @tsCreateDate, @tsModifyDate, @tsCreatedBy, @tsModifiedBy";
+            var connection = _db.Database.GetDbConnection();
+            var wasClosed = connection.State == ConnectionState.Closed;
 
-            await _db.Database.ExecuteSqlRawAsync(sql, parameters, ct);
+            if (wasClosed)
+            {
+                await connection.OpenAsync(ct);
+            }
 
-            _logger.LogInformation(
-                "HearingApproval Nispah write: mode=live, TikCounter={TikCounter}, NispahType={NispahType}, Info='{Info}'",
-                c.TikCounter,
-                nispahType,
-                info);
+            try
+            {
+                await using var command = (SqlCommand)connection.CreateCommand();
+                command.CommandText = StoredProcedureName;
+                command.CommandType = CommandType.StoredProcedure;
+                command.CommandTimeout = CommandTimeoutSeconds;
+
+                // Parameters: @TikVisualID, @Info, @NispahTypeName, @Error OUTPUT
+                command.Parameters.Add(new SqlParameter("@TikVisualID", SqlDbType.NVarChar, 50) { Value = c.TikNumber });
+                command.Parameters.Add(new SqlParameter("@Info", SqlDbType.NVarChar, 2000) { Value = info ?? string.Empty });
+                command.Parameters.Add(new SqlParameter("@NispahTypeName", SqlDbType.NVarChar, 100) { Value = nispahType ?? string.Empty });
+                command.Parameters.Add(new SqlParameter("@Error", SqlDbType.NVarChar, 4000) { Direction = ParameterDirection.Output });
+
+                await command.ExecuteNonQueryAsync(ct);
+
+                // Read @Error OUTPUT parameter
+                var errorParam = (SqlParameter)command.Parameters["@Error"];
+                var errorValue = errorParam.Value as string ?? errorParam.Value?.ToString();
+
+                if (!string.IsNullOrWhiteSpace(errorValue))
+                {
+                    var errorMessage = $"Stored procedure {StoredProcedureName} returned error: {errorValue}";
+                    _logger.LogError(
+                        "Nispah write failed: TikCounter={TikCounter}, TikNumber={TikNumber}, NispahType={NispahType}, Error={Error}",
+                        c.TikCounter,
+                        c.TikNumber,
+                        nispahType,
+                        errorValue);
+                    throw new InvalidOperationException(errorMessage);
+                }
+
+                _logger.LogInformation(
+                    "Nispah write succeeded: TikCounter={TikCounter}, TikNumber={TikNumber}, NispahType={NispahType}, Info='{Info}'",
+                    c.TikCounter,
+                    c.TikNumber,
+                    nispahType,
+                    info);
+            }
+            finally
+            {
+                if (wasClosed && connection.State == ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                }
+            }
         }
     }
 }

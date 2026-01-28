@@ -110,7 +110,8 @@ namespace Odmon.Worker.Services
                 }
 
                 // Guardrail 3: Deduplication check
-                if (await IsDuplicateAsync(tikVisualID, nispahTypeName, infoHash, ct))
+                // After validation passes, we know tikVisualID and nispahTypeName are non-null
+                if (await IsDuplicateAsync(tikVisualID!, nispahTypeName!, infoHash, ct))
                 {
                     auditLog.Status = "DuplicateSkipped";
                     auditLog.Error = "Duplicate detected within deduplication window";
@@ -129,7 +130,8 @@ namespace Odmon.Worker.Services
                 }
 
                 // All guardrails passed - execute stored procedure
-                var error = await ExecuteStoredProcedureAsync(tikVisualID, sanitizedInfo, nispahTypeName, ct);
+                // After validation passes, we know tikVisualID and nispahTypeName are non-null
+                var error = await ExecuteStoredProcedureAsync(tikVisualID!, sanitizedInfo, nispahTypeName!, ct);
 
                 if (!string.IsNullOrWhiteSpace(error))
                 {
@@ -144,7 +146,8 @@ namespace Odmon.Worker.Services
 
                 // Success - record deduplication entry and audit log
                 auditLog.Status = "Success";
-                await RecordDeduplicationAsync(tikVisualID, nispahTypeName, infoHash, startTime, ct);
+                // After validation passes, we know tikVisualID and nispahTypeName are non-null
+                await RecordDeduplicationAsync(tikVisualID!, nispahTypeName!, infoHash, startTime, ct);
                 await PersistAuditLogAsync(auditLog, ct);
 
                 _logger.LogInformation(
