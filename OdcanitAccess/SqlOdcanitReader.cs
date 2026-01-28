@@ -425,6 +425,14 @@ namespace Odmon.Worker.OdcanitAccess
                     continue;
                 }
 
+                var plaintiffAddressKey = NormalizeUserFieldName("כתובת תובע");
+                var defendantNameKey = NormalizeUserFieldName("שם נתבע");
+                var defendantAddressKey = NormalizeUserFieldName("כתובת נתבע");
+
+                bool plaintiffAddressFromUserData = false;
+                bool defendantNameFromUserData = false;
+                bool defendantAddressFromUserData = false;
+
                 foreach (var row in rows)
                 {
                     var key = NormalizeUserFieldName(row.FieldName);
@@ -433,11 +441,31 @@ namespace Odmon.Worker.OdcanitAccess
                         continue;
                     }
 
+                    if (plaintiffAddressKey != null && key == plaintiffAddressKey)
+                    {
+                        plaintiffAddressFromUserData = true;
+                    }
+                    else if (defendantNameKey != null && key == defendantNameKey)
+                    {
+                        defendantNameFromUserData = true;
+                    }
+                    else if (defendantAddressKey != null && key == defendantAddressKey)
+                    {
+                        defendantAddressFromUserData = true;
+                    }
+
                     if (UserDataFieldHandlers.TryGetValue(key, out var handler))
                     {
                         handler(odcanitCase, row);
                     }
                 }
+
+                _logger.LogDebug(
+                    "UserData legal fields for TikCounter {TikCounter}: PlaintiffAddressFromUserData={PlaintiffAddressFromUserData}, DefendantNameFromUserData={DefendantNameFromUserData}, DefendantAddressFromUserData={DefendantAddressFromUserData}",
+                    odcanitCase.TikCounter,
+                    plaintiffAddressFromUserData,
+                    defendantNameFromUserData,
+                    defendantAddressFromUserData);
             }
         }
 
@@ -543,7 +571,14 @@ namespace Odmon.Worker.OdcanitAccess
             Add("צד תובע", (c, row) => c.PlaintiffSideRaw = row.strData);
             Add("צד נתבע", (c, row) => c.DefendantSideRaw = row.strData);
             Add("מרחוב (תביעה)", (c, row) => c.ClaimStreet = row.strData);
-            Add("מרחוב (הגנה)", (c, row) => c.DefenseStreet = row.strData);
+            Add("כתובת נתבע", (c, row) => c.DefenseStreet = row.strData);
+            Add("מרחוב (הגנה)", (c, row) =>
+            {
+                if (string.IsNullOrWhiteSpace(c.DefenseStreet))
+                {
+                    c.DefenseStreet = row.strData;
+                }
+            });
             Add("Event date", (c, row) => c.EventDate = ExtractDate(row) ?? c.EventDate);
             Add("תאריך אירוע", (c, row) => c.EventDate = ExtractDate(row) ?? c.EventDate);
             Add("מועד קבלת כתב התביעה", (c, row) => c.ComplaintReceivedDate = row.dateData ?? c.ComplaintReceivedDate);

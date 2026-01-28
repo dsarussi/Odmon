@@ -654,6 +654,36 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            var normalizedForDocument = NormalizeIsraeliPhoneForDocument(phoneNumber);
+
+            string Mask(string? value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return "<null>";
+                }
+
+                var digits = new string(value.Where(char.IsDigit).ToArray());
+                if (digits.Length == 0)
+                {
+                    return "<null>";
+                }
+
+                if (digits.Length <= 4)
+                {
+                    return $"***{digits}";
+                }
+
+                return $"***{digits.Substring(digits.Length - 4)}";
+            }
+
+            _logger.LogDebug(
+                "Phone normalization for {Context} TikCounter {TikCounter}: raw={RawMasked}, normalized={NormalizedMasked}",
+                context,
+                tikCounter,
+                Mask(phoneNumber),
+                Mask(normalizedForDocument));
+
             var payload = BuildPhoneColumnValue(phoneNumber);
             if (payload is null)
             {
@@ -667,29 +697,10 @@ namespace Odmon.Worker.Services
 
         private static PhoneColumnValue? BuildPhoneColumnValue(string? phoneNumber)
         {
-            if (string.IsNullOrWhiteSpace(phoneNumber))
+            var normalized = NormalizeIsraeliPhoneForDocument(phoneNumber);
+            if (string.IsNullOrWhiteSpace(normalized))
             {
                 return null;
-            }
-
-            var digits = new string(phoneNumber.Where(char.IsDigit).ToArray());
-            if (string.IsNullOrEmpty(digits))
-            {
-                return null;
-            }
-
-            string normalized;
-            if (digits.StartsWith("0") && digits.Length > 1)
-            {
-                normalized = "+972" + digits.Substring(1);
-            }
-            else if (digits.StartsWith("972"))
-            {
-                normalized = "+" + digits;
-            }
-            else
-            {
-                normalized = "+" + digits;
             }
 
             return new PhoneColumnValue
@@ -703,6 +714,34 @@ namespace Odmon.Worker.Services
         {
             public string phone { get; set; } = string.Empty;
             public string countryShortName { get; set; } = "IL";
+        }
+
+        private static string? NormalizeIsraeliPhoneForDocument(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+
+            var digits = new string(raw.Where(char.IsDigit).ToArray());
+            if (string.IsNullOrEmpty(digits))
+            {
+                return null;
+            }
+
+            if (digits.StartsWith("972") && digits.Length > 3)
+            {
+                // 9725... -> 05...
+                digits = "0" + digits.Substring(3);
+            }
+            else if (digits.StartsWith("0"))
+            {
+                // Already local format like 054...
+                // leave as-is
+            }
+            // Otherwise leave digits as-is, but never add '+'
+
+            return digits;
         }
 
         private async Task TryAddHourColumnAsync(
