@@ -509,7 +509,7 @@ namespace Odmon.Worker.Services
             TryAddDecimalColumn(columnValues, _mondaySettings.OtherLossesAmountColumnId, c.OtherLossesAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.LossOfValueAmountColumnId, c.LossOfValueAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.ResidualValueAmountColumnId, c.ResidualValueAmount);
-            TryAddStringColumn(columnValues, _mondaySettings.NotesColumnId, c.Notes);
+            TryAddLongTextColumn(columnValues, _mondaySettings.NotesColumnId, c.Notes);
             TryAddStringColumn(columnValues, _mondaySettings.ClientAddressColumnId, c.ClientAddress);
             TryAddStringColumn(columnValues, _mondaySettings.ClientTaxIdColumnId, c.ClientTaxId);
             
@@ -601,6 +601,43 @@ namespace Odmon.Worker.Services
             // Filter out invalid column IDs before serialization
             await FilterInvalidColumnsAsync(boardId, columnValues, c, ct);
 
+            // Address and notes mapping diagnostics
+            var defenseColumnId = _mondaySettings.DefenseStreetColumnId;
+            var notesColumnId = _mondaySettings.NotesColumnId;
+
+            var hasDefense = !string.IsNullOrWhiteSpace(defenseColumnId) && columnValues.ContainsKey(defenseColumnId);
+            var hasNotes = !string.IsNullOrWhiteSpace(notesColumnId) && columnValues.ContainsKey(notesColumnId);
+
+            _logger.LogDebug(
+                "Address mapping TikCounter {TikCounter}: ColumnId={ColumnId}, Value='{Value}', Included={Included}",
+                c.TikCounter,
+                defenseColumnId ?? "<null>",
+                hasDefense ? (columnValues[defenseColumnId!] ?? "<null>") : "<not included>",
+                hasDefense);
+
+            _logger.LogDebug(
+                "Notes mapping TikCounter {TikCounter}: ColumnId={ColumnId}, Len={Len}, Included={Included}",
+                c.TikCounter,
+                notesColumnId ?? "<null>",
+                c.Notes?.Length ?? 0,
+                hasNotes);
+
+            if (!string.IsNullOrWhiteSpace(c.DefenseStreet) && !hasDefense)
+            {
+                _logger.LogWarning(
+                    "Expected Monday column missing from payload: {ColumnId} (value present) TikCounter {TikCounter}",
+                    defenseColumnId ?? "<null>",
+                    c.TikCounter);
+            }
+
+            if (!string.IsNullOrWhiteSpace(c.Notes) && !hasNotes)
+            {
+                _logger.LogWarning(
+                    "Expected Monday column missing from payload: {ColumnId} (value present) TikCounter {TikCounter}",
+                    notesColumnId ?? "<null>",
+                    c.TikCounter);
+            }
+
             var payloadJson = JsonSerializer.Serialize(columnValues);
             _logger.LogDebug("Monday payload for TikCounter {TikCounter}: {Payload}", c.TikCounter, payloadJson);
             return payloadJson;
@@ -614,6 +651,16 @@ namespace Odmon.Worker.Services
             }
 
             columnValues[columnId] = value;
+        }
+
+        private static void TryAddLongTextColumn(Dictionary<string, object> columnValues, string? columnId, string? value)
+        {
+            if (string.IsNullOrWhiteSpace(columnId) || string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+
+            columnValues[columnId] = new { text = value };
         }
 
         private static void TryAddDateColumn(Dictionary<string, object> columnValues, string? columnId, DateTime value)

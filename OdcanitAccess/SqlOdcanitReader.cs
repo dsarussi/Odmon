@@ -654,6 +654,9 @@ namespace Odmon.Worker.OdcanitAccess
                 }
             });
 
+            // Accident short circumstances: populate Notes from UserData "גרסאות תביעה"
+            Add("גרסאות תביעה", (c, row) => c.Notes = row.strData);
+
             return dict;
         }
 
