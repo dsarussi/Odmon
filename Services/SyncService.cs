@@ -1856,6 +1856,13 @@ namespace Odmon.Worker.Services
             bool testMode,
             CancellationToken ct)
         {
+            _logger.LogDebug(
+                "Court mapping for TikCounter {TikCounter}, TikNumber {TikNumber}: CourtCaseNumber -> {CourtCaseNumber}, CourtCity -> {CourtCity}",
+                c.TikCounter,
+                c.TikNumber ?? "<null>",
+                c.CourtCaseNumber ?? "<null>",
+                c.CourtCity ?? "<null>");
+
             var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: true, ct);
             var mondayItemId = await _mondayClient.CreateItemAsync(boardId, groupId, itemName, columnValuesJson, ct);
 
@@ -1894,6 +1901,13 @@ namespace Odmon.Worker.Services
             // Update column values if data has changed
             if (requiresDataUpdate)
             {
+                _logger.LogDebug(
+                    "Court mapping for TikCounter {TikCounter}, TikNumber {TikNumber}: CourtCaseNumber -> {CourtCaseNumber}, CourtCity -> {CourtCity}",
+                    c.TikCounter,
+                    c.TikNumber ?? "<null>",
+                    c.CourtCaseNumber ?? "<null>",
+                    c.CourtCity ?? "<null>");
+
                 var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: false, ct);
                 await _mondayClient.UpdateItemAsync(boardId, mapping.MondayItemId, columnValuesJson, ct);
                 mapping.OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
