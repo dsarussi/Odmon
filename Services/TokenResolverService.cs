@@ -47,7 +47,10 @@ namespace Odmon.Worker.Services
             ["רחוב נתבע"] = "כתובת נתבע",
 
             // Third-party car plate: token {{מספר רישוי צד ג}} backed by UserData "מספר רישוי רכב ג'"
-            ["מספר רישוי צד ג"] = "מספר רישוי רכב ג'"
+            ["מספר רישוי צד ג"] = "מספר רישוי רכב ג'",
+
+            // Accident short circumstances: token {{נסיבות התאונה בקצרה}} backed by UserData "גרסאות תביעה"
+            ["נסיבות התאונה בקצרה"] = "גרסאות תביעה"
         };
 
         private readonly OdcanitDbContext _odcanitDb;
