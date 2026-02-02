@@ -601,9 +601,8 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.ClientAddressColumnId, c.ClientAddress);
             TryAddStringColumn(columnValues, _mondaySettings.ClientTaxIdColumnId, c.ClientTaxId);
             
-            // Resolve policy holder name column ID dynamically by title
-            var policyHolderNameColumnId = await _mondayMetadataProvider.GetColumnIdByTitleAsync(boardId, "שם בעל פוליסה", ct);
-            TryAddStringColumn(columnValues, policyHolderNameColumnId, c.PolicyHolderName);
+            // Use PolicyHolderNameColumnId from settings
+            TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderNameColumnId, c.PolicyHolderName);
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderIdColumnId, c.PolicyHolderId);
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderAddressColumnId, c.PolicyHolderAddress);
             TryAddPhoneColumn(columnValues, _mondaySettings.PolicyHolderPhoneColumnId, normalizedPolicyHolderPhone, c.TikCounter, "Policy holder phone");

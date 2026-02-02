@@ -27,7 +27,7 @@ namespace Odmon.Worker.Monday
         public string? CaseStatusColumnId { get; set; } = "color_mkwefnbx";
         public string? ClientAddressColumnId { get; set; } = "text_mkwjcc69";
         public string? ClientTaxIdColumnId { get; set; } = "text_mkwjzsvg";
-        public string? PolicyHolderNameColumnId { get; set; } = "text_mkwjtvqk";
+        public string? PolicyHolderNameColumnId { get; set; } = "text_mky27a51";
         public string? PolicyHolderIdColumnId { get; set; } = "text_mkwjqdb4";
         public string? PolicyHolderAddressColumnId { get; set; } = "text_mkwjan1q";
         public string? PolicyHolderPhoneColumnId { get; set; } = "phone_mkwjzg9";
@@ -41,7 +41,7 @@ namespace Odmon.Worker.Monday
         public string? PlaintiffNameColumnId { get; set; } = "text_mkwj5k8e";
         public string? PlaintiffIdColumnId { get; set; } = "text_mkwj82zd";
         public string? PlaintiffAddressColumnId { get; set; } = "text_mkwjvvp6";
-        public string? PlaintiffPhoneColumnId { get; set; } = "phone_mkwjm44s";
+        public string? PlaintiffPhoneColumnId { get; set; } = "phone_mkwe10tx";
         public string? PlaintiffEmailColumnId { get; set; } = "email_mkwjy4rs";
         public string? DefendantNameColumnId { get; set; } = "text_mkxeabj2";
         public string? DefendantFaxColumnId { get; set; } = "text_mkxe2zay";
