@@ -23,11 +23,14 @@ hostBuilder.ConfigureAppConfiguration((context, configBuilder) =>
     var builtConfig = configBuilder.Build();
     if (!context.HostingEnvironment.IsDevelopment())
     {
-        var vaultUrl = builtConfig["KeyVault:VaultUrl"];
-        if (!string.IsNullOrWhiteSpace(vaultUrl))
+        var vaultUrl = context.Configuration["KeyVault:VaultUrl"];
+
+        if (!string.IsNullOrWhiteSpace(vaultUrl)
+            && !vaultUrl.StartsWith("CHANGE_ME", StringComparison.OrdinalIgnoreCase))
         {
             configBuilder.AddAzureKeyVault(new Uri(vaultUrl), new DefaultAzureCredential());
         }
+
     }
 });
 
