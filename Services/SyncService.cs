@@ -1823,19 +1823,16 @@ namespace Odmon.Worker.Services
             MondayItemMapping? mapping = null;
             string lookupMethod = "none";
 
-            // Priority 1: Find mapping by TikNumber + BoardId (preferred method)
-            if (!string.IsNullOrWhiteSpace(c.TikNumber))
+            // Priority 1: Find mapping by TikCounter + BoardId (source of truth)
+            mapping = await _integrationDb.MondayItemMappings
+                .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter && m.BoardId == boardId, ct);
+            
+            if (mapping != null)
             {
-                mapping = await _integrationDb.MondayItemMappings
-                    .FirstOrDefaultAsync(m => m.TikNumber == c.TikNumber && m.BoardId == boardId, ct);
-                
-                if (mapping != null)
-                {
-                    lookupMethod = "mapping_by_tiknumber_boardid";
-                    _logger.LogDebug(
-                        "Found mapping by TikNumber+BoardId: TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikCounter={TikCounter}",
-                        c.TikNumber, boardId, mapping.MondayItemId, mapping.TikCounter);
-                }
+                lookupMethod = "mapping_by_tikcounter_boardid";
+                _logger.LogDebug(
+                    "Found mapping by TikCounter+BoardId: TikCounter={TikCounter}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikNumber={TikNumber}",
+                    c.TikCounter, boardId, mapping.MondayItemId, mapping.TikNumber ?? "<null>");
             }
 
             // Priority 2: Fallback to mapping by TikCounter only (for legacy mappings)
