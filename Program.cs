@@ -23,9 +23,8 @@ hostBuilder.ConfigureAppConfiguration((context, configBuilder) =>
     var builtConfig = configBuilder.Build();
     if (IsKeyVaultEnabled(builtConfig))
     {
-        var vaultUrl = builtConfig["KeyVault:VaultUrl"]!;
-        Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var vaultUri);
-        configBuilder.AddAzureKeyVault(vaultUri!, new DefaultAzureCredential());
+        var vaultUrl = builtConfig["KeyVault:VaultUrl"] ?? string.Empty;
+        configBuilder.AddAzureKeyVault(new Uri(vaultUrl.Trim(), UriKind.Absolute), new DefaultAzureCredential());
     }
 });
 
@@ -42,9 +41,8 @@ hostBuilder.ConfigureServices((context, services) =>
 
     if (IsKeyVaultEnabled(config))
     {
-        var vaultUrl = config["KeyVault:VaultUrl"]!;
-        Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var vaultUri);
-        services.AddSingleton(new SecretClient(vaultUri!, new DefaultAzureCredential()));
+        var vaultUrl = config["KeyVault:VaultUrl"] ?? string.Empty;
+        services.AddSingleton(new SecretClient(new Uri(vaultUrl.Trim(), UriKind.Absolute), new DefaultAzureCredential()));
         services.AddSingleton<AzureKeyVaultSecretProvider>();
     }
 
@@ -181,10 +179,7 @@ static string ResolveConnectionString(IServiceProvider serviceProvider, string s
 
 static bool IsKeyVaultEnabled(IConfiguration config)
 {
-    var vaultUrl = config["KeyVault:VaultUrl"];
-    if (string.IsNullOrWhiteSpace(vaultUrl)) return false;
-    if (vaultUrl.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase)) return false;
-    return Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var uri) && uri.IsAbsoluteUri;
+    return bool.TryParse(config["KeyVault:Enabled"], out var enabled) && enabled;
 }
 
 static bool IsPlaceholderValue(string value)
