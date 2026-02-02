@@ -14,6 +14,7 @@ namespace Odmon.Worker.Data
         public DbSet<MondayHearingApprovalState> MondayHearingApprovalStates => Set<MondayHearingApprovalState>();
         public DbSet<NispahAuditLog> NispahAuditLogs => Set<NispahAuditLog>();
         public DbSet<NispahDeduplication> NispahDeduplications => Set<NispahDeduplication>();
+        public DbSet<HearingNearestSnapshot> HearingNearestSnapshots => Set<HearingNearestSnapshot>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -61,6 +62,14 @@ namespace Odmon.Worker.Data
                 b.HasKey(x => x.Id);
                 b.HasIndex(x => new { x.TikVisualID, x.NispahTypeName, x.InfoHash }).IsUnique();
                 b.HasIndex(x => x.CreatedAtUtc);
+            });
+
+            modelBuilder.Entity<HearingNearestSnapshot>(b =>
+            {
+                b.ToTable("HearingNearestSnapshots");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.TikCounter, x.BoardId }).IsUnique();
+                b.HasIndex(x => x.MondayItemId);
             });
 
             modelBuilder.Entity<OdcanitCase>(b =>

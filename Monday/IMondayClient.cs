@@ -1,3 +1,7 @@
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
 namespace Odmon.Worker.Monday
 {
     public interface IMondayClient
@@ -9,6 +13,11 @@ namespace Odmon.Worker.Monday
 
         // Phase-2 hearing approval: read status from Monday
         Task<string?> GetHearingApprovalStatusAsync(long itemId, CancellationToken ct);
+
+        // Hearing sync: update judge, city, date, hour, status (separate calls for correct WhatsApp trigger ordering)
+        Task UpdateHearingDetailsAsync(long boardId, long itemId, string judgeName, string city, string judgeColumnId, string cityColumnId, CancellationToken ct);
+        Task UpdateHearingDateAsync(long boardId, long itemId, DateTime startDate, string dateColumnId, string hourColumnId, CancellationToken ct);
+        Task UpdateHearingStatusAsync(long boardId, long itemId, string label, string statusColumnId, CancellationToken ct);
     }
 }
 

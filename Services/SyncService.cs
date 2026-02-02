@@ -24,7 +24,7 @@ namespace Odmon.Worker.Services
         private const string DefaultClientPhoneColumnId = "phone_mkwe10tx";
         private const string DefaultClientEmailColumnId = "email_mkwefwgy";
         private static readonly TimeSpan ColumnCacheTtl = TimeSpan.FromMinutes(30);
-        private readonly IOdcanitReader _odcanitReader;
+        private readonly ICaseSource _caseSource;
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
         private readonly IMondayMetadataProvider _mondayMetadataProvider;
@@ -34,10 +34,12 @@ namespace Odmon.Worker.Services
         private readonly MondaySettings _mondaySettings;
         private readonly ISecretProvider _secretProvider;
         private readonly HearingApprovalSyncService _hearingApprovalSyncService;
+        private readonly HearingNearestSyncService _hearingNearestSyncService;
+        private readonly ISkipLogger _skipLogger;
         private readonly ConcurrentDictionary<long, ColumnCacheEntry> _columnIdCache = new();
 
         public SyncService(
-            IOdcanitReader odcanitReader,
+            ICaseSource caseSource,
             IntegrationDbContext integrationDb,
             IMondayClient mondayClient,
             IMondayMetadataProvider mondayMetadataProvider,
@@ -46,9 +48,11 @@ namespace Odmon.Worker.Services
             ITestSafetyPolicy safetyPolicy,
             IOptions<MondaySettings> mondayOptions,
             ISecretProvider secretProvider,
-            HearingApprovalSyncService hearingApprovalSyncService)
+            HearingApprovalSyncService hearingApprovalSyncService,
+            HearingNearestSyncService hearingNearestSyncService,
+            ISkipLogger skipLogger)
         {
-            _odcanitReader = odcanitReader;
+            _caseSource = caseSource;
             _integrationDb = integrationDb;
             _mondayClient = mondayClient;
             _mondayMetadataProvider = mondayMetadataProvider;
@@ -58,6 +62,8 @@ namespace Odmon.Worker.Services
             _mondaySettings = mondayOptions.Value ?? new MondaySettings();
             _secretProvider = secretProvider;
             _hearingApprovalSyncService = hearingApprovalSyncService;
+            _hearingNearestSyncService = hearingNearestSyncService;
+            _skipLogger = skipLogger;
         }
 
         public async Task SyncOdcanitToMondayAsync(CancellationToken ct)
@@ -104,19 +110,43 @@ namespace Odmon.Worker.Services
             }
 
             // NEW RULE: Fetch data ONLY by TikCounter - NO date filters
-            var tikCounterSection = _config.GetSection("Sync:TikCounters");
-            var tikCounters = tikCounterSection.Get<int[]>() ?? Array.Empty<int>();
-
-            if (tikCounters.Length == 0)
+            int[] tikCounters;
+            var testingSection = _config.GetSection("Testing");
+            var testingEnabled = testingSection.GetValue<bool>("Enable", false);
+            if (testingEnabled)
             {
-                _logger.LogError("Sync:TikCounters configuration is missing or empty. Worker must have explicit TikCounter list to fetch data. No data will be processed.");
-                return;
+                var testingSource = testingSection.GetValue<string>("Source") ?? "IntegrationDbTestCases1808";
+                var testingTikCounters = testingSection.GetSection("TikCounters").Get<int[]>() ?? Array.Empty<int>();
+
+                if (testingTikCounters.Length == 0)
+                {
+                    _logger.LogError("Testing:Enable=true but Testing:TikCounters is missing or empty. No data will be processed.");
+                    return;
+                }
+
+                tikCounters = testingTikCounters;
+                _logger.LogInformation(
+                    "TEST MODE ENABLED - source={Source} - tikCounters={TikCounters}",
+                    testingSource,
+                    string.Join(", ", tikCounters));
+            }
+            else
+            {
+                var tikCounterSection = _config.GetSection("Sync:TikCounters");
+                tikCounters = tikCounterSection.Get<int[]>() ?? Array.Empty<int>();
+
+                if (tikCounters.Length == 0)
+                {
+                    _logger.LogError("Sync:TikCounters configuration is missing or empty. Worker must have explicit TikCounter list to fetch data. No data will be processed.");
+                    return;
+                }
+
+                _logger.LogInformation("Fetching cases by TikCounter only (ignoring all date filters): {TikCounters}", string.Join(", ", tikCounters));
             }
 
-            _logger.LogInformation("Fetching cases by TikCounter only (ignoring all date filters): {TikCounters}", string.Join(", ", tikCounters));
-
-            List<OdcanitCase> newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
-            _logger.LogInformation("Loaded {Count} cases by TikCounter from Odcanit", newOrUpdatedCases.Count);
+            // In test mode _caseSource is IntegrationTestCaseSource (no IOdcanitReader); GuardOdcanitReader is never used for case load.
+            List<OdcanitCase> newOrUpdatedCases = await _caseSource.GetCasesByTikCountersAsync(tikCounters, ct);
+            _logger.LogInformation("Loaded {Count} cases by TikCounter from case source", newOrUpdatedCases.Count);
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
@@ -344,6 +374,9 @@ namespace Odmon.Worker.Services
 
             // Phase-2: hearing approval write-back runs even when main sync skips/no-change
             await _hearingApprovalSyncService.SyncAsync(batch, ct);
+
+            // Nearest hearing sync: update Monday hearing date/judge/city/status from vwExportToOuterSystems_YomanData
+            await _hearingNearestSyncService.SyncNearestHearingsAsync(boardIdToUse, ct);
 
             _logger.LogInformation(
                 "Sync run {RunId} completed: created={Created}, updated={Updated}, skipped_non_test={SkippedNonTest}, skipped_existing_non_test_mapping={SkippedExistingNonTest}, skipped_non_demo={SkippedNonDemo}, skipped_no_change={SkippedNoChange}, failed={Failed}, total_processed={TotalProcessed}",
@@ -1357,6 +1390,21 @@ namespace Odmon.Worker.Services
                             boardId,
                             columnId,
                             valuePreview);
+
+                        await _skipLogger.LogSkipAsync(
+                            c.TikCounter,
+                            c.TikNumber,
+                            operation: "MondayColumnFilter",
+                            reasonCode: "InvalidColumnId",
+                            entityId: columnId,
+                            rawValue: valuePreview,
+                            details: new
+                            {
+                                BoardId = boardId,
+                                CaseTikNumber = c.TikNumber,
+                                CaseClientName = c.ClientName
+                            },
+                            ct);
                     }
                 }
 
@@ -1545,6 +1593,22 @@ namespace Odmon.Worker.Services
                         boardId,
                         tikCounter,
                         tikNumber ?? "<null>");
+
+                    await _skipLogger.LogSkipAsync(
+                        tikCounter,
+                        tikNumber,
+                        operation: "MondayColumnValueValidation",
+                        reasonCode: "monday_invalid_dropdown_value",
+                        entityId: columnId,
+                        rawValue: trimmedClientNumber,
+                        details: new
+                        {
+                            EntityType = "Dropdown",
+                            BoardId = boardId,
+                            AllowedLabelCount = allowedLabels.Count
+                        },
+                        ct);
+
                     return;
                 }
 

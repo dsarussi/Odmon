@@ -175,6 +175,17 @@ namespace Odmon.Worker.Models
         public string? PlaintiffSideRaw { get; set; }
         [NotMapped]
         public string? DefendantSideRaw { get; set; }
+        /// <summary>
+        /// Arbitrary raw fields for this case (e.g. from IntegrationDb test tables), keyed by source column name.
+        /// Used primarily for template/token resolution in testing scenarios.
+        /// </summary>
+        [NotMapped]
+        public Dictionary<string, string?> RawFields { get; set; } = new();
+        /// <summary>
+        /// Optional document type hint for testing cases (e.g. from \"סוג מסמך\" in dbo.TestCases1808).
+        /// </summary>
+        [NotMapped]
+        public string? DocumentType { get; set; }
     }
 }
 

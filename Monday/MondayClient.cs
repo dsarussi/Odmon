@@ -378,6 +378,41 @@ namespace Odmon.Worker.Monday
             return null;
         }
 
+        public async Task UpdateHearingDetailsAsync(long boardId, long itemId, string judgeName, string city, string judgeColumnId, string cityColumnId, CancellationToken ct)
+        {
+            var columnValues = new Dictionary<string, object>();
+            if (!string.IsNullOrWhiteSpace(judgeColumnId) && !string.IsNullOrWhiteSpace(judgeName))
+                columnValues[judgeColumnId] = new { text = judgeName };
+            if (!string.IsNullOrWhiteSpace(cityColumnId) && !string.IsNullOrWhiteSpace(city))
+                columnValues[cityColumnId] = new { text = city };
+            if (columnValues.Count == 0)
+                return;
+            var json = JsonSerializer.Serialize(columnValues);
+            await UpdateItemAsync(boardId, itemId, json, ct);
+        }
+
+        public async Task UpdateHearingDateAsync(long boardId, long itemId, DateTime startDate, string dateColumnId, string hourColumnId, CancellationToken ct)
+        {
+            var columnValues = new Dictionary<string, object>();
+            if (!string.IsNullOrWhiteSpace(dateColumnId))
+                columnValues[dateColumnId] = new { date = startDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) };
+            if (!string.IsNullOrWhiteSpace(hourColumnId))
+                columnValues[hourColumnId] = new { hour = startDate.Hour, minute = startDate.Minute };
+            if (columnValues.Count == 0)
+                return;
+            var json = JsonSerializer.Serialize(columnValues);
+            await UpdateItemAsync(boardId, itemId, json, ct);
+        }
+
+        public async Task UpdateHearingStatusAsync(long boardId, long itemId, string label, string statusColumnId, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(statusColumnId) || string.IsNullOrWhiteSpace(label))
+                return;
+            var columnValues = new Dictionary<string, object> { [statusColumnId] = new { label } };
+            var json = JsonSerializer.Serialize(columnValues);
+            await UpdateItemAsync(boardId, itemId, json, ct);
+        }
+
         private async Task<JsonDocument> ExecuteGraphQLRequestAsync(
             string query,
             Dictionary<string, object> variables,
