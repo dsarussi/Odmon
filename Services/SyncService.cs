@@ -686,6 +686,15 @@ namespace Odmon.Worker.Services
             // Validate hour column values before serialization
             ValidateHourColumnValues(columnValues, c.TikCounter);
 
+            // DEBUG: Log column values before filtering
+            _logger.LogInformation(
+                "BuildColumnValues BEFORE filter: TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, Count={Count}, ColumnIds={ColumnIds}",
+                c.TikCounter,
+                c.TikNumber ?? "<null>",
+                boardId,
+                columnValues.Count,
+                string.Join(", ", columnValues.Keys));
+
             // Filter out invalid column IDs before serialization
             await FilterInvalidColumnsAsync(boardId, columnValues, c, ct);
 
@@ -725,6 +734,15 @@ namespace Odmon.Worker.Services
                     notesColumnId ?? "<null>",
                     c.TikCounter);
             }
+
+            // DEBUG: Log column values before JSON serialization
+            _logger.LogInformation(
+                "BuildColumnValues BEFORE JSON: TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, Count={Count}, ColumnIds={ColumnIds}",
+                c.TikCounter,
+                c.TikNumber ?? "<null>",
+                boardId,
+                columnValues.Count,
+                string.Join(", ", columnValues.Keys));
 
             var payloadJson = JsonSerializer.Serialize(columnValues);
             _logger.LogDebug("Monday payload for TikCounter {TikCounter}: {Payload}", c.TikCounter, payloadJson);
