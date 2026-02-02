@@ -87,13 +87,6 @@ namespace Odmon.Worker.Services
             var testGroupId = _mondaySettings.TestGroupId;
 
             var casesBoardId = _mondaySettings.CasesBoardId;
-            if (casesBoardId == 0)
-            {
-                throw new InvalidOperationException(
-                    "Monday:CasesBoardId is 0 or missing. " +
-                    "Set configuration key 'Monday:CasesBoardId' (or environment variable 'Monday__CasesBoardId') to a valid Monday.com board ID.");
-            }
-
             var defaultGroupId = _mondaySettings.ToDoGroupId;
             if (string.IsNullOrWhiteSpace(defaultGroupId))
             {
@@ -1827,19 +1820,11 @@ namespace Odmon.Worker.Services
             bool dryRun,
             CancellationToken ct)
         {
-            if (boardId == 0)
-            {
-                throw new InvalidOperationException(
-                    "BoardId is 0 - missing config key Monday:CasesBoardId (or Monday__CasesBoardId environment variable). " +
-                    $"Cannot sync TikCounter={c.TikCounter}, TikNumber={c.TikNumber ?? "<null>"}.");
-            }
-
             MondayItemMapping? mapping = null;
             string lookupMethod = "none";
 
             // Priority 1: Find mapping by TikCounter + BoardId (source of truth)
             mapping = await _integrationDb.MondayItemMappings
-                .AsNoTracking()
                 .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter && m.BoardId == boardId, ct);
             
             if (mapping != null)
@@ -1854,7 +1839,6 @@ namespace Odmon.Worker.Services
             if (mapping == null)
             {
                 mapping = await _integrationDb.MondayItemMappings
-                    .AsNoTracking()
                     .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter, ct);
                 
                 if (mapping != null)

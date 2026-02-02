@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading.Tasks;
 using Azure.Extensions.AspNetCore.Configuration.Secrets;
 using Azure.Identity;
@@ -143,34 +142,6 @@ hostBuilder.ConfigureServices((context, services) =>
 var host = hostBuilder.Build();
 
 var appConfig = host.Services.GetRequiredService<IConfiguration>();
-var env = host.Services.GetRequiredService<IHostEnvironment>();
-var loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
-var startupLogger = loggerFactory.CreateLogger("Startup");
-
-// Startup diagnostics
-var mondayBoardId = appConfig.GetValue<long>("Monday:CasesBoardId", 0);
-var integrationDbConnStr = appConfig.GetConnectionString("IntegrationDb") ?? string.Empty;
-var integrationDbServer = ExtractServerName(integrationDbConnStr);
-var integrationDbName = ExtractDatabaseName(integrationDbConnStr);
-var keyVaultEnabled = IsKeyVaultEnabled(appConfig);
-var keyVaultUrl = appConfig["KeyVault:VaultUrl"] ?? string.Empty;
-var maskedVaultUrl = MaskKeyVaultUrl(keyVaultUrl);
-
-startupLogger.LogInformation(
-    "ODMON Startup Diagnostics: Environment={Environment}, MondayBoardId={MondayBoardId}, IntegrationDbServer={IntegrationDbServer}, IntegrationDbName={IntegrationDbName}, KeyVaultEnabled={KeyVaultEnabled}, KeyVaultUrl={KeyVaultUrl}",
-    env.EnvironmentName,
-    mondayBoardId,
-    integrationDbServer,
-    integrationDbName,
-    keyVaultEnabled,
-    maskedVaultUrl);
-
-if (mondayBoardId == 0)
-{
-    startupLogger.LogError(
-        "CRITICAL: Monday:CasesBoardId is 0 or missing. Set configuration key 'Monday:CasesBoardId' (or environment variable 'Monday__CasesBoardId').");
-}
-
 if (IsKeyVaultEnabled(appConfig))
 {
     await ValidateRequiredSecretsAsync(host.Services);
@@ -209,77 +180,6 @@ static string ResolveConnectionString(IServiceProvider serviceProvider, string s
 static bool IsKeyVaultEnabled(IConfiguration config)
 {
     return bool.TryParse(config["KeyVault:Enabled"], out var enabled) && enabled;
-}
-
-static string ExtractServerName(string connectionString)
-{
-    if (string.IsNullOrWhiteSpace(connectionString))
-        return "<not configured>";
-    
-    var parts = connectionString.Split(';');
-    foreach (var part in parts)
-    {
-        var kv = part.Split('=', 2);
-        if (kv.Length == 2)
-        {
-            var key = kv[0].Trim();
-            var value = kv[1].Trim();
-            if (string.Equals(key, "Server", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(key, "Data Source", StringComparison.OrdinalIgnoreCase))
-            {
-                return value;
-            }
-        }
-    }
-    return "<unknown>";
-}
-
-static string ExtractDatabaseName(string connectionString)
-{
-    if (string.IsNullOrWhiteSpace(connectionString))
-        return "<not configured>";
-    
-    var parts = connectionString.Split(';');
-    foreach (var part in parts)
-    {
-        var kv = part.Split('=', 2);
-        if (kv.Length == 2)
-        {
-            var key = kv[0].Trim();
-            var value = kv[1].Trim();
-            if (string.Equals(key, "Database", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(key, "Initial Catalog", StringComparison.OrdinalIgnoreCase))
-            {
-                return value;
-            }
-        }
-    }
-    return "<unknown>";
-}
-
-static string MaskKeyVaultUrl(string url)
-{
-    if (string.IsNullOrWhiteSpace(url))
-        return "<not configured>";
-    
-    try
-    {
-        var uri = new Uri(url);
-        var host = uri.Host;
-        if (host.Contains(".vault.azure.net", StringComparison.OrdinalIgnoreCase))
-        {
-            var parts = host.Split('.');
-            if (parts.Length >= 2)
-            {
-                return $"{parts[0].Substring(0, Math.Min(4, parts[0].Length))}***.{string.Join(".", parts.Skip(1))}";
-            }
-        }
-        return $"{host.Substring(0, Math.Min(4, host.Length))}***";
-    }
-    catch
-    {
-        return "<invalid>";
-    }
 }
 
 static bool IsPlaceholderValue(string value)
