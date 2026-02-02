@@ -25,6 +25,11 @@ namespace Odmon.Worker.Data
                 .IsUnique();
             modelBuilder.Entity<MondayItemMapping>()
                 .HasIndex(m => m.MondayItemId);
+            // Primary lookup index: (BoardId, TikCounter) with INCLUDE columns for covering index
+            modelBuilder.Entity<MondayItemMapping>()
+                .HasIndex(m => new { m.BoardId, m.TikCounter })
+                .IncludeProperties(m => new { m.Id, m.MondayItemId, m.TikNumber, m.IsTest, m.OdcanitVersion, m.MondayChecksum, m.LastSyncFromOdcanitUtc, m.LastSyncFromMondayUtc });
+            // Legacy lookup index: (BoardId, TikNumber) for fallback queries
             modelBuilder.Entity<MondayItemMapping>()
                 .HasIndex(m => new { m.TikNumber, m.BoardId });
 
