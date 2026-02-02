@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -98,11 +98,8 @@ namespace Odmon.Worker.Services
             var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, IsraelTimeZone);
             var nearestByTik = HearingSelector.PickNearestUpcomingHearing(diaryRows, nowLocal);
 
-            try
-            {
-                await _integrationDb.HearingNearestSnapshots.Take(1).AnyAsync(ct);
-            }
-            catch (SqlException ex) when (ex.Number == 208)
+            var tableExists = await TableExistsAsync(_integrationDb, "HearingNearestSnapshots", ct);
+            if (!tableExists)
             {
                 _logger.LogWarning(
                     "Table HearingNearestSnapshots does not exist; skipping HearingNearest sync. BoardId={BoardId}",
@@ -300,6 +297,36 @@ namespace Odmon.Worker.Services
             return hearing.StartDate.HasValue
                    && !string.IsNullOrWhiteSpace(hearing.JudgeName)
                    && !string.IsNullOrWhiteSpace(hearing.City);
+        }
+
+        /// <summary>
+        /// Checks if a table exists in the database using sys.tables (does not reference the table itself).
+        /// </summary>
+        private static async Task<bool> TableExistsAsync(IntegrationDbContext db, string tableName, CancellationToken ct)
+        {
+            var connection = db.Database.GetDbConnection();
+            var wasClosed = connection.State == ConnectionState.Closed;
+            if (wasClosed)
+            {
+                await connection.OpenAsync(ct);
+            }
+
+            try
+            {
+                await using var command = connection.CreateCommand();
+                command.CommandText = "SELECT 1 FROM sys.tables WHERE name = @name";
+                var p = command.CreateParameter();
+                p.ParameterName = "@name";
+                p.Value = tableName;
+                command.Parameters.Add(p);
+
+                var result = await command.ExecuteScalarAsync(ct);
+                return result != null && result != DBNull.Value;
+            }
+            finally
+            {
+                // Connection is owned by the context; do not close it
+            }
         }
     }
 }
