@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Threading.Tasks;
 using Azure.Extensions.AspNetCore.Configuration.Secrets;
 using Azure.Identity;
@@ -147,6 +148,8 @@ if (IsKeyVaultEnabled(appConfig))
     await ValidateRequiredSecretsAsync(host.Services);
 }
 
+await VerifyIntegrationDbConnectionAsync(host.Services);
+
 await host.RunAsync();
 
 static string ResolveConnectionString(IServiceProvider serviceProvider, string secretKey, string connectionName, bool required)
@@ -249,5 +252,70 @@ static async Task ValidateRequiredSecretsAsync(IServiceProvider services)
         }
 
         throw new InvalidOperationException($"Required secret '{key}' was not found. Provide it via user-secrets (Development) or Azure KeyVault/Environment Variables (Production). See README for setup instructions.");
+    }
+}
+
+static async Task VerifyIntegrationDbConnectionAsync(IServiceProvider services)
+{
+    using var scope = services.CreateScope();
+    var provider = scope.ServiceProvider;
+    var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger("IntegrationDbVerification");
+
+    try
+    {
+        var integrationDb = provider.GetRequiredService<IntegrationDbContext>();
+        var connection = integrationDb.Database.GetDbConnection();
+
+        // Log connection properties (without credentials)
+        var dataSource = connection.DataSource ?? "<unknown>";
+        var database = connection.Database ?? "<unknown>";
+        var state = connection.State.ToString();
+
+        logger.LogInformation(
+            "IntegrationDb Connection Properties: DataSource={DataSource}, Database={Database}, ConnectionState={State}",
+            dataSource,
+            database,
+            state);
+
+        // Open connection if closed
+        if (connection.State != System.Data.ConnectionState.Open)
+        {
+            await connection.OpenAsync();
+        }
+
+        // Execute raw SQL to get actual server and database names
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT @@SERVERNAME AS ServerName, DB_NAME() AS DbName";
+
+        using var reader = await command.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
+        {
+            var serverName = reader["ServerName"]?.ToString() ?? "<unknown>";
+            var dbName = reader["DbName"]?.ToString() ?? "<unknown>";
+
+            logger.LogInformation(
+                "IntegrationDb Runtime Verification: @@SERVERNAME={ServerName}, DB_NAME()={DbName}",
+                serverName,
+                dbName);
+
+            // Also log as warning if values don't match connection properties
+            if (database != "<unknown>" && !string.Equals(database, dbName, StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogWarning(
+                    "IntegrationDb database name mismatch: Connection.Database={ConnectionDatabase}, DB_NAME()={ActualDbName}",
+                    database,
+                    dbName);
+            }
+        }
+        else
+        {
+            logger.LogWarning("IntegrationDb verification query returned no results.");
+        }
+    }
+    catch (Exception ex)
+    {
+        var logger2 = services.GetRequiredService<ILoggerFactory>().CreateLogger("IntegrationDbVerification");
+        logger2.LogError(ex, "Failed to verify IntegrationDb connection. This may indicate a configuration or connectivity issue.");
+        throw;
     }
 }
