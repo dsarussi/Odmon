@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -96,6 +97,18 @@ namespace Odmon.Worker.Services
             var diaryRows = await _odcanitReader.GetDiaryEventsByTikCountersAsync(tikCounters, ct);
             var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, IsraelTimeZone);
             var nearestByTik = HearingSelector.PickNearestUpcomingHearing(diaryRows, nowLocal);
+
+            try
+            {
+                await _integrationDb.HearingNearestSnapshots.Take(1).AnyAsync(ct);
+            }
+            catch (SqlException ex) when (ex.Number == 208)
+            {
+                _logger.LogWarning(
+                    "Table HearingNearestSnapshots does not exist; skipping HearingNearest sync. BoardId={BoardId}",
+                    boardId);
+                return;
+            }
 
             var statusColumnId = _mondaySettings.HearingStatusColumnId;
             HashSet<string>? allowedStatusLabels = null;

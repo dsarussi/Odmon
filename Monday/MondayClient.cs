@@ -132,6 +132,44 @@ namespace Odmon.Worker.Monday
             }
         }
 
+        public async Task<string?> GetItemStateAsync(long boardId, long itemId, CancellationToken ct)
+        {
+            var query = @"query ($itemIds: [ID!]) {
+                items(ids: $itemIds) {
+                    id
+                    state
+                }
+            }";
+            var variables = new Dictionary<string, object>
+            {
+                ["itemIds"] = new[] { itemId.ToString() }
+            };
+            try
+            {
+                using var doc = await ExecuteGraphQLRequestAsync(query, variables, ct, "items_state", boardId, itemId, null);
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("data", out var data) ||
+                    !data.TryGetProperty("items", out var items) ||
+                    items.ValueKind != JsonValueKind.Array ||
+                    items.GetArrayLength() == 0)
+                {
+                    return null;
+                }
+                var item = items[0];
+                if (item.TryGetProperty("state", out var stateEl))
+                {
+                    var s = stateEl.GetString();
+                    return string.IsNullOrEmpty(s) ? null : s;
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get item state for BoardId={BoardId}, ItemId={ItemId}. Treating as unknown.", boardId, itemId);
+                return null;
+            }
+        }
+
         public async Task UpdateItemAsync(long boardId, long itemId, string columnValuesJson, CancellationToken ct)
         {
             var query = @"mutation ($itemId: ID!, $boardId: ID!, $columnVals: JSON!) {

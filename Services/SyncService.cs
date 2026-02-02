@@ -292,11 +292,31 @@ namespace Odmon.Worker.Services
                         {
                             try
                             {
-                                await UpdateMondayItemAsync(mapping!, c, caseBoardId, itemName, syncAction.RequiresNameUpdate, syncAction.RequiresDataUpdate, testMode, ct);
-                                updated++;
-                                _logger.LogInformation(
-                                    "Successfully updated Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
-                                    c.TikNumber, c.TikCounter, mapping.MondayItemId);
+                                var itemState = await _mondayClient.GetItemStateAsync(caseBoardId, mapping.MondayItemId, ct);
+                                if (itemState != null && !string.Equals(itemState, "active", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var oldItemId = mapping.MondayItemId;
+                                    var columnValuesJson = await BuildColumnValuesJsonAsync(caseBoardId, c, forceNotStartedStatus: true, ct);
+                                    var newItemId = await _mondayClient.CreateItemAsync(caseBoardId, caseGroupId!, itemName, columnValuesJson, ct);
+                                    mapping.MondayItemId = newItemId;
+                                    mapping.OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
+                                    mapping.MondayChecksum = itemName;
+                                    mapping.LastSyncFromOdcanitUtc = DateTime.UtcNow;
+                                    mapping.IsTest = testMode;
+                                    await _integrationDb.SaveChangesAsync(ct);
+                                    _logger.LogWarning(
+                                        "Monday item inactive (state={State}), created new item and updated mapping: TikCounter={TikCounter}, TikNumber={TikNumber}, oldItemId={OldItemId}, newItemId={NewItemId}",
+                                        itemState, c.TikCounter, c.TikNumber ?? "<null>", oldItemId, newItemId);
+                                    updated++;
+                                }
+                                else
+                                {
+                                    await UpdateMondayItemAsync(mapping!, c, caseBoardId, itemName, syncAction.RequiresNameUpdate, syncAction.RequiresDataUpdate, testMode, ct);
+                                    updated++;
+                                    _logger.LogInformation(
+                                        "Successfully updated Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
+                                        c.TikNumber, c.TikCounter, mapping.MondayItemId);
+                                }
                             }
                             catch (Monday.MondayApiException mondayEx)
                             {
