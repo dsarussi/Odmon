@@ -89,7 +89,32 @@ hostBuilder.ConfigureServices((context, services) =>
         options.UseSqlServer(connectionString);
     });
 
-    services.AddScoped<IOdcanitReader, SqlOdcanitReader>();
+    services.AddScoped<SqlOdcanitReader>();
+    services.AddScoped<GuardOdcanitReader>();
+    services.AddScoped<IOdcanitReader>(sp =>
+    {
+        var config = sp.GetRequiredService<IConfiguration>();
+        var testingEnabled = config.GetValue<bool>("Testing:Enable", false);
+        if (testingEnabled)
+        {
+            return sp.GetRequiredService<GuardOdcanitReader>();
+        }
+
+        return sp.GetRequiredService<SqlOdcanitReader>();
+    });
+    services.AddScoped<OdcanitCaseSource>();
+    services.AddScoped<IntegrationTestCaseSource>();
+    services.AddScoped<ICaseSource>(sp =>
+    {
+        var config = sp.GetRequiredService<IConfiguration>();
+        var testingEnabled = config.GetValue<bool>("Testing:Enable", false);
+        if (testingEnabled)
+        {
+            return sp.GetRequiredService<IntegrationTestCaseSource>();
+        }
+
+        return sp.GetRequiredService<OdcanitCaseSource>();
+    });
 
     if (!env.IsDevelopment())
     {
@@ -97,7 +122,9 @@ hostBuilder.ConfigureServices((context, services) =>
     }
 
     services.AddScoped<IOdcanitWriter, SqlOdcanitWriter>();
+    services.AddScoped<ISkipLogger, SkipLogger>();
     services.AddScoped<HearingApprovalSyncService>();
+    services.AddScoped<HearingNearestSyncService>();
     services.AddScoped<TokenResolverService>();
     services.AddScoped<NispahWriterService>();
 

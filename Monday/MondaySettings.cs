@@ -66,6 +66,8 @@ namespace Odmon.Worker.Monday
         public string? JudgeNameColumnId { get; set; } = "text_mkwjne8v";
         public string? HearingDateColumnId { get; set; } = "date_mkwjwmzq";
         public string? HearingHourColumnId { get; set; } = "hour_mkwjbwr";
+        /// <summary>Hearing status column (פעיל / מבוטל / הועבר). ColumnId: color_mkzqbrta.</summary>
+        public string? HearingStatusColumnId { get; set; } = "color_mkzqbrta";
         public string? AttorneyNameColumnId { get; set; } = "text_mkxeqj54";
         public string? DefenseStreetColumnId { get; set; } = "text_mkxer5d1";
         public string? ClaimStreetColumnId { get; set; } = "text_mkxwzxcq";

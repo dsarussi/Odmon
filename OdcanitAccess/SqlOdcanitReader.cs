@@ -113,6 +113,24 @@ namespace Odmon.Worker.OdcanitAccess
             return cases;
         }
 
+        public async Task<List<OdcanitDiaryEvent>> GetDiaryEventsByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct)
+        {
+            var list = tikCounters?.Distinct().ToList() ?? new List<int>();
+            if (list.Count == 0)
+            {
+                return new List<OdcanitDiaryEvent>();
+            }
+
+            var set = new HashSet<int>(list);
+            var rows = await _db.DiaryEvents
+                .AsNoTracking()
+                .Where(d => d.TikCounter.HasValue && set.Contains(d.TikCounter.Value))
+                .ToListAsync(ct);
+
+            _logger.LogDebug("GetDiaryEventsByTikCountersAsync: loaded {Count} rows from vwExportToOuterSystems_YomanData for {TikCount} TikCounters.", rows.Count, list.Count);
+            return rows;
+        }
+
         private async Task EnrichWithClientsAsync(List<OdcanitCase> cases, CancellationToken ct)
         {
             _logger.LogDebug("Enriching {Count} cases with client contact info.", cases.Count);

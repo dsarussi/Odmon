@@ -60,6 +60,11 @@ namespace Odmon.Worker.OdcanitAccess
                 .ToList();
             return Task.FromResult(result);
         }
+
+        public Task<List<OdcanitDiaryEvent>> GetDiaryEventsByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct)
+        {
+            return Task.FromResult(new List<OdcanitDiaryEvent>());
+        }
     }
 }
 
