@@ -21,13 +21,11 @@ var hostBuilder = Host.CreateDefaultBuilder(args);
 hostBuilder.ConfigureAppConfiguration((context, configBuilder) =>
 {
     var builtConfig = configBuilder.Build();
-    var vaultUrl = builtConfig["KeyVault:VaultUrl"];
-    if (!string.IsNullOrWhiteSpace(vaultUrl)
-        && !vaultUrl.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase)
-        && Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var vaultUri)
-        && vaultUri.IsAbsoluteUri)
+    if (IsKeyVaultEnabled(builtConfig))
     {
-        configBuilder.AddAzureKeyVault(vaultUri, new DefaultAzureCredential());
+        var vaultUrl = builtConfig["KeyVault:VaultUrl"]!;
+        Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var vaultUri);
+        configBuilder.AddAzureKeyVault(vaultUri!, new DefaultAzureCredential());
     }
 });
 
@@ -42,13 +40,11 @@ hostBuilder.ConfigureServices((context, services) =>
         services.AddSingleton<UserSecretsProvider>();
     }
 
-    var vaultUrl = config["KeyVault:VaultUrl"];
-    if (!string.IsNullOrWhiteSpace(vaultUrl)
-        && !vaultUrl.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase)
-        && Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var vaultUri)
-        && vaultUri.IsAbsoluteUri)
+    if (IsKeyVaultEnabled(config))
     {
-        services.AddSingleton(new SecretClient(vaultUri, new DefaultAzureCredential()));
+        var vaultUrl = config["KeyVault:VaultUrl"]!;
+        Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var vaultUri);
+        services.AddSingleton(new SecretClient(vaultUri!, new DefaultAzureCredential()));
         services.AddSingleton<AzureKeyVaultSecretProvider>();
     }
 
@@ -188,8 +184,7 @@ static bool IsKeyVaultEnabled(IConfiguration config)
     var vaultUrl = config["KeyVault:VaultUrl"];
     if (string.IsNullOrWhiteSpace(vaultUrl)) return false;
     if (vaultUrl.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase)) return false;
-    if (!Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var uri) || !uri.IsAbsoluteUri) return false;
-    return true;
+    return Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var uri) && uri.IsAbsoluteUri;
 }
 
 static bool IsPlaceholderValue(string value)
