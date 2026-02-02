@@ -21,16 +21,13 @@ var hostBuilder = Host.CreateDefaultBuilder(args);
 hostBuilder.ConfigureAppConfiguration((context, configBuilder) =>
 {
     var builtConfig = configBuilder.Build();
-    if (!context.HostingEnvironment.IsDevelopment())
+    var vaultUrl = builtConfig["KeyVault:VaultUrl"];
+    if (!string.IsNullOrWhiteSpace(vaultUrl)
+        && !vaultUrl.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase)
+        && Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var vaultUri)
+        && vaultUri.IsAbsoluteUri)
     {
-        var vaultUrl = context.Configuration["KeyVault:VaultUrl"];
-
-        if (!string.IsNullOrWhiteSpace(vaultUrl)
-            && !vaultUrl.StartsWith("CHANGE_ME", StringComparison.OrdinalIgnoreCase))
-        {
-            configBuilder.AddAzureKeyVault(new Uri(vaultUrl), new DefaultAzureCredential());
-        }
-
+        configBuilder.AddAzureKeyVault(vaultUri, new DefaultAzureCredential());
     }
 });
 
@@ -45,14 +42,14 @@ hostBuilder.ConfigureServices((context, services) =>
         services.AddSingleton<UserSecretsProvider>();
     }
 
-    if (!env.IsDevelopment())
+    var vaultUrl = config["KeyVault:VaultUrl"];
+    if (!string.IsNullOrWhiteSpace(vaultUrl)
+        && !vaultUrl.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase)
+        && Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var vaultUri)
+        && vaultUri.IsAbsoluteUri)
     {
-        var vaultUrl = config["KeyVault:VaultUrl"];
-        if (!string.IsNullOrWhiteSpace(vaultUrl))
-        {
-            services.AddSingleton(new SecretClient(new Uri(vaultUrl), new DefaultAzureCredential()));
-            services.AddSingleton<AzureKeyVaultSecretProvider>();
-        }
+        services.AddSingleton(new SecretClient(vaultUri, new DefaultAzureCredential()));
+        services.AddSingleton<AzureKeyVaultSecretProvider>();
     }
 
     services.AddSingleton<ISecretProvider>(sp =>
@@ -150,7 +147,11 @@ hostBuilder.ConfigureServices((context, services) =>
 
 var host = hostBuilder.Build();
 
-await ValidateRequiredSecretsAsync(host.Services);
+var appConfig = host.Services.GetRequiredService<IConfiguration>();
+if (IsKeyVaultEnabled(appConfig))
+{
+    await ValidateRequiredSecretsAsync(host.Services);
+}
 
 await host.RunAsync();
 
@@ -180,6 +181,15 @@ static string ResolveConnectionString(IServiceProvider serviceProvider, string s
 
     logger.LogInformation("Connection string '{ConnectionName}' not configured.", connectionName);
     return string.Empty;
+}
+
+static bool IsKeyVaultEnabled(IConfiguration config)
+{
+    var vaultUrl = config["KeyVault:VaultUrl"];
+    if (string.IsNullOrWhiteSpace(vaultUrl)) return false;
+    if (vaultUrl.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase)) return false;
+    if (!Uri.TryCreate(vaultUrl.Trim(), UriKind.Absolute, out var uri) || !uri.IsAbsoluteUri) return false;
+    return true;
 }
 
 static bool IsPlaceholderValue(string value)
