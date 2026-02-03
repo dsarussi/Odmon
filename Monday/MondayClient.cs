@@ -272,12 +272,12 @@ namespace Odmon.Worker.Monday
         {
             // Query Monday.com to find items where the specified column matches the value
             // Using items_page with query_params for exact match
-            var query = @"query ($boardId: ID!, $columnId: String!, $columnValue: String!) {
+            var query = @"query ($boardId: ID!, $columnId: ID!, $columnValue: [String!]) {
                 boards (ids: [$boardId]) {
                     items_page (limit: 1, query_params: {
                         rules: [{
                             column_id: $columnId,
-                            compare_value: [$columnValue]
+                            compare_value: $columnValue
                         }]
                     }) {
                         items {
@@ -291,7 +291,7 @@ namespace Odmon.Worker.Monday
             {
                 ["boardId"] = boardId.ToString(),
                 ["columnId"] = columnId,
-                ["columnValue"] = columnValue,
+                ["columnValue"] = new[] { columnValue },
             };
 
             _logger.LogDebug("Searching Monday board {BoardId} for item with column {ColumnId} = {ColumnValue}", boardId, columnId, columnValue);
