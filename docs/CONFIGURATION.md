@@ -57,7 +57,7 @@ Server=sql-server.database.windows.net;Database=OdmonIntegration;User Id=usernam
 
 | Config Key | Environment Variable | Type | Required | Default | Description |
 |------------|---------------------|------|----------|---------|-------------|
-| `Testing:Enable` | `Testing__Enable` | bool | No | false | Enable test mode (reads from `TestCases1808` table instead of Odcanit). |
+| `Testing:Enable` | `Testing__Enable` | bool | No | false | Enable test mode (reads from `OdmonTestCases` table instead of Odcanit). |
 | `Testing:Source` | `Testing__Source` | string | No | - | Test data source identifier. |
 | `Testing:TikCounters` | `Testing__TikCounters` | int[] | No | [] | List of TikCounters to process in test mode. |
 | `Testing:TableName` | `Testing__TableName` | string | No | - | Test table name in IntegrationDb. |

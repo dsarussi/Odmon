@@ -115,7 +115,7 @@ namespace Odmon.Worker.Services
             var testingEnabled = testingSection.GetValue<bool>("Enable", false);
             if (testingEnabled)
             {
-                var testingSource = testingSection.GetValue<string>("Source") ?? "IntegrationDbTestCases1808";
+                var testingSource = testingSection.GetValue<string>("Source") ?? "IntegrationDbOdmonTestCases";
                 var testingTikCounters = testingSection.GetSection("TikCounters").Get<int[]>() ?? Array.Empty<int>();
 
                 if (testingTikCounters.Length == 0)

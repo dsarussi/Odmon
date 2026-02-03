@@ -13,7 +13,7 @@ using Odmon.Worker.Models;
 namespace Odmon.Worker.Services
 {
     /// <summary>
-    /// Test-only case source that reads cases from IntegrationDb test table (e.g. dbo.TestCases1808)
+    /// Test-only case source that reads cases from IntegrationDb test table (e.g. dbo.OdmonTestCases)
     /// instead of Odcanit. Used when Testing.Enable = true.
     /// </summary>
     public class IntegrationTestCaseSource : ICaseSource
@@ -41,7 +41,7 @@ namespace Odmon.Worker.Services
             }
 
             var testingSection = _config.GetSection("Testing");
-            var tableName = testingSection.GetValue<string>("TableName") ?? "dbo.TestCases1808";
+            var tableName = testingSection.GetValue<string>("TableName") ?? "dbo.OdmonTestCases";
 
             _logger.LogInformation(
                 "Reading test cases from IntegrationDb table {TableName} for TikCounters={TikCounters}",

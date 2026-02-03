@@ -182,7 +182,7 @@ namespace Odmon.Worker.Models
         [NotMapped]
         public Dictionary<string, string?> RawFields { get; set; } = new();
         /// <summary>
-        /// Optional document type hint for testing cases (e.g. from \"סוג מסמך\" in dbo.TestCases1808).
+        /// Optional document type hint for testing cases (e.g. from \"סוג מסמך\" in dbo.OdmonTestCases).
         /// </summary>
         [NotMapped]
         public string? DocumentType { get; set; }
