@@ -2189,26 +2189,24 @@ namespace Odmon.Worker.Services
         }
 
         // Critical columns that require strict validation (fail-fast)
+        // NOTE: Column type is now detected dynamically from Monday metadata, not hardcoded
         private static readonly List<CriticalColumnDefinition> CriticalColumns = new()
         {
             new CriticalColumnDefinition
             {
                 FieldName = "DocumentType",
-                ColumnType = "status",
                 GetValue = c => c.DocumentType,
                 ValidationMessage = "Document type (סוג מסמך) is critical - prevents automatic creation of wrong document types (e.g., 'כתב תביעה' vs 'כתב הגנה')"
             },
             new CriticalColumnDefinition
             {
                 FieldName = "PlaintiffSide",
-                ColumnType = "status",
                 GetValue = c => c.PlaintiffSideRaw,
                 ValidationMessage = "Plaintiff side (צד תובע) is critical - prevents incorrect party designation"
             },
             new CriticalColumnDefinition
             {
                 FieldName = "DefendantSide",
-                ColumnType = "status",
                 GetValue = c => c.DefendantSideRaw,
                 ValidationMessage = "Defendant side (צד נתבע) is critical - prevents incorrect party designation"
             }
@@ -2250,29 +2248,66 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
-                HashSet<string> allowedLabels;
+                // Detect actual column type from Monday metadata
+                string? actualColumnType;
                 try
                 {
-                    if (criticalColumn.ColumnType == "status")
+                    actualColumnType = await _mondayMetadataProvider.GetColumnTypeAsync(boardId, columnId2, ct);
+                    if (string.IsNullOrWhiteSpace(actualColumnType))
                     {
-                        allowedLabels = await _mondayMetadataProvider.GetAllowedStatusLabelsAsync(boardId, columnId2, ct);
-                    }
-                    else if (criticalColumn.ColumnType == "dropdown")
-                    {
-                        allowedLabels = await _mondayMetadataProvider.GetAllowedDropdownLabelsAsync(boardId, columnId2, ct);
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Unknown column type {ColumnType} for critical field {FieldName}", criticalColumn.ColumnType, criticalColumn.FieldName);
+                        _logger.LogWarning(
+                            "Cannot detect column type for critical field {FieldName} (ColumnId={ColumnId}) - skipping label validation",
+                            criticalColumn.FieldName,
+                            columnId2);
                         continue;
                     }
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex,
-                        "Failed to fetch allowed labels for critical field {FieldName} (ColumnId={ColumnId}). Cannot validate.",
+                        "Failed to fetch column type for critical field {FieldName} (ColumnId={ColumnId}). Cannot validate.",
                         criticalColumn.FieldName,
                         columnId2);
+                    continue;
+                }
+
+                _logger.LogDebug(
+                    "Detected column type for critical field {FieldName} (ColumnId={ColumnId}): {ColumnType}",
+                    criticalColumn.FieldName,
+                    columnId2,
+                    actualColumnType);
+
+                // Fetch allowed labels based on detected column type
+                HashSet<string> allowedLabels;
+                try
+                {
+                    if (actualColumnType == "color" || actualColumnType == "status")
+                    {
+                        // Status columns (Monday uses "color" type for status columns)
+                        allowedLabels = await _mondayMetadataProvider.GetAllowedStatusLabelsAsync(boardId, columnId2, ct);
+                    }
+                    else if (actualColumnType == "dropdown")
+                    {
+                        // Dropdown columns
+                        allowedLabels = await _mondayMetadataProvider.GetAllowedDropdownLabelsAsync(boardId, columnId2, ct);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "Unsupported column type {ColumnType} for critical field {FieldName} (ColumnId={ColumnId}) - skipping label validation",
+                            actualColumnType,
+                            criticalColumn.FieldName,
+                            columnId2);
+                        continue;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Failed to fetch allowed labels for critical field {FieldName} (ColumnId={ColumnId}, Type={ColumnType}). Cannot validate.",
+                        criticalColumn.FieldName,
+                        columnId2,
+                        actualColumnType);
                     // If we can't fetch labels, we can't validate - this is a configuration/connectivity issue
                     // Don't fail the sync, but log the warning
                     continue;
@@ -2281,11 +2316,12 @@ namespace Odmon.Worker.Services
                 if (!allowedLabels.Contains(fieldValue))
                 {
                     _logger.LogError(
-                        "CRITICAL FIELD VALIDATION FAILED: TikCounter={TikCounter}, TikNumber={TikNumber}, Field={FieldName}, ColumnId={ColumnId}, Value='{Value}', Reason=INVALID_LABEL, AllowedLabels=[{AllowedLabels}]. {ValidationMessage}",
+                        "CRITICAL FIELD VALIDATION FAILED: TikCounter={TikCounter}, TikNumber={TikNumber}, Field={FieldName}, ColumnId={ColumnId}, ColumnType={ColumnType}, Value='{Value}', Reason=INVALID_LABEL, AllowedLabels=[{AllowedLabels}]. {ValidationMessage}",
                         c.TikCounter,
                         c.TikNumber ?? "<null>",
                         criticalColumn.FieldName,
                         columnId2,
+                        actualColumnType,
                         fieldValue,
                         string.Join(", ", allowedLabels),
                         criticalColumn.ValidationMessage);
@@ -2295,13 +2331,14 @@ namespace Odmon.Worker.Services
                         c.TikNumber,
                         columnId2,
                         fieldValue,
-                        $"INVALID_LABEL - Value '{fieldValue}' not in allowed labels: [{string.Join(", ", allowedLabels)}]. {criticalColumn.ValidationMessage}");
+                        $"INVALID_LABEL - Value '{fieldValue}' not in allowed labels for {actualColumnType} column: [{string.Join(", ", allowedLabels)}]. {criticalColumn.ValidationMessage}");
                 }
 
                 _logger.LogDebug(
-                    "Critical field validated OK: TikCounter={TikCounter}, Field={FieldName}, Value='{Value}'",
+                    "Critical field validated OK: TikCounter={TikCounter}, Field={FieldName}, ColumnType={ColumnType}, Value='{Value}'",
                     c.TikCounter,
                     criticalColumn.FieldName,
+                    actualColumnType,
                     fieldValue);
             }
         }
@@ -2320,7 +2357,7 @@ namespace Odmon.Worker.Services
         private class CriticalColumnDefinition
         {
             public string FieldName { get; set; } = string.Empty;
-            public string ColumnType { get; set; } = string.Empty; // "status" or "dropdown"
+            // ColumnType is no longer used - detected dynamically from Monday metadata
             public Func<OdcanitCase, string?> GetValue { get; set; } = _ => null;
             public string ValidationMessage { get; set; } = string.Empty;
         }

@@ -28,31 +28,31 @@ Custom exception that captures all relevant context:
 **File**: `Services\SyncService.cs`
 
 ```csharp
+// NOTE: Column type is now detected dynamically from Monday metadata, not hardcoded
 private static readonly List<CriticalColumnDefinition> CriticalColumns = new()
 {
     new CriticalColumnDefinition
     {
         FieldName = "DocumentType",
-        ColumnType = "status",
         GetValue = c => c.DocumentType,
         ValidationMessage = "Document type (סוג מסמך) is critical - prevents automatic creation of wrong document types (e.g., 'כתב תביעה' vs 'כתב הגנה')"
     },
     new CriticalColumnDefinition
     {
         FieldName = "PlaintiffSide",
-        ColumnType = "status",
         GetValue = c => c.PlaintiffSideRaw,
         ValidationMessage = "Plaintiff side (צד תובע) is critical - prevents incorrect party designation"
     },
     new CriticalColumnDefinition
     {
         FieldName = "DefendantSide",
-        ColumnType = "status",
         GetValue = c => c.DefendantSideRaw,
         ValidationMessage = "Defendant side (צד נתבע) is critical - prevents incorrect party designation"
     }
 };
 ```
+
+**Key Change**: Column types are NO LONGER hardcoded. They are detected dynamically from Monday metadata at validation time.
 
 ### 3. Validation Logic
 
@@ -61,11 +61,17 @@ private static readonly List<CriticalColumnDefinition> CriticalColumns = new()
 **Validations Performed**:
 
 1. **NULL/Empty Check**: Field value must not be NULL or whitespace
-2. **Label Existence Check**: Field value must exist in Monday column metadata labels
+2. **Column Type Detection**: Fetch actual column type from Monday metadata (e.g., "color", "status", "dropdown")
+3. **Label Resolution**: Use correct method based on detected type:
+   - **Status columns** (type = "color" or "status") → `GetAllowedStatusLabelsAsync()`
+   - **Dropdown columns** (type = "dropdown") → `GetAllowedDropdownLabelsAsync()`
+4. **Label Existence Check**: Field value must exist in Monday column metadata labels
 
 **Called Before**:
 - `CreateMondayItemAsync()` - Before creating new items
 - `UpdateMondayItemAsync()` - Before updating existing items (only when `requiresDataUpdate=true`)
+
+**Key Feature**: Column type is detected dynamically from Monday API, not hardcoded. This ensures correct validation method is used (status vs dropdown labels).
 
 ### 4. Enhanced Monday Metadata Provider
 
@@ -73,9 +79,20 @@ private static readonly List<CriticalColumnDefinition> CriticalColumns = new()
 - `Monday\IMondayMetadataProvider.cs`
 - `Monday\MondayMetadataProvider.cs`
 
-**Added Method**: `GetAllowedStatusLabelsAsync()`
+**Added Methods**:
 
-Fetches allowed labels for status columns from Monday API (uses same underlying structure as dropdowns).
+1. **`GetAllowedStatusLabelsAsync()`**: Fetches allowed labels for status columns from Monday API (uses same underlying structure as dropdowns)
+
+2. **`GetColumnTypeAsync()`**: NEW - Detects actual column type from Monday metadata
+   - Returns column type string (e.g., "color", "status", "dropdown", "text", etc.)
+   - Cached per (boardId, columnId) - no TTL (permanent cache)
+   - Used to determine which label validation method to call
+
+**Column Type Detection**:
+```csharp
+var columnType = await _mondayMetadataProvider.GetColumnTypeAsync(boardId, columnId, ct);
+// Returns: "color" for status columns, "dropdown" for dropdowns, etc.
+```
 
 ### 5. Exception Handling
 
@@ -143,27 +160,42 @@ catch (CriticalFieldValidationException critEx)
 
 ### When Critical Field is Valid
 
-**Example**: `DocumentType` = "כתב תביעה" (exists in Monday labels)
+**Example**: `DocumentType` = "כתב תביעה" (exists in Monday status labels)
 
 **Result**:
+- ✅ Column type detected from Monday metadata (e.g., "color")
+- ✅ Correct validation method selected (status labels)
 - ✅ Validation passes
 - ✅ Monday item created/updated normally
-- ✅ DEBUG log shows validation success
+- ✅ DEBUG logs show column type detection and validation success
 
 **Log Output**:
 ```
-[DEBUG] Critical field validated OK: TikCounter=900000, Field=DocumentType, Value='כתב תביעה'
+[DEBUG] Detected column type for critical field DocumentType (ColumnId=color_mkxhq546): color
+[DEBUG] Critical field validated OK: TikCounter=900000, Field=DocumentType, ColumnType=color, Value='כתב תביעה'
 ```
+
+### Why Column Type Detection Matters
+
+**Problem Before**: If a critical field was hardcoded as "dropdown" but the Monday column was actually "status" (type="color"), validation would fail for valid values like "כתב הגנה" or "כתב תביעה".
+
+**Solution Now**: System detects actual column type from Monday metadata:
+- **Status columns** (Monday type = "color") → Use status label validation
+- **Dropdown columns** (Monday type = "dropdown") → Use dropdown label validation
+
+**Result**: Valid values like "כתב הגנה" for status columns now pass validation correctly.
 
 ## Critical Columns Configuration
 
 ### Current Critical Columns
 
-| Field Name | Monday Column ID | Column Type | Validation Message |
-|------------|------------------|-------------|-------------------|
-| `DocumentType` | `color_mkxhq546` | status | Prevents automatic creation of wrong document types |
-| `PlaintiffSide` | `color_mkxh8gsq` | status | Prevents incorrect party designation (צד תובע) |
-| `DefendantSide` | `color_mkxh5x31` | status | Prevents incorrect party designation (צד נתבע) |
+| Field Name | Monday Column ID | Column Type (Detected) | Validation Message |
+|------------|------------------|------------------------|-------------------|
+| `DocumentType` | `color_mkxhq546` | Auto-detected from Monday | Prevents automatic creation of wrong document types |
+| `PlaintiffSide` | `color_mkxh8gsq` | Auto-detected from Monday | Prevents incorrect party designation (צד תובע) |
+| `DefendantSide` | `color_mkxh5x31` | Auto-detected from Monday | Prevents incorrect party designation (צד נתבע) |
+
+**Note**: Column types are detected dynamically at runtime from Monday metadata, not hardcoded.
 
 ### Adding New Critical Columns
 
@@ -176,7 +208,7 @@ private static readonly List<CriticalColumnDefinition> CriticalColumns = new()
     new CriticalColumnDefinition
     {
         FieldName = "NewFieldName",
-        ColumnType = "status", // or "dropdown"
+        // NO ColumnType - it's auto-detected from Monday metadata
         GetValue = c => c.NewFieldProperty,
         ValidationMessage = "Explanation of why this field is critical"
     }
@@ -196,6 +228,11 @@ private string? GetColumnIdForField(string fieldName)
     };
 }
 ```
+
+**Important**: You do NOT need to specify the column type. The system will:
+1. Detect the column type from Monday metadata at runtime
+2. Select the correct validation method (status vs dropdown labels)
+3. Validate against the appropriate label set
 
 ## No Silent Defaults
 
@@ -276,11 +313,14 @@ await ValidateCriticalFieldsAsync(boardId, c, ct);
 ✅ **Prevents Data Errors**: No more wrong document types automatically created  
 ✅ **Clear Feedback**: Detailed error messages show exactly what's wrong and why  
 ✅ **Fast Failure**: Fails before Monday API call, saving time and API quota  
-✅ **Complete Context**: Logs include all relevant info for debugging  
+✅ **Complete Context**: Logs include all relevant info for debugging (including detected column type)  
 ✅ **Graceful**: Other cases continue processing even if one fails  
 ✅ **No Silent Bugs**: No hidden defaults that mask data quality issues  
 ✅ **Extensible**: Easy to add new critical columns  
 ✅ **Production Safe**: Cached metadata, error handling, no blocking behavior  
+✅ **Automatic Type Detection**: No need to hardcode column types - system detects from Monday  
+✅ **Correct Validation**: Uses status labels for status columns, dropdown labels for dropdown columns  
+✅ **Accepts Valid Values**: Values like "כתב הגנה" or "כתב תביעה" pass validation for status columns  
 
 ## Monitoring
 

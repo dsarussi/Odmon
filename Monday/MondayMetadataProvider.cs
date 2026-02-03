@@ -20,6 +20,7 @@ namespace Odmon.Worker.Monday
         private readonly ILogger<MondayMetadataProvider> _logger;
         private readonly Dictionary<(long boardId, string title), string> _cache = new();
         private readonly Dictionary<(long boardId, string columnId), DropdownLabelsCacheEntry> _dropdownLabelsCache = new();
+        private readonly Dictionary<(long boardId, string columnId), string> _columnTypeCache = new();
 
         public MondayMetadataProvider(
             HttpClient httpClient,
@@ -350,6 +351,114 @@ namespace Odmon.Worker.Monday
             // Status columns use the same structure as dropdown columns in Monday API
             // Both have settings_str with labels array
             return await GetAllowedDropdownLabelsAsync(boardId, columnId, ct);
+        }
+
+        public async Task<string?> GetColumnTypeAsync(long boardId, string columnId, CancellationToken ct = default)
+        {
+            var cacheKey = (boardId, columnId);
+            
+            // Check cache
+            lock (_columnTypeCache)
+            {
+                if (_columnTypeCache.TryGetValue(cacheKey, out var cachedType))
+                {
+                    return cachedType;
+                }
+            }
+
+            try
+            {
+                var query = @"query ($boardIds: [ID!]) {
+                    boards (ids: $boardIds) {
+                        id
+                        columns {
+                            id
+                            type
+                        }
+                    }
+                }";
+
+                var variables = new Dictionary<string, object>
+                {
+                    ["boardIds"] = new[] { boardId.ToString() }
+                };
+
+                var payload = JsonSerializer.Serialize(new { query, variables });
+                var content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+                var resp = await _httpClient.PostAsync("", content, ct);
+                resp.EnsureSuccessStatusCode();
+                var body = await resp.Content.ReadAsStringAsync(ct);
+
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("errors", out var errors))
+                {
+                    _logger.LogWarning("Monday.com API error while fetching column type for board {BoardId}: {Errors}", boardId, errors.ToString());
+                    return null;
+                }
+
+                if (!root.TryGetProperty("data", out var data) ||
+                    !data.TryGetProperty("boards", out var boards) ||
+                    boards.ValueKind != JsonValueKind.Array ||
+                    boards.GetArrayLength() == 0)
+                {
+                    _logger.LogWarning("Monday.com unexpected response when fetching column type for board {BoardId}", boardId);
+                    return null;
+                }
+
+                var board = boards[0];
+                if (!board.TryGetProperty("columns", out var columns) ||
+                    columns.ValueKind != JsonValueKind.Array)
+                {
+                    _logger.LogWarning("Monday.com board {BoardId} has no columns in type response", boardId);
+                    return null;
+                }
+
+                foreach (var column in columns.EnumerateArray())
+                {
+                    if (column.TryGetProperty("id", out var idElement))
+                    {
+                        var idValue = idElement.GetString();
+                        if (string.Equals(idValue, columnId, StringComparison.Ordinal))
+                        {
+                            if (column.TryGetProperty("type", out var typeElement))
+                            {
+                                var columnType = typeElement.GetString();
+                                if (!string.IsNullOrWhiteSpace(columnType))
+                                {
+                                    lock (_columnTypeCache)
+                                    {
+                                        _columnTypeCache[cacheKey] = columnType;
+                                    }
+                                    _logger.LogDebug(
+                                        "Resolved column type for {ColumnId} on board {BoardId}: {ColumnType}",
+                                        columnId,
+                                        boardId,
+                                        columnType);
+                                    return columnType;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                _logger.LogWarning(
+                    "Column {ColumnId} not found on board {BoardId} when resolving type",
+                    columnId,
+                    boardId);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to fetch column type for column {ColumnId} on board {BoardId}",
+                    columnId,
+                    boardId);
+                return null;
+            }
         }
 
         private class DropdownLabelsCacheEntry
