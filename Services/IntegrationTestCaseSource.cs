@@ -400,6 +400,21 @@ namespace Odmon.Worker.Services
 
                     // Convert to OdcanitCase for compatibility with existing sync logic
                     var odcanitCase = testCase.ToOdcanitCase();
+                    
+                    // Log critical field values after loading
+                    _logger.LogDebug(
+                        "Loaded test case: Id={Id}, TikCounter={TikCounter}, מספר_תיק={TikNumber}, סוג_מסמך='{DocumentType}'",
+                        testCase.Id,
+                        testCase.TikCounter,
+                        testCase.מספר_תיק,
+                        testCase.סוג_מסמך ?? "<null>");
+                    
+                    _logger.LogDebug(
+                        "Converted to OdcanitCase: TikCounter={TikCounter}, TikNumber={TikNumber}, DocumentType='{DocumentType}'",
+                        odcanitCase.TikCounter,
+                        odcanitCase.TikNumber,
+                        odcanitCase.DocumentType ?? "<null>");
+                    
                     cases.Add(odcanitCase);
 
                     _logger.LogDebug(

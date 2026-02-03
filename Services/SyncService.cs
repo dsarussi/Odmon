@@ -681,8 +681,24 @@ namespace Odmon.Worker.Services
             TryAddStatusLabelColumn(columnValues, "color_mkxh5x31", MapDefendantSideLabel(c.DefendantSideRaw));
             TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
 
-            // Set document type based on client number
-            var documentType = DetermineDocumentType(c.ClientVisualID);
+            // Set document type: use DB value first, fallback to determination by client number
+            var documentType = c.DocumentType;
+            if (string.IsNullOrWhiteSpace(documentType))
+            {
+                documentType = DetermineDocumentType(c.ClientVisualID);
+                _logger.LogDebug(
+                    "DocumentType was NULL/empty for TikCounter={TikCounter}, determined from ClientVisualID: '{DocumentType}'",
+                    c.TikCounter,
+                    documentType ?? "<null>");
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "DocumentType for TikCounter={TikCounter} from DB: '{DocumentType}'",
+                    c.TikCounter,
+                    documentType);
+            }
+            
             if (!string.IsNullOrWhiteSpace(documentType))
             {
                 TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
