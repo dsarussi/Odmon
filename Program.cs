@@ -99,15 +99,26 @@ hostBuilder.ConfigureServices((context, services) =>
     });
     services.AddScoped<OdcanitCaseSource>();
     services.AddScoped<IntegrationTestCaseSource>();
+    services.AddScoped<OdmonTestCasesReader>();
     services.AddScoped<ICaseSource>(sp =>
     {
         var config = sp.GetRequiredService<IConfiguration>();
+        
+        // Priority 1: OdmonTestCases (end-to-end test/demo mode)
+        var odmonTestCasesEnabled = config.GetValue<bool>("OdmonTestCases:Enable", false);
+        if (odmonTestCasesEnabled)
+        {
+            return sp.GetRequiredService<OdmonTestCasesReader>();
+        }
+        
+        // Priority 2: IntegrationTestCaseSource (legacy test mode)
         var testingEnabled = config.GetValue<bool>("Testing:Enable", false);
         if (testingEnabled)
         {
             return sp.GetRequiredService<IntegrationTestCaseSource>();
         }
 
+        // Default: Production Odcanit reader
         return sp.GetRequiredService<OdcanitCaseSource>();
     });
 
