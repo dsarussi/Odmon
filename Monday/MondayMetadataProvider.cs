@@ -240,58 +240,54 @@ namespace Odmon.Worker.Monday
                 if (targetColumn is null)
                 {
                     _logger.LogWarning(
-                        "Dropdown column {ColumnId} not found on board {BoardId} when resolving allowed labels.",
+                        "Column {ColumnId} not found on board {BoardId} when resolving allowed labels. Available columns: {AvailableColumns}",
                         columnId,
-                        boardId);
+                        boardId,
+                        string.Join(", ", columns.EnumerateArray().Select(c => c.TryGetProperty("id", out var id) ? id.GetString() : "?")));
                     var empty = new HashSet<string>(StringComparer.Ordinal);
-                    lock (_dropdownLabelsCache)
-                    {
-                        _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
-                        {
-                            Labels = empty,
-                            Timestamp = DateTime.UtcNow
-                        };
-                    }
+                    // DO NOT cache empty results - this might be a transient error
                     return empty;
                 }
 
                 if (!targetColumn.Value.TryGetProperty("settings_str", out var settingsElement))
                 {
+                    var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
                     _logger.LogWarning(
-                        "Dropdown column {ColumnId} on board {BoardId} has no settings_str; cannot resolve allowed labels.",
+                        "Column {ColumnId} (type={ColumnType}) on board {BoardId} has no settings_str; cannot resolve allowed labels.",
                         columnId,
+                        columnType,
                         boardId);
                     var empty = new HashSet<string>(StringComparer.Ordinal);
-                    lock (_dropdownLabelsCache)
-                    {
-                        _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
-                        {
-                            Labels = empty,
-                            Timestamp = DateTime.UtcNow
-                        };
-                    }
+                    // DO NOT cache empty results for missing settings_str
                     return empty;
                 }
 
                 var settingsStr = settingsElement.GetString();
                 if (string.IsNullOrWhiteSpace(settingsStr))
                 {
+                    var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
+                    _logger.LogWarning(
+                        "Column {ColumnId} (type={ColumnType}) on board {BoardId} has empty settings_str",
+                        columnId,
+                        columnType,
+                        boardId);
                     var empty = new HashSet<string>(StringComparer.Ordinal);
-                    lock (_dropdownLabelsCache)
-                    {
-                        _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
-                        {
-                            Labels = empty,
-                            Timestamp = DateTime.UtcNow
-                        };
-                    }
+                    // DO NOT cache empty settings_str - might be a data issue
                     return empty;
                 }
+
+                _logger.LogDebug(
+                    "Parsing settings_str for column {ColumnId} on board {BoardId}: {SettingsStrPreview}",
+                    columnId,
+                    boardId,
+                    settingsStr.Length > 200 ? settingsStr.Substring(0, 200) + "..." : settingsStr);
 
                 using var settingsDoc = JsonDocument.Parse(settingsStr);
                 var settingsRoot = settingsDoc.RootElement;
 
                 var labels = new HashSet<string>(StringComparer.Ordinal);
+                
+                // Try parsing labels array
                 if (settingsRoot.TryGetProperty("labels", out var labelsElement) &&
                     labelsElement.ValueKind == JsonValueKind.Array)
                 {
@@ -303,45 +299,66 @@ namespace Odmon.Worker.Monday
                             if (!string.IsNullOrWhiteSpace(name))
                             {
                                 labels.Add(name);
+                                _logger.LogDebug(
+                                    "Found label for column {ColumnId}: '{LabelName}'",
+                                    columnId,
+                                    name);
                             }
                         }
                     }
                 }
-
-                lock (_dropdownLabelsCache)
+                else
                 {
-                    _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
-                    {
-                        Labels = labels,
-                        Timestamp = DateTime.UtcNow
-                    };
+                    var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
+                    _logger.LogWarning(
+                        "Column {ColumnId} (type={ColumnType}) on board {BoardId} has settings_str but no 'labels' array. SettingsStr keys: {SettingsKeys}",
+                        columnId,
+                        columnType,
+                        boardId,
+                        string.Join(", ", settingsRoot.EnumerateObject().Select(p => p.Name)));
                 }
 
-                _logger.LogDebug(
-                    "Resolved {Count} allowed dropdown label(s) for column {ColumnId} on board {BoardId}.",
-                    labels.Count,
-                    columnId,
-                    boardId);
+                if (labels.Count > 0)
+                {
+                    // Only cache non-empty results
+                    lock (_dropdownLabelsCache)
+                    {
+                        _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
+                        {
+                            Labels = labels,
+                            Timestamp = DateTime.UtcNow
+                        };
+                    }
+
+                    _logger.LogInformation(
+                        "Resolved {Count} allowed label(s) for column {ColumnId} on board {BoardId}: [{Labels}]",
+                        labels.Count,
+                        columnId,
+                        boardId,
+                        string.Join(", ", labels));
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "No labels found for column {ColumnId} on board {BoardId}. Settings parsed but labels array was empty or not found.",
+                        columnId,
+                        boardId);
+                }
 
                 return labels;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(
+                _logger.LogError(
                     ex,
-                    "Failed to fetch/parse allowed dropdown labels for column {ColumnId} on board {BoardId}.",
+                    "Failed to fetch/parse allowed labels for column {ColumnId} on board {BoardId}. Exception: {ExceptionType}, Message: {ExceptionMessage}",
                     columnId,
-                    boardId);
+                    boardId,
+                    ex.GetType().Name,
+                    ex.Message);
 
+                // DO NOT cache exceptions - they might be transient
                 var empty = new HashSet<string>(StringComparer.Ordinal);
-                lock (_dropdownLabelsCache)
-                {
-                    _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
-                    {
-                        Labels = empty,
-                        Timestamp = DateTime.UtcNow
-                    };
-                }
                 return empty;
             }
         }
