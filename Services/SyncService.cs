@@ -12,6 +12,7 @@ using Odmon.Worker.Data;
 using Odmon.Worker.Monday;
 using Odmon.Worker.Models;
 using Odmon.Worker.Security;
+using Odmon.Worker.Exceptions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -249,6 +250,20 @@ namespace Odmon.Worker.Services
                                     "Successfully created Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
                                     c.TikNumber, c.TikCounter, mondayIdForLog);
                             }
+                            catch (CriticalFieldValidationException critEx)
+                            {
+                                action = "failed_create_validation";
+                                failed++;
+                                errorMessage = critEx.ValidationReason;
+                                
+                                // Critical field validation failed - DO NOT create item
+                                _logger.LogError(
+                                    "CRITICAL VALIDATION FAILED - Item NOT created: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, ColumnId={ColumnId}, Value='{Value}', Reason={Reason}",
+                                    c.TikNumber, c.TikCounter, caseBoardId, critEx.ColumnId, critEx.FieldValue ?? "<null>", critEx.ValidationReason);
+                                
+                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+                                continue;
+                            }
                             catch (Monday.MondayApiException mondayEx)
                             {
                                 action = "failed_create";
@@ -318,6 +333,20 @@ namespace Odmon.Worker.Services
                                         c.TikNumber, c.TikCounter, mapping.MondayItemId);
                                 }
                             }
+                            catch (CriticalFieldValidationException critEx)
+                            {
+                                action = "failed_update_validation";
+                                failed++;
+                                errorMessage = critEx.ValidationReason;
+                                
+                                // Critical field validation failed - DO NOT update item
+                                _logger.LogError(
+                                    "CRITICAL VALIDATION FAILED - Item NOT updated: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, ColumnId={ColumnId}, Value='{Value}', Reason={Reason}",
+                                    c.TikNumber, c.TikCounter, mapping.MondayItemId, caseBoardId, critEx.ColumnId, critEx.FieldValue ?? "<null>", critEx.ValidationReason);
+                                
+                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+                                continue;
+                            }
                             catch (Monday.MondayApiException mondayEx)
                             {
                                 action = "failed_update";
@@ -340,7 +369,7 @@ namespace Odmon.Worker.Services
                                 
                                 _logger.LogError(ex,
                                     "Unexpected error during update: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, Error={Error}",
-                                    c.TikNumber, c.TikCounter, mapping.MondayItemId, caseBoardId, ex.Message);
+                                    c.TikCounter, c.TikCounter, mapping.MondayItemId, caseBoardId, ex.Message);
                                 
                                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
                                 continue;
@@ -2082,6 +2111,9 @@ namespace Odmon.Worker.Services
                 c.CourtCaseNumber ?? "<null>",
                 c.CourtCity ?? "<null>");
 
+            // FAIL-FAST: Validate critical fields before creating Monday item
+            await ValidateCriticalFieldsAsync(boardId, c, ct);
+
             var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: true, ct);
             var mondayItemId = await _mondayClient.CreateItemAsync(boardId, groupId, itemName, columnValuesJson, ct);
 
@@ -2127,6 +2159,9 @@ namespace Odmon.Worker.Services
                     c.CourtCaseNumber ?? "<null>",
                     c.CourtCity ?? "<null>");
 
+                // FAIL-FAST: Validate critical fields before updating Monday item
+                await ValidateCriticalFieldsAsync(boardId, c, ct);
+
                 var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: false, ct);
                 await _mondayClient.UpdateItemAsync(boardId, mapping.MondayItemId, columnValuesJson, ct);
                 mapping.OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
@@ -2151,6 +2186,143 @@ namespace Odmon.Worker.Services
             public string Action { get; set; } = string.Empty; // "create", "update", or "skip"
             public bool RequiresNameUpdate { get; set; }
             public bool RequiresDataUpdate { get; set; }
+        }
+
+        // Critical columns that require strict validation (fail-fast)
+        private static readonly List<CriticalColumnDefinition> CriticalColumns = new()
+        {
+            new CriticalColumnDefinition
+            {
+                FieldName = "DocumentType",
+                ColumnType = "status",
+                GetValue = c => c.DocumentType,
+                ValidationMessage = "Document type (סוג מסמך) is critical - prevents automatic creation of wrong document types (e.g., 'כתב תביעה' vs 'כתב הגנה')"
+            },
+            new CriticalColumnDefinition
+            {
+                FieldName = "PlaintiffSide",
+                ColumnType = "status",
+                GetValue = c => c.PlaintiffSideRaw,
+                ValidationMessage = "Plaintiff side (צד תובע) is critical - prevents incorrect party designation"
+            },
+            new CriticalColumnDefinition
+            {
+                FieldName = "DefendantSide",
+                ColumnType = "status",
+                GetValue = c => c.DefendantSideRaw,
+                ValidationMessage = "Defendant side (צד נתבע) is critical - prevents incorrect party designation"
+            }
+        };
+
+        private async Task ValidateCriticalFieldsAsync(long boardId, OdcanitCase c, CancellationToken ct)
+        {
+            foreach (var criticalColumn in CriticalColumns)
+            {
+                var fieldValue = criticalColumn.GetValue(c);
+                
+                // Check if value is null or empty
+                if (string.IsNullOrWhiteSpace(fieldValue))
+                {
+                    var columnId = GetColumnIdForField(criticalColumn.FieldName);
+                    _logger.LogError(
+                        "CRITICAL FIELD VALIDATION FAILED: TikCounter={TikCounter}, TikNumber={TikNumber}, Field={FieldName}, ColumnId={ColumnId}, Value=<null/empty>, Reason=MISSING_VALUE. {ValidationMessage}",
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>",
+                        criticalColumn.FieldName,
+                        columnId ?? "<unknown>",
+                        criticalColumn.ValidationMessage);
+
+                    throw new CriticalFieldValidationException(
+                        c.TikCounter,
+                        c.TikNumber,
+                        columnId ?? "<unknown>",
+                        fieldValue,
+                        $"MISSING_VALUE - {criticalColumn.ValidationMessage}");
+                }
+
+                // Check if value exists in Monday column labels
+                var columnId2 = GetColumnIdForField(criticalColumn.FieldName);
+                if (string.IsNullOrWhiteSpace(columnId2))
+                {
+                    _logger.LogWarning(
+                        "Cannot validate critical field {FieldName} - column ID not configured in MondaySettings",
+                        criticalColumn.FieldName);
+                    continue;
+                }
+
+                HashSet<string> allowedLabels;
+                try
+                {
+                    if (criticalColumn.ColumnType == "status")
+                    {
+                        allowedLabels = await _mondayMetadataProvider.GetAllowedStatusLabelsAsync(boardId, columnId2, ct);
+                    }
+                    else if (criticalColumn.ColumnType == "dropdown")
+                    {
+                        allowedLabels = await _mondayMetadataProvider.GetAllowedDropdownLabelsAsync(boardId, columnId2, ct);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Unknown column type {ColumnType} for critical field {FieldName}", criticalColumn.ColumnType, criticalColumn.FieldName);
+                        continue;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Failed to fetch allowed labels for critical field {FieldName} (ColumnId={ColumnId}). Cannot validate.",
+                        criticalColumn.FieldName,
+                        columnId2);
+                    // If we can't fetch labels, we can't validate - this is a configuration/connectivity issue
+                    // Don't fail the sync, but log the warning
+                    continue;
+                }
+
+                if (!allowedLabels.Contains(fieldValue))
+                {
+                    _logger.LogError(
+                        "CRITICAL FIELD VALIDATION FAILED: TikCounter={TikCounter}, TikNumber={TikNumber}, Field={FieldName}, ColumnId={ColumnId}, Value='{Value}', Reason=INVALID_LABEL, AllowedLabels=[{AllowedLabels}]. {ValidationMessage}",
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>",
+                        criticalColumn.FieldName,
+                        columnId2,
+                        fieldValue,
+                        string.Join(", ", allowedLabels),
+                        criticalColumn.ValidationMessage);
+
+                    throw new CriticalFieldValidationException(
+                        c.TikCounter,
+                        c.TikNumber,
+                        columnId2,
+                        fieldValue,
+                        $"INVALID_LABEL - Value '{fieldValue}' not in allowed labels: [{string.Join(", ", allowedLabels)}]. {criticalColumn.ValidationMessage}");
+                }
+
+                _logger.LogDebug(
+                    "Critical field validated OK: TikCounter={TikCounter}, Field={FieldName}, Value='{Value}'",
+                    c.TikCounter,
+                    criticalColumn.FieldName,
+                    fieldValue);
+            }
+        }
+
+        private string? GetColumnIdForField(string fieldName)
+        {
+            return fieldName switch
+            {
+                "DocumentType" => _mondaySettings.DocumentTypeStatusColumnId,
+                "PlaintiffSide" => "color_mkxh8gsq", // צד תובע
+                "DefendantSide" => "color_mkxh5x31", // צד נתבע
+                _ => null
+            };
+        }
+
+        private class CriticalColumnDefinition
+        {
+            public string FieldName { get; set; } = string.Empty;
+            public string ColumnType { get; set; } = string.Empty; // "status" or "dropdown"
+            public Func<OdcanitCase, string?> GetValue { get; set; } = _ => null;
+            public string ValidationMessage { get; set; } = string.Empty;
         }
     }
 }

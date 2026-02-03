@@ -345,6 +345,13 @@ namespace Odmon.Worker.Monday
             }
         }
 
+        public async Task<HashSet<string>> GetAllowedStatusLabelsAsync(long boardId, string columnId, CancellationToken ct = default)
+        {
+            // Status columns use the same structure as dropdown columns in Monday API
+            // Both have settings_str with labels array
+            return await GetAllowedDropdownLabelsAsync(boardId, columnId, ct);
+        }
+
         private class DropdownLabelsCacheEntry
         {
             public HashSet<string> Labels { get; set; } = new();
