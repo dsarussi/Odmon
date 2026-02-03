@@ -31,6 +31,10 @@ namespace Odmon.Worker.Monday
             _httpClient = httpClient;
             _logger = logger;
 
+            _logger.LogDebug(
+                "Initializing MondayMetadataProvider. HttpClient BaseAddress: {BaseAddress}",
+                _httpClient.BaseAddress?.ToString() ?? "<null>");
+
             var apiToken = secretProvider.GetSecret("Monday__ApiToken");
             if (string.IsNullOrWhiteSpace(apiToken) || IsPlaceholderValue(apiToken))
             {
@@ -45,10 +49,16 @@ namespace Odmon.Worker.Monday
             if (!string.IsNullOrWhiteSpace(apiToken) && !IsPlaceholderValue(apiToken))
             {
                 _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiToken);
+                _logger.LogInformation(
+                    "Monday API token configured successfully (length: {TokenLength} chars)",
+                    apiToken.Length);
             }
             else
             {
-                _logger.LogError("Monday API token not found. Monday requests will fail until the secret 'Monday__ApiToken' is configured.");
+                _logger.LogError(
+                    "Monday API token not found or is placeholder. Monday requests will fail. SecretProvider returned: {SecretProviderValue}, Config fallback: {ConfigFallback}",
+                    string.IsNullOrWhiteSpace(apiToken) ? "<null/empty>" : "<placeholder>",
+                    string.IsNullOrWhiteSpace(config["Monday:ApiToken"]) ? "<null/empty>" : config["Monday:ApiToken"]);
             }
         }
 
@@ -195,7 +205,26 @@ namespace Odmon.Worker.Monday
                 var payload = JsonSerializer.Serialize(new { query, variables });
                 var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
+                _logger.LogDebug(
+                    "Calling Monday API for board {BoardId}, column {ColumnId}. BaseAddress: {BaseAddress}, HasAuthHeader: {HasAuthHeader}",
+                    boardId,
+                    columnId,
+                    _httpClient.BaseAddress,
+                    _httpClient.DefaultRequestHeaders.Authorization != null);
+
                 var resp = await _httpClient.PostAsync("", content, ct);
+                
+                if (!resp.IsSuccessStatusCode)
+                {
+                    var errorBody = await resp.Content.ReadAsStringAsync(ct);
+                    _logger.LogError(
+                        "Monday API request FAILED with status {StatusCode} for board {BoardId}, column {ColumnId}. Response body: {ResponseBody}",
+                        resp.StatusCode,
+                        boardId,
+                        columnId,
+                        errorBody.Length > 500 ? errorBody.Substring(0, 500) + "..." : errorBody);
+                }
+                
                 resp.EnsureSuccessStatusCode();
                 var body = await resp.Content.ReadAsStringAsync(ct);
 
