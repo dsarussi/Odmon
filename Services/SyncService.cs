@@ -13,6 +13,7 @@ using Odmon.Worker.Monday;
 using Odmon.Worker.Models;
 using Odmon.Worker.Security;
 using Odmon.Worker.Exceptions;
+using Odmon.Worker.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -20,7 +21,7 @@ using Microsoft.Extensions.Options;
 
 namespace Odmon.Worker.Services
 {
-    public class SyncService
+    public partial class SyncService
     {
         private const string DefaultClientPhoneColumnId = "phone_mkwe10tx";
         private const string DefaultClientEmailColumnId = "email_mkwefwgy";
@@ -37,6 +38,8 @@ namespace Odmon.Worker.Services
         private readonly HearingApprovalSyncService _hearingApprovalSyncService;
         private readonly HearingNearestSyncService _hearingNearestSyncService;
         private readonly ISkipLogger _skipLogger;
+        private readonly IOdcanitReader _odcanitReader;
+        private readonly OdcanitLoadOptions _odcanitLoadOptions;
         private readonly ConcurrentDictionary<long, ColumnCacheEntry> _columnIdCache = new();
 
         public SyncService(
@@ -48,10 +51,12 @@ namespace Odmon.Worker.Services
             ILogger<SyncService> logger,
             ITestSafetyPolicy safetyPolicy,
             IOptions<MondaySettings> mondayOptions,
+            IOptions<OdcanitLoadOptions> odcanitLoadOptions,
             ISecretProvider secretProvider,
             HearingApprovalSyncService hearingApprovalSyncService,
             HearingNearestSyncService hearingNearestSyncService,
-            ISkipLogger skipLogger)
+            ISkipLogger skipLogger,
+            IOdcanitReader odcanitReader)
         {
             _caseSource = caseSource;
             _integrationDb = integrationDb;
@@ -61,10 +66,12 @@ namespace Odmon.Worker.Services
             _logger = logger;
             _safetyPolicy = safetyPolicy;
             _mondaySettings = mondayOptions.Value ?? new MondaySettings();
+            _odcanitLoadOptions = odcanitLoadOptions.Value ?? new OdcanitLoadOptions();
             _secretProvider = secretProvider;
             _hearingApprovalSyncService = hearingApprovalSyncService;
             _hearingNearestSyncService = hearingNearestSyncService;
             _skipLogger = skipLogger;
+            _odcanitReader = odcanitReader;
         }
 
         public async Task SyncOdcanitToMondayAsync(CancellationToken ct)
@@ -82,10 +89,37 @@ namespace Odmon.Worker.Services
             var dryRun = _config.GetValue<bool>("Sync:DryRun", false);
             var maxItems = _config.GetValue<int>("Sync:MaxItemsPerRun", 50);
 
+            // Determine data source and derive testMode from actual source
+            var testingEnabled = _config.GetValue<bool>("Testing:Enable", false);
+            var odmonTestCasesEnabled = _config.GetValue<bool>("OdmonTestCases:Enable", false);
+            
+            string dataSource;
+            bool testMode;
+            
+            if (odmonTestCasesEnabled)
+            {
+                dataSource = "OdmonTestCases";
+                testMode = true;
+            }
+            else if (testingEnabled)
+            {
+                dataSource = "Testing (GuardOdcanitReader)";
+                testMode = true;
+            }
+            else
+            {
+                dataSource = "Odcanit";
+                testMode = false;
+            }
+            
             var safetySection = _config.GetSection("Safety");
-            var testMode = safetySection.GetValue<bool>("TestMode", false);
             var testBoardId = safetySection.GetValue<long>("TestBoardId", 0);
             var testGroupId = _mondaySettings.TestGroupId;
+            
+            _logger.LogInformation(
+                "Data source: {DataSource}, testMode={TestMode}",
+                dataSource,
+                testMode);
 
             var casesBoardId = _mondaySettings.CasesBoardId;
             var defaultGroupId = _mondaySettings.ToDoGroupId;
@@ -97,6 +131,7 @@ namespace Odmon.Worker.Services
 
             var boardIdToUse = casesBoardId;
             var groupIdToUse = defaultGroupId;
+            
             if (testMode)
             {
                 if (testBoardId > 0)
@@ -110,44 +145,17 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            // NEW RULE: Fetch data ONLY by TikCounter - NO date filters
-            int[] tikCounters;
-            var testingSection = _config.GetSection("Testing");
-            var testingEnabled = testingSection.GetValue<bool>("Enable", false);
-            if (testingEnabled)
+            // Determine TikCounters to load
+            int[] tikCounters = await DetermineTikCountersToLoadAsync(ct);
+            if (tikCounters.Length == 0)
             {
-                var testingSource = testingSection.GetValue<string>("Source") ?? "IntegrationDbOdmonTestCases";
-                var testingTikCounters = testingSection.GetSection("TikCounters").Get<int[]>() ?? Array.Empty<int>();
-
-                if (testingTikCounters.Length == 0)
-                {
-                    _logger.LogError("Testing:Enable=true but Testing:TikCounters is missing or empty. No data will be processed.");
-                    return;
-                }
-
-                tikCounters = testingTikCounters;
-                _logger.LogInformation(
-                    "TEST MODE ENABLED - source={Source} - tikCounters={TikCounters}",
-                    testingSource,
-                    string.Join(", ", tikCounters));
-            }
-            else
-            {
-                var tikCounterSection = _config.GetSection("Sync:TikCounters");
-                tikCounters = tikCounterSection.Get<int[]>() ?? Array.Empty<int>();
-
-                if (tikCounters.Length == 0)
-                {
-                    _logger.LogError("Sync:TikCounters configuration is missing or empty. Worker must have explicit TikCounter list to fetch data. No data will be processed.");
-                    return;
-                }
-
-                _logger.LogInformation("Fetching cases by TikCounter only (ignoring all date filters): {TikCounters}", string.Join(", ", tikCounters));
+                _logger.LogError("No TikCounters to load. Worker stopped.");
+                return;
             }
 
-            // In test mode _caseSource is IntegrationTestCaseSource (no IOdcanitReader); GuardOdcanitReader is never used for case load.
-            List<OdcanitCase> newOrUpdatedCases = await _caseSource.GetCasesByTikCountersAsync(tikCounters, ct);
-            _logger.LogInformation("Loaded {Count} cases by TikCounter from case source", newOrUpdatedCases.Count);
+            // Load cases from Odcanit (allowlist enforces real Odcanit reads, no synthetic test data)
+            List<OdcanitCase> newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
+            _logger.LogInformation("Loaded {Count} cases from Odcanit by TikCounter", newOrUpdatedCases.Count);
 
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
@@ -1705,14 +1713,16 @@ namespace Odmon.Worker.Services
             }
             catch (Exception ex)
             {
+                // Non-critical field metadata failure - log warning and skip field, continue sync
                 _logger.LogWarning(
                     ex,
-                    "Failed to resolve allowed labels for dropdown column {ColumnId} on board {BoardId}. ClientNumber '{ClientNumber}' for TikCounter {TikCounter}, TikNumber {TikNumber} will not be sent.",
+                    "Failed to fetch/validate metadata for non-critical dropdown column {ColumnId} on board {BoardId}. ClientNumber '{ClientNumber}' for TikCounter {TikCounter}, TikNumber {TikNumber} will be omitted from this sync. Exception: {Message}",
                     columnId,
                     boardId,
                     trimmedClientNumber,
                     tikCounter,
-                    tikNumber ?? "<null>");
+                    tikNumber ?? "<null>",
+                    ex.Message);
             }
         }
 
@@ -2258,33 +2268,38 @@ namespace Odmon.Worker.Services
                 var columnId2 = GetColumnIdForField(criticalColumn.FieldName);
                 if (string.IsNullOrWhiteSpace(columnId2))
                 {
-                    _logger.LogWarning(
-                        "Cannot validate critical field {FieldName} - column ID not configured in MondaySettings",
+                    _logger.LogError(
+                        "CRITICAL FIELD VALIDATION FAILED: TikCounter={TikCounter}, TikNumber={TikNumber}, Field={FieldName}, ColumnId=<missing>, Reason=CONFIG_MISSING_COLUMN_ID. Column ID not configured in MondaySettings for critical field.",
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>",
                         criticalColumn.FieldName);
-                    continue;
+
+                    throw new CriticalFieldValidationException(
+                        c.TikCounter,
+                        c.TikNumber,
+                        "<missing>",
+                        fieldValue,
+                        $"CONFIG_MISSING_COLUMN_ID - Column ID not configured in MondaySettings for critical field {criticalColumn.FieldName}");
                 }
 
                 // Detect actual column type from Monday metadata
-                string? actualColumnType;
-                try
+                // Note: This will THROW on infrastructure failures instead of silently skipping
+                var actualColumnType = await _mondayMetadataProvider.GetColumnTypeAsync(boardId, columnId2, ct);
+                if (string.IsNullOrWhiteSpace(actualColumnType))
                 {
-                    actualColumnType = await _mondayMetadataProvider.GetColumnTypeAsync(boardId, columnId2, ct);
-                    if (string.IsNullOrWhiteSpace(actualColumnType))
-                    {
-                        _logger.LogWarning(
-                            "Cannot detect column type for critical field {FieldName} (ColumnId={ColumnId}) - skipping label validation",
-                            criticalColumn.FieldName,
-                            columnId2);
-                        continue;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex,
-                        "Failed to fetch column type for critical field {FieldName} (ColumnId={ColumnId}). Cannot validate.",
+                    _logger.LogError(
+                        "CRITICAL FIELD VALIDATION FAILED: TikCounter={TikCounter}, TikNumber={TikNumber}, Field={FieldName}, ColumnId={ColumnId}, Reason=METADATA_MISSING_COLUMN_TYPE. Cannot detect column type for critical field.",
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>",
                         criticalColumn.FieldName,
                         columnId2);
-                    continue;
+
+                    throw new CriticalFieldValidationException(
+                        c.TikCounter,
+                        c.TikNumber,
+                        columnId2,
+                        fieldValue,
+                        $"METADATA_MISSING_COLUMN_TYPE - Cannot detect column type for critical field {criticalColumn.FieldName} (ColumnId={columnId2})");
                 }
 
                 _logger.LogDebug(
@@ -2294,39 +2309,35 @@ namespace Odmon.Worker.Services
                     actualColumnType);
 
                 // Fetch allowed labels based on detected column type
+                // Note: This will now THROW on infrastructure failures (auth, network, config)
+                // instead of silently returning empty labels
                 HashSet<string> allowedLabels;
-                try
+                if (actualColumnType == "color" || actualColumnType == "status")
                 {
-                    if (actualColumnType == "color" || actualColumnType == "status")
-                    {
-                        // Status columns (Monday uses "color" type for status columns)
-                        allowedLabels = await _mondayMetadataProvider.GetAllowedStatusLabelsAsync(boardId, columnId2, ct);
-                    }
-                    else if (actualColumnType == "dropdown")
-                    {
-                        // Dropdown columns
-                        allowedLabels = await _mondayMetadataProvider.GetAllowedDropdownLabelsAsync(boardId, columnId2, ct);
-                    }
-                    else
-                    {
-                        _logger.LogWarning(
-                            "Unsupported column type {ColumnType} for critical field {FieldName} (ColumnId={ColumnId}) - skipping label validation",
-                            actualColumnType,
-                            criticalColumn.FieldName,
-                            columnId2);
-                        continue;
-                    }
+                    // Status columns (Monday uses "color" type for status columns)
+                    allowedLabels = await _mondayMetadataProvider.GetAllowedStatusLabelsAsync(boardId, columnId2, ct);
                 }
-                catch (Exception ex)
+                else if (actualColumnType == "dropdown")
                 {
-                    _logger.LogError(ex,
-                        "Failed to fetch allowed labels for critical field {FieldName} (ColumnId={ColumnId}, Type={ColumnType}). Cannot validate.",
+                    // Dropdown columns
+                    allowedLabels = await _mondayMetadataProvider.GetAllowedDropdownLabelsAsync(boardId, columnId2, ct);
+                }
+                else
+                {
+                    _logger.LogError(
+                        "CRITICAL FIELD VALIDATION FAILED: TikCounter={TikCounter}, TikNumber={TikNumber}, Field={FieldName}, ColumnId={ColumnId}, ColumnType={ColumnType}, Reason=UNSUPPORTED_COLUMN_TYPE. Critical field has unsupported column type.",
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>",
                         criticalColumn.FieldName,
                         columnId2,
                         actualColumnType);
-                    // If we can't fetch labels, we can't validate - this is a configuration/connectivity issue
-                    // Don't fail the sync, but log the warning
-                    continue;
+
+                    throw new CriticalFieldValidationException(
+                        c.TikCounter,
+                        c.TikNumber,
+                        columnId2,
+                        fieldValue,
+                        $"UNSUPPORTED_COLUMN_TYPE - Critical field {criticalColumn.FieldName} has unsupported column type '{actualColumnType}' (expected: color, status, or dropdown). ColumnId={columnId2}");
                 }
 
                 if (!allowedLabels.Contains(fieldValue))

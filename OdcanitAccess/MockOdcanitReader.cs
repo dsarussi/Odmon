@@ -65,6 +65,21 @@ namespace Odmon.Worker.OdcanitAccess
         {
             return Task.FromResult(new List<OdcanitDiaryEvent>());
         }
+
+        public Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(IEnumerable<string> tikNumbers, CancellationToken ct)
+        {
+            // Mock implementation: resolve TikNumbers that exist in mock data
+            var resolved = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var tikNumber in tikNumbers ?? Enumerable.Empty<string>())
+            {
+                var matchingCase = _cases.FirstOrDefault(c => c.TikNumber == tikNumber);
+                if (matchingCase != null)
+                {
+                    resolved[tikNumber] = matchingCase.TikCounter;
+                }
+            }
+            return Task.FromResult(resolved);
+        }
     }
 }
 

@@ -23,6 +23,9 @@ namespace Odmon.Worker.OdcanitAccess
 
         public Task<List<OdcanitDiaryEvent>> GetDiaryEventsByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct)
             => throw NewException();
+
+        public Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(IEnumerable<string> tikNumbers, CancellationToken ct)
+            => throw NewException();
     }
 }
 

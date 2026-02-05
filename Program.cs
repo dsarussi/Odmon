@@ -10,6 +10,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Odmon.Worker.Configuration;
 using Odmon.Worker.Data;
 using Odmon.Worker.Monday;
 using Odmon.Worker.OdcanitAccess;
@@ -136,6 +137,7 @@ hostBuilder.ConfigureServices((context, services) =>
 
     services.Configure<MondaySettings>(config.GetSection("Monday"));
     services.Configure<NispahWriterSettings>(config.GetSection("NispahWriter"));
+    services.Configure<OdcanitLoadOptions>(config.GetSection("OdcanitLoad"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {

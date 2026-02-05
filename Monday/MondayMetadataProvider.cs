@@ -268,41 +268,45 @@ namespace Odmon.Worker.Monday
 
                 if (targetColumn is null)
                 {
-                    _logger.LogWarning(
+                    var availableColumns = string.Join(", ", columns.EnumerateArray().Select(c => c.TryGetProperty("id", out var id) ? id.GetString() : "?"));
+                    _logger.LogError(
                         "Column {ColumnId} not found on board {BoardId} when resolving allowed labels. Available columns: {AvailableColumns}",
                         columnId,
                         boardId,
-                        string.Join(", ", columns.EnumerateArray().Select(c => c.TryGetProperty("id", out var id) ? id.GetString() : "?")));
-                    var empty = new HashSet<string>(StringComparer.Ordinal);
-                    // DO NOT cache empty results - this might be a transient error
-                    return empty;
+                        availableColumns);
+                    
+                    throw new InvalidOperationException(
+                        $"Column {columnId} not found on board {boardId}. " +
+                        $"This indicates a configuration mismatch. Available columns: {availableColumns}");
                 }
 
                 if (!targetColumn.Value.TryGetProperty("settings_str", out var settingsElement))
                 {
                     var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
-                    _logger.LogWarning(
+                    _logger.LogError(
                         "Column {ColumnId} (type={ColumnType}) on board {BoardId} has no settings_str; cannot resolve allowed labels.",
                         columnId,
                         columnType,
                         boardId);
-                    var empty = new HashSet<string>(StringComparer.Ordinal);
-                    // DO NOT cache empty results for missing settings_str
-                    return empty;
+                    
+                    throw new InvalidOperationException(
+                        $"Column {columnId} (type={columnType}) on board {boardId} has no settings_str. " +
+                        $"Cannot resolve allowed labels without settings.");
                 }
 
                 var settingsStr = settingsElement.GetString();
                 if (string.IsNullOrWhiteSpace(settingsStr))
                 {
                     var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
-                    _logger.LogWarning(
+                    _logger.LogError(
                         "Column {ColumnId} (type={ColumnType}) on board {BoardId} has empty settings_str",
                         columnId,
                         columnType,
                         boardId);
-                    var empty = new HashSet<string>(StringComparer.Ordinal);
-                    // DO NOT cache empty settings_str - might be a data issue
-                    return empty;
+                    
+                    throw new InvalidOperationException(
+                        $"Column {columnId} (type={columnType}) on board {boardId} has empty settings_str. " +
+                        $"Cannot resolve allowed labels.");
                 }
 
                 _logger.LogDebug(
@@ -368,10 +372,14 @@ namespace Odmon.Worker.Monday
                 }
                 else
                 {
-                    _logger.LogWarning(
-                        "No labels found for column {ColumnId} on board {BoardId}. Settings parsed but labels array was empty or not found.",
+                    _logger.LogError(
+                        "No labels found for DROPDOWN column {ColumnId} on board {BoardId}. Settings parsed but labels array was empty or invalid. This should not happen for a valid dropdown column.",
                         columnId,
                         boardId);
+                    
+                    throw new InvalidOperationException(
+                        $"No labels found for dropdown column {columnId} on board {boardId}. " +
+                        $"Settings parsed but labels array was empty or invalid.");
                 }
 
                 return labels;
@@ -386,9 +394,12 @@ namespace Odmon.Worker.Monday
                     ex.GetType().Name,
                     ex.Message);
 
-                // DO NOT cache exceptions - they might be transient
-                var empty = new HashSet<string>(StringComparer.Ordinal);
-                return empty;
+                // DO NOT return empty labels - this hides infrastructure failures
+                // Throw to surface the real issue (auth, network, config, etc.)
+                throw new InvalidOperationException(
+                    $"Failed to fetch allowed labels for column {columnId} on board {boardId}. " +
+                    $"This is likely an infrastructure issue (auth/network/config). Exception: {ex.Message}",
+                    ex);
             }
         }
 
@@ -497,33 +508,45 @@ namespace Odmon.Worker.Monday
 
                 if (targetColumn is null)
                 {
-                    _logger.LogWarning(
+                    var availableColumns = string.Join(", ", columns.EnumerateArray().Select(c => c.TryGetProperty("id", out var id) ? id.GetString() : "?"));
+                    _logger.LogError(
                         "Status column {ColumnId} not found on board {BoardId} when resolving allowed labels. Available columns: {AvailableColumns}",
                         columnId,
                         boardId,
-                        string.Join(", ", columns.EnumerateArray().Select(c => c.TryGetProperty("id", out var id) ? id.GetString() : "?")));
-                    return new HashSet<string>(StringComparer.Ordinal);
+                        availableColumns);
+                    
+                    throw new InvalidOperationException(
+                        $"Status column {columnId} not found on board {boardId}. " +
+                        $"This indicates a configuration mismatch. Available columns: {availableColumns}");
                 }
 
                 if (!targetColumn.Value.TryGetProperty("settings_str", out var settingsElement))
                 {
                     var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
-                    _logger.LogWarning(
+                    _logger.LogError(
                         "Status column {ColumnId} (type={ColumnType}) on board {BoardId} has no settings_str; cannot resolve allowed labels.",
                         columnId,
                         columnType,
                         boardId);
-                    return new HashSet<string>(StringComparer.Ordinal);
+                    
+                    throw new InvalidOperationException(
+                        $"Status column {columnId} (type={columnType}) on board {boardId} has no settings_str. " +
+                        $"Cannot resolve allowed labels without settings.");
                 }
 
                 var settingsStr = settingsElement.GetString();
                 if (string.IsNullOrWhiteSpace(settingsStr))
                 {
-                    _logger.LogWarning(
-                        "Status column {ColumnId} on board {BoardId} has empty settings_str",
+                    var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
+                    _logger.LogError(
+                        "Status column {ColumnId} (type={ColumnType}) on board {BoardId} has empty settings_str",
                         columnId,
+                        columnType,
                         boardId);
-                    return new HashSet<string>(StringComparer.Ordinal);
+                    
+                    throw new InvalidOperationException(
+                        $"Status column {columnId} (type={columnType}) on board {boardId} has empty settings_str. " +
+                        $"Cannot resolve allowed labels.");
                 }
 
                 _logger.LogDebug(
@@ -587,10 +610,14 @@ namespace Odmon.Worker.Monday
                 }
                 else
                 {
-                    _logger.LogWarning(
-                        "No labels found for STATUS column {ColumnId} on board {BoardId}. Settings parsed but labels object was empty or invalid.",
+                    _logger.LogError(
+                        "No labels found for STATUS column {ColumnId} on board {BoardId}. Settings parsed but labels object was empty or invalid. This should not happen for a valid status column.",
                         columnId,
                         boardId);
+                    
+                    throw new InvalidOperationException(
+                        $"No labels found for status column {columnId} on board {boardId}. " +
+                        $"Settings parsed but labels object was empty or invalid.");
                 }
 
                 return labels;
@@ -605,7 +632,12 @@ namespace Odmon.Worker.Monday
                     ex.GetType().Name,
                     ex.Message);
 
-                return new HashSet<string>(StringComparer.Ordinal);
+                // DO NOT return empty labels - this hides infrastructure failures
+                // Throw to surface the real issue (auth, network, config, etc.)
+                throw new InvalidOperationException(
+                    $"Failed to fetch allowed STATUS labels for column {columnId} on board {boardId}. " +
+                    $"This is likely an infrastructure issue (auth/network/config). Exception: {ex.Message}",
+                    ex);
             }
         }
 

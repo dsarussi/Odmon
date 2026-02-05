@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -129,6 +130,100 @@ namespace Odmon.Worker.OdcanitAccess
 
             _logger.LogDebug("GetDiaryEventsByTikCountersAsync: loaded {Count} rows from vwExportToOuterSystems_YomanData for {TikCount} TikCounters.", rows.Count, list.Count);
             return rows;
+        }
+
+        public async Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(IEnumerable<string> tikNumbers, CancellationToken ct)
+        {
+            var tikNumbersList = tikNumbers?
+                .Where(tn => !string.IsNullOrWhiteSpace(tn))
+                .Select(tn => tn.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToList() ?? new List<string>();
+            
+            if (!tikNumbersList.Any())
+            {
+                return new Dictionary<string, int>(StringComparer.Ordinal);
+            }
+
+            _logger.LogInformation(
+                "Resolving {Count} TikNumber(s) to TikCounters: [{TikNumbers}]",
+                tikNumbersList.Count,
+                string.Join(", ", tikNumbersList));
+
+            var resolved = new Dictionary<string, int>(StringComparer.Ordinal);
+
+            // Build parameterized SQL with explicit @p0, @p1, ... parameters
+            var paramNames = new List<string>();
+            var parameters = new List<Microsoft.Data.SqlClient.SqlParameter>();
+            
+            for (int i = 0; i < tikNumbersList.Count; i++)
+            {
+                var paramName = $"@p{i}";
+                paramNames.Add(paramName);
+                parameters.Add(new Microsoft.Data.SqlClient.SqlParameter(paramName, tikNumbersList[i]));
+            }
+
+            var sql = $"SELECT TikNumber, TikCounter FROM dbo.Cases WHERE TikNumber IN ({string.Join(", ", paramNames)})";
+
+            var connection = _db.Database.GetDbConnection();
+            var wasOpen = connection.State == ConnectionState.Open;
+            if (!wasOpen)
+            {
+                await connection.OpenAsync(ct);
+            }
+
+            try
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = sql;
+                command.CommandType = CommandType.Text;
+                
+                foreach (var param in parameters)
+                {
+                    command.Parameters.Add(param);
+                }
+
+                using var reader = await command.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var tikNumber = reader.GetString(0);
+                    var tikCounter = reader.GetInt32(1);
+                    
+                    if (!string.IsNullOrWhiteSpace(tikNumber))
+                    {
+                        resolved[tikNumber] = tikCounter;
+                        _logger.LogDebug(
+                            "Resolved TikNumber '{TikNumber}' -> TikCounter {TikCounter}",
+                            tikNumber,
+                            tikCounter);
+                    }
+                }
+            }
+            finally
+            {
+                if (!wasOpen && connection.State == ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                }
+            }
+
+            // Log unresolved TikNumbers
+            foreach (var tikNumber in tikNumbersList)
+            {
+                if (!resolved.ContainsKey(tikNumber))
+                {
+                    _logger.LogWarning(
+                        "TikNumber '{TikNumber}' could not be resolved to a TikCounter in Odcanit DB",
+                        tikNumber);
+                }
+            }
+
+            _logger.LogInformation(
+                "Resolved {ResolvedCount} of {TotalCount} TikNumbers",
+                resolved.Count,
+                tikNumbersList.Count);
+
+            return resolved;
         }
 
         private async Task EnrichWithClientsAsync(List<OdcanitCase> cases, CancellationToken ct)
