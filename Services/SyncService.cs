@@ -689,28 +689,28 @@ namespace Odmon.Worker.Services
             TryAddStatusLabelColumn(columnValues, "color_mkxh5x31", MapDefendantSideLabel(c.DefendantSideRaw));
             TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
 
-            // Set document type: use DB value first, fallback to determination by client number
-            var documentType = c.DocumentType;
-            if (string.IsNullOrWhiteSpace(documentType))
-            {
-                documentType = DetermineDocumentType(c.ClientVisualID);
-                _logger.LogDebug(
-                    "DocumentType was NULL/empty for TikCounter={TikCounter}, determined from ClientVisualID: '{DocumentType}'",
-                    c.TikCounter,
-                    documentType ?? "<null>");
-            }
-            else
-            {
-                _logger.LogDebug(
-                    "DocumentType for TikCounter={TikCounter} from DB: '{DocumentType}'",
-                    c.TikCounter,
-                    documentType);
-            }
+            // DocumentType does NOT exist in Odcanit DB - must be derived from ClientVisualID
+            // This is deterministic and based on strict business rules
+            var documentType = DetermineDocumentTypeFromClientVisualId(c.ClientVisualID);
             
-            if (!string.IsNullOrWhiteSpace(documentType))
-            {
-                TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
-            }
+            // Set on case object for critical field validation
+            c.DocumentType = documentType;
+            
+            // Extract ClientNumber for logging (same logic as in DetermineDocumentTypeFromClientVisualId)
+            var backslashIndex = c.ClientVisualID?.IndexOf('\\') ?? -1;
+            var clientNumberForLog = backslashIndex > 0 
+                ? c.ClientVisualID!.Substring(0, backslashIndex).Trim() 
+                : c.ClientVisualID?.Trim() ?? "<null>";
+            
+            _logger.LogDebug(
+                "DocumentType derived: TikCounter={TikCounter}, TikNumber={TikNumber}, ClientVisualID='{ClientVisualID}', ClientNumber={ClientNumber}, DocumentType='{DocumentType}'",
+                c.TikCounter,
+                c.TikNumber ?? "<null>",
+                c.ClientVisualID ?? "<null>",
+                clientNumberForLog,
+                documentType);
+            
+            TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
 
             var statusColumnId = _mondaySettings.CaseStatusColumnId;
             if (!string.IsNullOrWhiteSpace(statusColumnId))
@@ -1759,33 +1759,70 @@ namespace Odmon.Worker.Services
             return "טיפול בתיק";
         }
 
-        private static string? DetermineDocumentType(string? clientVisualID)
+        /// <summary>
+        /// Determines DocumentType from ClientVisualID based on strict business rules.
+        /// DocumentType does NOT exist in Odcanit DB and must be derived deterministically.
+        /// ClientNumber is defined as the substring before '\' (backslash) if present, otherwise the entire ClientVisualID.
+        /// </summary>
+        /// <param name="clientVisualID">ClientVisualID in format "ClientNumber\OtherData", e.g. "102\5334"</param>
+        /// <returns>DocumentType status label</returns>
+        /// <exception cref="InvalidOperationException">Thrown if ClientVisualID is invalid or cannot be parsed (critical field)</exception>
+        private static string DetermineDocumentTypeFromClientVisualId(string? clientVisualID)
         {
             if (string.IsNullOrWhiteSpace(clientVisualID))
             {
-                return null;
+                throw new InvalidOperationException(
+                    "Cannot determine DocumentType: ClientVisualID is null or empty. DocumentType is a critical field and must be derived from ClientVisualID.");
             }
 
-            // Try to parse as integer
-            if (!int.TryParse(clientVisualID.Trim(), out var clientNumber))
+            // Extract ClientNumber (substring before '\' if present, otherwise entire string)
+            var backslashIndex = clientVisualID.IndexOf('\\');
+            string clientNumberStr;
+            
+            if (backslashIndex > 0)
             {
-                return null;
+                clientNumberStr = clientVisualID.Substring(0, backslashIndex).Trim();
+            }
+            else
+            {
+                // No backslash found, use entire string
+                clientNumberStr = clientVisualID.Trim();
             }
 
-            // Client number == 1 → "כתב הגנה" (defense)
-            if (clientNumber == 1)
+            if (!int.TryParse(clientNumberStr, out var clientNumber))
+            {
+                throw new InvalidOperationException(
+                    $"Cannot determine DocumentType: Failed to parse ClientNumber from ClientVisualID '{clientVisualID}'. Extracted: '{clientNumberStr}'. DocumentType is a critical field.");
+            }
+
+            // Apply business rules
+            // Rule 1: ClientNumber 1, 2, 5, 8 → "כתב הגנה"
+            if (clientNumber == 1 || clientNumber == 2 || clientNumber == 5 || clientNumber == 8)
             {
                 return "כתב הגנה";
             }
 
-            // Client number in {4, 7, 9} OR has 3+ digits → "כתב תביעה" (claim)
-            if (clientNumber == 4 || clientNumber == 7 || clientNumber == 9 || clientNumber >= 100)
+            // Rule 2: ClientNumber 6 → "מכתב דרישה אילי"
+            if (clientNumber == 6)
+            {
+                return "מכתב דרישה אילי";
+            }
+
+            // Rule 3: ClientNumber 7, 9, 4 → "כתב תביעה"
+            if (clientNumber == 7 || clientNumber == 9 || clientNumber == 4)
             {
                 return "כתב תביעה";
             }
 
-            // For all other client numbers, leave empty
-            return null;
+            // Rule 4: ClientNumber >= 100 (3+ digits) → "כתב תביעה"
+            if (clientNumber >= 100)
+            {
+                return "כתב תביעה";
+            }
+
+            // If no rule matches, this is an unexpected ClientNumber - fail loudly
+            throw new InvalidOperationException(
+                $"Cannot determine DocumentType: ClientNumber {clientNumber} (from ClientVisualID '{clientVisualID}') does not match any known business rule. DocumentType is a critical field.");
         }
 
         private static string? DetermineResponsibleText(OdcanitCase c)
