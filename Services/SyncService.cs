@@ -157,6 +157,34 @@ namespace Odmon.Worker.Services
             List<OdcanitCase> newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
             _logger.LogInformation("Loaded {Count} cases from Odcanit by TikCounter", newOrUpdatedCases.Count);
 
+            // CRITICAL: Derive DocumentType for ALL cases immediately after loading
+            // DocumentType does NOT exist in Odcanit DB and must be derived from ClientVisualID
+            // This MUST happen BEFORE validation and column building
+            foreach (var c in newOrUpdatedCases)
+            {
+                try
+                {
+                    c.DocumentType = DetermineDocumentTypeFromClientVisualId(c.ClientVisualID);
+                    
+                    _logger.LogDebug(
+                        "DocumentType assigned: TikCounter={TikCounter}, TikNumber={TikNumber}, ClientVisualID='{ClientVisualID}', DocumentType='{DocumentType}'",
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>",
+                        c.ClientVisualID ?? "<null>",
+                        c.DocumentType);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Failed to derive DocumentType for case TikCounter={TikCounter}, TikNumber={TikNumber}, ClientVisualID='{ClientVisualID}'. This case will fail validation. Exception: {Message}",
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>",
+                        c.ClientVisualID ?? "<null>",
+                        ex.Message);
+                    // Leave DocumentType null - will fail in ValidateCriticalFieldsAsync with clear error
+                }
+            }
+
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
             int created = 0, updated = 0;
@@ -689,28 +717,15 @@ namespace Odmon.Worker.Services
             TryAddStatusLabelColumn(columnValues, "color_mkxh5x31", MapDefendantSideLabel(c.DefendantSideRaw));
             TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
 
-            // DocumentType does NOT exist in Odcanit DB - must be derived from ClientVisualID
-            // This is deterministic and based on strict business rules
-            var documentType = DetermineDocumentTypeFromClientVisualId(c.ClientVisualID);
+            // DocumentType was already derived and assigned immediately after loading the case
+            // (see line ~157 in RunAsync - authoritative assignment point)
+            // Here we just use the already-assigned value
+            var documentType = c.DocumentType;
             
-            // Set on case object for critical field validation
-            c.DocumentType = documentType;
-            
-            // Extract ClientNumber for logging (same logic as in DetermineDocumentTypeFromClientVisualId)
-            var backslashIndex = c.ClientVisualID?.IndexOf('\\') ?? -1;
-            var clientNumberForLog = backslashIndex > 0 
-                ? c.ClientVisualID!.Substring(0, backslashIndex).Trim() 
-                : c.ClientVisualID?.Trim() ?? "<null>";
-            
-            _logger.LogDebug(
-                "DocumentType derived: TikCounter={TikCounter}, TikNumber={TikNumber}, ClientVisualID='{ClientVisualID}', ClientNumber={ClientNumber}, DocumentType='{DocumentType}'",
-                c.TikCounter,
-                c.TikNumber ?? "<null>",
-                c.ClientVisualID ?? "<null>",
-                clientNumberForLog,
-                documentType);
-            
-            TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
+            if (!string.IsNullOrWhiteSpace(documentType))
+            {
+                TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
+            }
 
             var statusColumnId = _mondaySettings.CaseStatusColumnId;
             if (!string.IsNullOrWhiteSpace(statusColumnId))
