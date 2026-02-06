@@ -163,7 +163,7 @@ namespace Odmon.Worker.OdcanitAccess
                 parameters.Add(new Microsoft.Data.SqlClient.SqlParameter(paramName, tikNumbersList[i]));
             }
 
-            var sql = $"SELECT TikNumber, TikCounter FROM dbo.Cases WHERE TikNumber IN ({string.Join(", ", paramNames)})";
+            var sql = $"SELECT TikNumber, TikCounter FROM dbo.vwExportToOuterSystems_Files WHERE TikNumber IN ({string.Join(", ", paramNames)})";
 
             var connection = _db.Database.GetDbConnection();
             var wasOpen = connection.State == ConnectionState.Open;
