@@ -157,6 +157,31 @@ namespace Odmon.Worker.Models
         public DateTime? HearingDate { get; set; }
         [NotMapped]
         public TimeSpan? HearingTime { get; set; }
+
+        // ── Hearing-specific fields populated directly from the selected diary event ──
+        // These are the authoritative source for hearing gating / checksum / Monday updates.
+        // General CourtCity/CourtName/JudgeName may come from other sources (Hozlap, etc.)
+        // and must NOT be used for hearing computations.
+
+        /// <summary>Judge name from the selected diary event row.</summary>
+        [NotMapped]
+        public string? HearingJudgeName { get; set; }
+        /// <summary>CourtName (e.g. "שלום כפר סבא") from the selected diary event row.</summary>
+        [NotMapped]
+        public string? HearingCourtName { get; set; }
+        /// <summary>City from the selected diary event row (often null; CourtName is the fallback).</summary>
+        [NotMapped]
+        public string? HearingCity { get; set; }
+        /// <summary>Full StartDate from the selected diary event row (date + time).</summary>
+        [NotMapped]
+        public DateTime? HearingStartDate { get; set; }
+
+        /// <summary>
+        /// MeetStatus from the nearest upcoming hearing (from vwExportToOuterSystems_YomanData).
+        /// 0=active, 1=canceled, 2=transferred. Null if no upcoming hearing.
+        /// </summary>
+        [NotMapped]
+        public int? MeetStatus { get; set; }
         [NotMapped]
         public string? ClientAddress { get; set; }
         [NotMapped]

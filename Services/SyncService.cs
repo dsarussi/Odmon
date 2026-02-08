@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Globalization;
@@ -337,8 +338,8 @@ namespace Odmon.Worker.Services
                     case "update":
                         action = dryRun ? "dry-update" : "updated";
                         _logger.LogInformation(
-                            "Updating existing Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}",
-                            c.TikNumber, c.TikCounter, mapping!.MondayItemId, caseBoardId, syncAction.RequiresDataUpdate, syncAction.RequiresNameUpdate);
+                            "Updating existing Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}, RequiresHearingUpdate={RequiresHearingUpdate}",
+                            c.TikNumber, c.TikCounter, mapping!.MondayItemId, caseBoardId, syncAction.RequiresDataUpdate, syncAction.RequiresNameUpdate, syncAction.RequiresHearingUpdate);
                         if (!dryRun)
                         {
                             try
@@ -352,6 +353,7 @@ namespace Odmon.Worker.Services
                                     mapping.MondayItemId = newItemId;
                                     mapping.OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
                                     mapping.MondayChecksum = itemName;
+                                    mapping.HearingChecksum = ComputeHearingChecksum(c);
                                     mapping.LastSyncFromOdcanitUtc = DateTime.UtcNow;
                                     mapping.IsTest = testMode;
                                     await _integrationDb.SaveChangesAsync(ct);
@@ -362,7 +364,7 @@ namespace Odmon.Worker.Services
                                 }
                                 else
                                 {
-                                    await UpdateMondayItemAsync(mapping!, c, caseBoardId, itemName, syncAction.RequiresNameUpdate, syncAction.RequiresDataUpdate, testMode, ct);
+                                    await UpdateMondayItemAsync(mapping!, c, caseBoardId, itemName, syncAction.RequiresNameUpdate, syncAction.RequiresDataUpdate, syncAction.RequiresHearingUpdate, testMode, ct);
                                     updated++;
                                     _logger.LogInformation(
                                         "Successfully updated Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
@@ -623,35 +625,99 @@ namespace Odmon.Worker.Services
             TryAddDateColumn(columnValues, _mondaySettings.CaseCloseDateColumnId, c.TikCloseDate);
             TryAddDateColumn(columnValues, _mondaySettings.ComplaintReceivedDateColumnId, c.ComplaintReceivedDate);
 
+            // ── Hearing fields derived exclusively from the selected diary event row ──
+            // EffectiveCourtCity: HearingCity (from diary) -> HearingCourtName fallback -> null
+            var effectiveCourtCity = !string.IsNullOrWhiteSpace(c.HearingCity) ? c.HearingCity.Trim()
+                : (!string.IsNullOrWhiteSpace(c.HearingCourtName) ? c.HearingCourtName.Trim() : null);
+
             var hasHearingDate = c.HearingDate.HasValue;
-            var hasJudge = !string.IsNullOrWhiteSpace(c.JudgeName);
-            var hasCourtCity = !string.IsNullOrWhiteSpace(c.CourtCity);
-            var canPublishHearing = hasHearingDate && hasJudge && hasCourtCity;
+            var hasHearingJudge = !string.IsNullOrWhiteSpace(c.HearingJudgeName);
+            var hasEffectiveCourtCity = !string.IsNullOrWhiteSpace(effectiveCourtCity);
+            var meetStatus = c.MeetStatus;
+
+            // Date/hour gating:
+            //   Require BOTH HearingJudgeName AND EffectiveCourtCity (trigger safety).
+            //   Block if MeetStatus==1 (canceled hearing — date is stale).
+            //   Allow MeetStatus==0 (active) and MeetStatus==2 (transferred — new date is relevant).
+            var canPublishDateHour = hasHearingDate
+                && hasHearingJudge
+                && hasEffectiveCourtCity
+                && meetStatus != 1;
 
             _logger.LogDebug(
-                "Hearing gating TikCounter {TikCounter}: Date={HasDate}, Judge={HasJudge}, City={HasCity}, CanPublish={CanPublish}",
+                "Hearing gating TikCounter={TikCounter}, TikNumber={TikNumber}: Date={HasDate}, HearingJudge={HasJudge}, " +
+                "CitySource={CitySource}->EffectiveCourtCity='{EffectiveCourtCity}', MeetStatus={MeetStatus}, CanPublishDateHour={CanPublishDateHour}",
                 c.TikCounter,
+                c.TikNumber ?? "<null>",
                 hasHearingDate,
-                hasJudge,
-                hasCourtCity,
-                canPublishHearing);
+                hasHearingJudge,
+                !string.IsNullOrWhiteSpace(c.HearingCity) ? "HearingCity" : (!string.IsNullOrWhiteSpace(c.HearingCourtName) ? "HearingCourtName" : "none"),
+                effectiveCourtCity ?? "<null>",
+                meetStatus?.ToString() ?? "<null>",
+                canPublishDateHour);
 
-            if (canPublishHearing)
+            // Hearing columns included in this payload (for logging)
+            var hearingColumnsIncluded = new List<string>();
+
+            // Date/hour: when gating passes
+            if (canPublishDateHour)
             {
                 TryAddDateColumn(columnValues, _mondaySettings.HearingDateColumnId, c.HearingDate);
                 await TryAddHourColumnAsync(columnValues, boardId, _mondaySettings.HearingHourColumnId, c.HearingTime, c.TikCounter, ct);
+                if (!string.IsNullOrWhiteSpace(_mondaySettings.HearingDateColumnId)) hearingColumnsIncluded.Add(_mondaySettings.HearingDateColumnId);
+                if (!string.IsNullOrWhiteSpace(_mondaySettings.HearingHourColumnId) && c.HearingTime.HasValue) hearingColumnsIncluded.Add(_mondaySettings.HearingHourColumnId);
             }
-            else
+            else if (hasHearingDate && !canPublishDateHour)
             {
-                if (hasHearingDate || hasJudge || hasCourtCity)
-                {
-                    _logger.LogWarning(
-                        "Hearing update suppressed for TikCounter {TikCounter}: incomplete hearing data (Date={HasDate}, Judge={HasJudge}, City={HasCity})",
-                        c.TikCounter,
-                        hasHearingDate,
-                        hasJudge,
-                        hasCourtCity);
-                }
+                _logger.LogInformation(
+                    "Hearing date/hour update blocked for TikCounter={TikCounter}: HasHearingJudge={HasJudge}, HasEffectiveCourtCity={HasCity}, MeetStatus={MeetStatus}",
+                    c.TikCounter, hasHearingJudge, hasEffectiveCourtCity, meetStatus?.ToString() ?? "<null>");
+            }
+
+            // Judge: update independently from diary event if exists
+            if (hasHearingJudge)
+            {
+                TryAddStringColumn(columnValues, _mondaySettings.JudgeNameColumnId, c.HearingJudgeName!.Trim());
+                if (!string.IsNullOrWhiteSpace(_mondaySettings.JudgeNameColumnId)) hearingColumnsIncluded.Add(_mondaySettings.JudgeNameColumnId);
+            }
+
+            // Court city: use EffectiveCourtCity from diary event, update independently
+            if (hasEffectiveCourtCity)
+            {
+                TryAddStringColumn(columnValues, _mondaySettings.CourtCityColumnId, effectiveCourtCity);
+                if (!string.IsNullOrWhiteSpace(_mondaySettings.CourtCityColumnId)) hearingColumnsIncluded.Add(_mondaySettings.CourtCityColumnId);
+            }
+
+            // Hearing status column "דיון התבטל?" - independent of date/hour gating
+            if (meetStatus == 1 && !string.IsNullOrWhiteSpace(_mondaySettings.HearingStatusColumnId))
+            {
+                columnValues[_mondaySettings.HearingStatusColumnId] = new { label = "מבוטל" };
+                hearingColumnsIncluded.Add(_mondaySettings.HearingStatusColumnId);
+                _logger.LogDebug(
+                    "Hearing status set to 'מבוטל' for TikCounter={TikCounter}, MeetStatus={MeetStatus}, ColumnId={ColumnId}",
+                    c.TikCounter, meetStatus, _mondaySettings.HearingStatusColumnId);
+            }
+            else if (meetStatus == 2 && !string.IsNullOrWhiteSpace(_mondaySettings.HearingStatusColumnId))
+            {
+                columnValues[_mondaySettings.HearingStatusColumnId] = new { label = "הועבר" };
+                hearingColumnsIncluded.Add(_mondaySettings.HearingStatusColumnId);
+                _logger.LogDebug(
+                    "Hearing status set to 'הועבר' for TikCounter={TikCounter}, MeetStatus={MeetStatus}, ColumnId={ColumnId}",
+                    c.TikCounter, meetStatus, _mondaySettings.HearingStatusColumnId);
+            }
+            else if (meetStatus == 0 || meetStatus == null)
+            {
+                // MeetStatus 0 (active) or null (no hearing): OMIT status column to preserve manual values
+                _logger.LogDebug(
+                    "Hearing status omitted (active/none) for TikCounter={TikCounter}, MeetStatus={MeetStatus}",
+                    c.TikCounter, meetStatus?.ToString() ?? "<null>");
+            }
+
+            if (hearingColumnsIncluded.Count > 0)
+            {
+                _logger.LogDebug(
+                    "Hearing columns included in payload for TikCounter={TikCounter}: [{ColumnIds}]",
+                    c.TikCounter, string.Join(", ", hearingColumnsIncluded));
             }
 
             TryAddDecimalColumn(columnValues, _mondaySettings.RequestedClaimAmountColumnId, c.RequestedClaimAmount);
@@ -703,9 +769,8 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerEmailColumnId, c.ThirdPartyLawyerEmail);
             // TODO: Ensure court labels on Monday match Odcanit court names.
             TryAddStatusLabelColumn(columnValues, _mondaySettings.CourtNameStatusColumnId, c.CourtName);
-            TryAddStringColumn(columnValues, _mondaySettings.CourtCityColumnId, c.CourtCity);
+            // CourtCity and JudgeName are handled above in the hearing gating section with EffectiveCourtCity logic
             TryAddStringColumn(columnValues, _mondaySettings.CourtCaseNumberColumnId, c.CourtCaseNumber);
-            TryAddStringColumn(columnValues, _mondaySettings.JudgeNameColumnId, c.JudgeName);
             TryAddStringColumn(columnValues, _mondaySettings.AttorneyNameColumnId, c.AttorneyName);
             TryAddStringColumn(columnValues, _mondaySettings.DefenseStreetColumnId, c.DefenseStreet);
             TryAddStringColumn(columnValues, _mondaySettings.ClaimStreetColumnId, c.ClaimStreet);
@@ -2089,6 +2154,7 @@ namespace Odmon.Worker.Services
                             LastSyncFromOdcanitUtc = DateTime.UtcNow,
                             OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
                             MondayChecksum = itemName,
+                            HearingChecksum = ComputeHearingChecksum(c),
                             IsTest = testMode
                         };
                         _integrationDb.MondayItemMappings.Add(mapping);
@@ -2159,7 +2225,19 @@ namespace Odmon.Worker.Services
             var requiresDataUpdate = mapping.OdcanitVersion != odcanitVersion;
             var requiresNameUpdate = mapping.MondayChecksum != itemName;
 
-            if (!requiresDataUpdate && !requiresNameUpdate)
+            // Hearing checksum: detect hearing-only changes even when main case data is unchanged
+            var currentHearingChecksum = ComputeHearingChecksum(c);
+            var requiresHearingUpdate = mapping.HearingChecksum != currentHearingChecksum;
+
+            if (requiresHearingUpdate && !requiresDataUpdate && !requiresNameUpdate)
+            {
+                _logger.LogInformation(
+                    "Hearing-only change detected -> forcing update: TikCounter={TikCounter}, TikNumber={TikNumber}, MondayItemId={MondayItemId}, OldHearingChecksum={OldChecksum}, NewHearingChecksum={NewChecksum}",
+                    c.TikCounter, c.TikNumber, mapping.MondayItemId,
+                    mapping.HearingChecksum ?? "<null>", currentHearingChecksum);
+            }
+
+            if (!requiresDataUpdate && !requiresNameUpdate && !requiresHearingUpdate)
             {
                 if (mappingUpdated)
                 {
@@ -2178,14 +2256,15 @@ namespace Odmon.Worker.Services
             }
 
             _logger.LogDebug(
-                "DetermineSyncAction: Changes detected. TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}. Action=update",
-                c.TikNumber, c.TikCounter, mapping.MondayItemId, requiresDataUpdate, requiresNameUpdate);
+                "DetermineSyncAction: Changes detected. TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}, RequiresHearingUpdate={RequiresHearingUpdate}. Action=update",
+                c.TikNumber, c.TikCounter, mapping.MondayItemId, requiresDataUpdate, requiresNameUpdate, requiresHearingUpdate);
 
             return new SyncAction
             {
                 Action = "update",
                 RequiresDataUpdate = requiresDataUpdate,
-                RequiresNameUpdate = requiresNameUpdate
+                RequiresNameUpdate = requiresNameUpdate,
+                RequiresHearingUpdate = requiresHearingUpdate
             };
         }
 
@@ -2219,6 +2298,7 @@ namespace Odmon.Worker.Services
                             LastSyncFromOdcanitUtc = DateTime.UtcNow,
                             OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
                             MondayChecksum = itemName,
+                            HearingChecksum = ComputeHearingChecksum(c),
                             IsTest = testMode
                         };
             _integrationDb.MondayItemMappings.Add(newMapping);
@@ -2233,6 +2313,7 @@ namespace Odmon.Worker.Services
             string itemName,
             bool requiresNameUpdate,
             bool requiresDataUpdate,
+            bool requiresHearingUpdate,
             bool testMode,
             CancellationToken ct)
         {
@@ -2242,8 +2323,8 @@ namespace Odmon.Worker.Services
                 await _mondayClient.UpdateItemNameAsync(boardId, mapping.MondayItemId, itemName, ct);
             }
 
-            // Update column values if data has changed
-            if (requiresDataUpdate)
+            // Update column values if data or hearing has changed
+            if (requiresDataUpdate || requiresHearingUpdate)
             {
                 _logger.LogDebug(
                     "Court mapping for TikCounter {TikCounter}, TikNumber {TikNumber}: CourtCaseNumber -> {CourtCaseNumber}, CourtCity -> {CourtCity}",
@@ -2271,6 +2352,8 @@ namespace Odmon.Worker.Services
             }
             mapping.LastSyncFromOdcanitUtc = DateTime.UtcNow;
             mapping.MondayChecksum = itemName;
+            // Always persist the current hearing checksum
+            mapping.HearingChecksum = ComputeHearingChecksum(c);
             mapping.IsTest = testMode;
         }
 
@@ -2279,6 +2362,7 @@ namespace Odmon.Worker.Services
             public string Action { get; set; } = string.Empty; // "create", "update", or "skip"
             public bool RequiresNameUpdate { get; set; }
             public bool RequiresDataUpdate { get; set; }
+            public bool RequiresHearingUpdate { get; set; }
         }
 
         // Critical columns that require strict validation (fail-fast)
@@ -2470,6 +2554,28 @@ namespace Odmon.Worker.Services
             public string ValidationMessage { get; set; } = string.Empty;
         }
         
+        /// <summary>
+        /// Computes a deterministic SHA-256 hash of the hearing-relevant fields on an OdcanitCase.
+        /// Used to detect hearing-only changes that should trigger a Monday update
+        /// even when the main case data (tsModifyDate / OdcanitVersion) hasn't changed.
+        /// Fields: HearingDate, HearingTime, HearingJudgeName, EffectiveCourtCity (HearingCity->HearingCourtName), MeetStatus.
+        /// </summary>
+        private static string ComputeHearingChecksum(OdcanitCase c)
+        {
+            var date = c.HearingDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "";
+            var hour = c.HearingTime.HasValue
+                ? $"{c.HearingTime.Value.Hours:D2}:{c.HearingTime.Value.Minutes:D2}"
+                : "";
+            var judge = (c.HearingJudgeName ?? "").Trim();
+            var effectiveCity = (!string.IsNullOrWhiteSpace(c.HearingCity) ? c.HearingCity
+                : c.HearingCourtName ?? "").Trim();
+            var meetStatus = c.MeetStatus?.ToString(CultureInfo.InvariantCulture) ?? "";
+
+            var input = $"{date}|{hour}|{judge}|{effectiveCity}|{meetStatus}";
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+            return Convert.ToHexString(bytes).ToLowerInvariant();
+        }
+
         /// <summary>
         /// Checks if a case belongs to Client 6 based on ClientVisualID.
         /// Client 6 has special handling: DocumentType is omitted from Monday sync.

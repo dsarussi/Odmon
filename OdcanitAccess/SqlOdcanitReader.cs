@@ -357,54 +357,87 @@ namespace Odmon.Worker.OdcanitAccess
 
         private async Task EnrichWithDiaryEventsAsync(List<OdcanitCase> cases, List<int> tikCounters, CancellationToken ct)
         {
-            _logger.LogDebug("Enriching cases with upcoming active hearings from vwExportToOuterSystems_YomanData.");
+            _logger.LogDebug("Enriching cases with upcoming hearings from vwExportToOuterSystems_YomanData (all statuses).");
 
             var tikCounterSet = new HashSet<int>(tikCounters);
             var now = DateTime.Now;
 
-            // Only consider active (MeetStatus = 0) and future (StartDate >= GETDATE()) hearings
+            // Load ALL future hearings (any MeetStatus) so we can track canceled/transferred status
             var diaryEventsQuery = _db.DiaryEvents
                 .AsNoTracking()
                 .Where(d =>
                     d.TikCounter.HasValue &&
                     tikCounterSet.Contains(d.TikCounter.Value) &&
-                    d.MeetStatus == 0 &&
                     d.StartDate.HasValue &&
                     d.StartDate.Value >= now);
 
             var diaryEvents = await diaryEventsQuery.ToListAsync(ct);
 
-            _logger.LogDebug("Loaded {MatchedDiary} upcoming active diary rows for current TikCounters.", diaryEvents.Count);
+            _logger.LogDebug("Loaded {MatchedDiary} upcoming diary rows (all statuses) for current TikCounters.", diaryEvents.Count);
 
-            // For each TikCounter, select the nearest upcoming hearing (MIN(StartDate))
-            var hearingsByCase = diaryEvents
+            var groupedByTik = diaryEvents
                 .GroupBy(d => d.TikCounter!.Value)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g
-                        .OrderBy(e => e.StartDate!.Value)
-                        .First());
+                .ToDictionary(g => g.Key, g => g.ToList());
 
             foreach (var odcanitCase in cases)
             {
-                if (!hearingsByCase.TryGetValue(odcanitCase.TikCounter, out var hearing))
+                if (!groupedByTik.TryGetValue(odcanitCase.TikCounter, out var hearingsForCase))
                 {
                     continue;
                 }
 
-                odcanitCase.CourtName = hearing.CourtName ?? hearing.CourtCodeName;
-                odcanitCase.CourtCity = hearing.City;
-                odcanitCase.JudgeName = hearing.JudgeName;
-                odcanitCase.HearingDate = hearing.StartDate?.Date;
-                odcanitCase.HearingTime = hearing.StartDate?.TimeOfDay;
+                // Select ONE diary row:
+                //   Priority 1: nearest future active hearing (MeetStatus=0)
+                //   Priority 2: nearest future hearing of any status
+                var selected = hearingsForCase
+                    .Where(e => e.MeetStatus == 0)
+                    .OrderBy(e => e.StartDate!.Value)
+                    .FirstOrDefault();
 
-                // Incorporate hearing modification time into the case change version so that
-                // Monday updates are triggered when the hearing changes but remain idempotent otherwise.
-                if (hearing.tsModifyDate.HasValue)
+                selected ??= hearingsForCase
+                    .OrderBy(e => e.StartDate!.Value)
+                    .First();
+
+                // Populate hearing-specific fields from the selected diary row.
+                // These are the AUTHORITATIVE source for hearing gating / checksum / Monday updates.
+                odcanitCase.HearingJudgeName = selected.JudgeName;
+                odcanitCase.HearingCourtName = selected.CourtName ?? selected.CourtCodeName;
+                odcanitCase.HearingCity = selected.City;
+                odcanitCase.HearingStartDate = selected.StartDate;
+                odcanitCase.HearingDate = selected.StartDate?.Date;
+                odcanitCase.HearingTime = selected.StartDate?.TimeOfDay;
+                odcanitCase.MeetStatus = selected.MeetStatus;
+
+                // Also populate the general court fields from the selected row for backward
+                // compatibility (CourtName status label, CourtCaseNumber, general JudgeName display).
+                // Hozlap enrichment may override these later, which is fine — hearing-specific
+                // fields above are NOT affected by Hozlap.
+                odcanitCase.CourtName = selected.CourtName ?? selected.CourtCodeName;
+                odcanitCase.CourtCity = selected.City;
+                odcanitCase.JudgeName = selected.JudgeName;
+
+                _logger.LogDebug(
+                    "Selected diary row for TikCounter={TikCounter}: StartDate={StartDate}, MeetStatus={MeetStatus}, JudgeName='{JudgeName}', CourtName='{CourtName}', City='{City}'",
+                    odcanitCase.TikCounter,
+                    selected.StartDate?.ToString("yyyy-MM-dd HH:mm") ?? "<null>",
+                    selected.MeetStatus?.ToString() ?? "<null>",
+                    selected.JudgeName ?? "<null>",
+                    (selected.CourtName ?? selected.CourtCodeName) ?? "<null>",
+                    selected.City ?? "<null>");
+
+                // Incorporate hearing modification time from ALL hearings into the case version
+                // so that tsModifyDate-based change detection also catches hearing changes.
+                var latestModify = hearingsForCase
+                    .Where(e => e.tsModifyDate.HasValue)
+                    .Select(e => e.tsModifyDate!.Value)
+                    .DefaultIfEmpty()
+                    .Max();
+
+                if (latestModify != default)
                 {
-                    if (!odcanitCase.tsModifyDate.HasValue || hearing.tsModifyDate.Value > odcanitCase.tsModifyDate.Value)
+                    if (!odcanitCase.tsModifyDate.HasValue || latestModify > odcanitCase.tsModifyDate.Value)
                     {
-                        odcanitCase.tsModifyDate = hearing.tsModifyDate.Value;
+                        odcanitCase.tsModifyDate = latestModify;
                     }
                 }
             }

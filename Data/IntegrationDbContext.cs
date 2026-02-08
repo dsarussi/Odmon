@@ -27,6 +27,9 @@ namespace Odmon.Worker.Data
                 .HasIndex(m => m.MondayItemId);
             modelBuilder.Entity<MondayItemMapping>()
                 .HasIndex(m => new { m.TikNumber, m.BoardId });
+            modelBuilder.Entity<MondayItemMapping>()
+                .Property(m => m.HearingChecksum)
+                .HasMaxLength(128);
 
             modelBuilder.Entity<SyncLog>()
                 .HasKey(l => l.Id);
