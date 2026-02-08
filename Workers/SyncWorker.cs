@@ -13,12 +13,18 @@ namespace Odmon.Worker.Workers
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly ILogger<SyncWorker> _logger;
         private readonly IConfiguration _config;
+        private readonly IErrorNotifier _errorNotifier;
 
-        public SyncWorker(IServiceScopeFactory scopeFactory, ILogger<SyncWorker> logger, IConfiguration config)
+        public SyncWorker(
+            IServiceScopeFactory scopeFactory,
+            ILogger<SyncWorker> logger,
+            IConfiguration config,
+            IErrorNotifier errorNotifier)
         {
             _scopeFactory = scopeFactory;
             _logger = logger;
             _config = config;
+            _errorNotifier = errorNotifier;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -28,6 +34,7 @@ namespace Odmon.Worker.Workers
 
             while (!stoppingToken.IsCancellationRequested)
             {
+                var runId = Guid.NewGuid().ToString("N")[..12];
                 try
                 {
                     using var scope = _scopeFactory.CreateScope();
@@ -35,9 +42,23 @@ namespace Odmon.Worker.Workers
 
                     await syncService.SyncOdcanitToMondayAsync(stoppingToken);
                 }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    _logger.LogInformation("Worker shutdown requested.");
+                    break;
+                }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error during Odcanit→Monday sync");
+                    _logger.LogCritical(ex, "WORKER CRASH during Odcanit→Monday sync. RunId={RunId}", runId);
+
+                    try
+                    {
+                        await _errorNotifier.NotifyWorkerCrashAsync(runId, ex, stoppingToken);
+                    }
+                    catch (Exception nex)
+                    {
+                        _logger.LogWarning(nex, "Error notifier failed during worker crash handling");
+                    }
                 }
 
                 await timer.WaitForNextTickAsync(stoppingToken);

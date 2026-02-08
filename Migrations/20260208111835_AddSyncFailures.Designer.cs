@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Odmon.Worker.Data;
 
@@ -11,9 +12,11 @@ using Odmon.Worker.Data;
 namespace Odmon.Worker.Migrations
 {
     [DbContext(typeof(IntegrationDbContext))]
-    partial class IntegrationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260208111835_AddSyncFailures")]
+    partial class AddSyncFailures
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -441,29 +444,6 @@ namespace Odmon.Worker.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("SyncLogs");
-                });
-
-            modelBuilder.Entity("Odmon.Worker.Models.SyncRunLock", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<DateTime?>("ExpiresAtUtc")
-                        .HasColumnType("datetime2");
-
-                    b.Property<DateTime?>("LockedAtUtc")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("LockedByRunId")
-                        .HasMaxLength(64)
-                        .HasColumnType("nvarchar(64)");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("SyncRunLocks", (string)null);
                 });
 #pragma warning restore 612, 618
         }

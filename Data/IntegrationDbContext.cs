@@ -15,6 +15,8 @@ namespace Odmon.Worker.Data
         public DbSet<NispahAuditLog> NispahAuditLogs => Set<NispahAuditLog>();
         public DbSet<NispahDeduplication> NispahDeduplications => Set<NispahDeduplication>();
         public DbSet<HearingNearestSnapshot> HearingNearestSnapshots => Set<HearingNearestSnapshot>();
+        public DbSet<SyncFailure> SyncFailures => Set<SyncFailure>();
+        public DbSet<SyncRunLock> SyncRunLocks => Set<SyncRunLock>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -73,6 +75,27 @@ namespace Odmon.Worker.Data
                 b.HasKey(x => x.Id);
                 b.HasIndex(x => new { x.TikCounter, x.BoardId }).IsUnique();
                 b.HasIndex(x => x.MondayItemId);
+            });
+
+            modelBuilder.Entity<SyncFailure>(b =>
+            {
+                b.ToTable("SyncFailures");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.TikCounter, x.OccurredAtUtc });
+                b.HasIndex(x => x.Resolved);
+                b.HasIndex(x => x.RunId);
+                b.Property(x => x.ErrorMessage).HasMaxLength(2000);
+                b.Property(x => x.ErrorType).HasMaxLength(256);
+                b.Property(x => x.Operation).HasMaxLength(128);
+                b.Property(x => x.RunId).HasMaxLength(64);
+                b.Property(x => x.StackTrace).HasMaxLength(4000);
+            });
+
+            modelBuilder.Entity<SyncRunLock>(b =>
+            {
+                b.ToTable("SyncRunLocks");
+                b.HasKey(x => x.Id);
+                b.Property(x => x.LockedByRunId).HasMaxLength(64);
             });
 
             modelBuilder.Entity<OdcanitCase>(b =>
