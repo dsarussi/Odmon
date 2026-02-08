@@ -720,11 +720,26 @@ namespace Odmon.Worker.Services
             // DocumentType was already derived and assigned immediately after loading the case
             // (see line ~157 in RunAsync - authoritative assignment point)
             // Here we just use the already-assigned value
-            var documentType = c.DocumentType;
             
-            if (!string.IsNullOrWhiteSpace(documentType))
+            // Special handling for Client 6: Do NOT send DocumentType to Monday
+            // Client 6 uses "מכתב דרישה אילי" which doesn't exist in Monday labels
+            var isClient6 = IsClient6(c.ClientVisualID);
+            
+            if (!isClient6)
             {
-                TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
+                var documentType = c.DocumentType;
+                if (!string.IsNullOrWhiteSpace(documentType))
+                {
+                    TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
+                }
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Client 6 special handling: Omitting DocumentType for TikCounter={TikCounter}, TikNumber={TikNumber}, ClientVisualID='{ClientVisualID}'",
+                    c.TikCounter,
+                    c.TikNumber ?? "<null>",
+                    c.ClientVisualID ?? "<null>");
             }
 
             var statusColumnId = _mondaySettings.CaseStatusColumnId;
@@ -2292,8 +2307,22 @@ namespace Odmon.Worker.Services
 
         private async Task ValidateCriticalFieldsAsync(long boardId, OdcanitCase c, CancellationToken ct)
         {
+            // Special handling for Client 6: Skip DocumentType validation
+            // Client 6 uses "מכתב דרישה אילי" which doesn't exist in Monday labels
+            var isClient6 = IsClient6(c.ClientVisualID);
+            
             foreach (var criticalColumn in CriticalColumns)
             {
+                // Skip DocumentType validation for Client 6
+                if (isClient6 && criticalColumn.FieldName == "DocumentType")
+                {
+                    _logger.LogDebug(
+                        "Client 6 special handling: Skipping DocumentType validation for TikCounter={TikCounter}, TikNumber={TikNumber}",
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>");
+                    continue;
+                }
+                
                 var fieldValue = criticalColumn.GetValue(c);
                 
                 // Check if value is null or empty
@@ -2439,6 +2468,33 @@ namespace Odmon.Worker.Services
             // ColumnType is no longer used - detected dynamically from Monday metadata
             public Func<OdcanitCase, string?> GetValue { get; set; } = _ => null;
             public string ValidationMessage { get; set; } = string.Empty;
+        }
+        
+        /// <summary>
+        /// Checks if a case belongs to Client 6 based on ClientVisualID.
+        /// Client 6 has special handling: DocumentType is omitted from Monday sync.
+        /// </summary>
+        private static bool IsClient6(string? clientVisualID)
+        {
+            if (string.IsNullOrWhiteSpace(clientVisualID))
+            {
+                return false;
+            }
+            
+            // Extract ClientNumber (substring before '\' if present, otherwise entire string)
+            var backslashIndex = clientVisualID.IndexOf('\\');
+            string clientNumberStr;
+            
+            if (backslashIndex > 0)
+            {
+                clientNumberStr = clientVisualID.Substring(0, backslashIndex).Trim();
+            }
+            else
+            {
+                clientNumberStr = clientVisualID.Trim();
+            }
+            
+            return clientNumberStr == "6";
         }
     }
 }
