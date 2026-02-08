@@ -111,7 +111,8 @@ namespace Odmon.Worker.Services
             HashSet<string>? allowedStatusLabels = null;
             if (!string.IsNullOrWhiteSpace(statusColumnId))
             {
-                allowedStatusLabels = await _mondayMetadataProvider.GetAllowedDropdownLabelsAsync(boardId, statusColumnId, ct);
+                // HearingStatusColumnId is a status column (type=color), not dropdown
+                allowedStatusLabels = await _mondayMetadataProvider.GetAllowedStatusLabelsAsync(boardId, statusColumnId, ct);
                 if (allowedStatusLabels.Count == 0)
                     _logger.LogWarning("Hearing status column {ColumnId} on board {BoardId} has no labels; status updates will be skipped.", statusColumnId, boardId);
             }
@@ -228,6 +229,8 @@ namespace Odmon.Worker.Services
                     }
                     else if (meetStatus == 0)
                     {
+                        // When MeetStatus is active (0), do NOT touch the hearing status column
+                        // to avoid overriding manual values and reverting from canceled/transferred back to active
                         if (judgeOrCityChanged)
                         {
                             await _mondayClient.UpdateHearingDetailsAsync(boardId, mapping.MondayItemId, judgeName, city, judgeCol, cityCol, ct);
@@ -238,11 +241,7 @@ namespace Odmon.Worker.Services
                             await _mondayClient.UpdateHearingDateAsync(boardId, mapping.MondayItemId, hearing.StartDate!.Value, dateCol, hourCol, ct);
                             executedSteps.Add("UpdateHearingDate");
                         }
-                        if (statusChanged && !string.IsNullOrWhiteSpace(statusColumnId) && allowedStatusLabels != null && allowedStatusLabels.Contains(label))
-                        {
-                            await _mondayClient.UpdateHearingStatusAsync(boardId, mapping.MondayItemId, label, statusColumnId, ct);
-                            executedSteps.Add("SetStatus_פעיל");
-                        }
+                        // Omit status update when active (MeetStatus=0)
                     }
                     else if (meetStatus == 1)
                     {
