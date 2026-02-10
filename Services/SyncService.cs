@@ -164,6 +164,12 @@ namespace Odmon.Worker.Services
                 }
             }
 
+            // Fail-fast: BoardId must never be 0 at runtime
+            if (boardIdToUse == 0)
+            {
+                throw new InvalidOperationException("FATAL: boardIdToUse is 0. Check Monday:CasesBoardId and Safety:TestBoardId configuration. Aborting run.");
+            }
+
             // ── Stage: Resolve TikCounters ──
             var stageTimer = Stopwatch.StartNew();
             int[] tikCounters = await DetermineTikCountersToLoadAsync(ct);
