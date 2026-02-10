@@ -17,6 +17,7 @@ namespace Odmon.Worker.Data
         public DbSet<HearingNearestSnapshot> HearingNearestSnapshots => Set<HearingNearestSnapshot>();
         public DbSet<SyncFailure> SyncFailures => Set<SyncFailure>();
         public DbSet<SyncRunLock> SyncRunLocks => Set<SyncRunLock>();
+        public DbSet<ListenerState> ListenerStates => Set<ListenerState>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -32,6 +33,16 @@ namespace Odmon.Worker.Data
             modelBuilder.Entity<MondayItemMapping>()
                 .Property(m => m.HearingChecksum)
                 .HasMaxLength(128);
+            modelBuilder.Entity<MondayItemMapping>()
+                .Property(m => m.CreatedAtUtc)
+                .HasDefaultValueSql("SYSUTCDATETIME()");
+
+            modelBuilder.Entity<ListenerState>(b =>
+            {
+                b.ToTable("ListenerState");
+                b.HasKey(x => x.Id);
+                b.Property(x => x.Id).ValueGeneratedNever();
+            });
 
             modelBuilder.Entity<SyncLog>()
                 .HasKey(l => l.Id);

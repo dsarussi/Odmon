@@ -76,6 +76,12 @@ namespace Odmon.Worker.Monday
         public string? TaskTypeStatusColumnId { get; set; } = "color_mkwyq310";
         public string? ResponsibleTextColumnId { get; set; } = "text_mkxz6j9y";
         public string? DocumentTypeStatusColumnId { get; set; } = "color_mkxhq546";
+
+        /// <summary>
+        /// If true, inactive Monday items may be revived (new item created, mapping updated).
+        /// Default false: inactive items are skipped with a warning, no revive.
+        /// </summary>
+        public bool ReviveInactiveItems { get; set; } = false;
     }
 }
 

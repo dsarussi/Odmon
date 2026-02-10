@@ -192,14 +192,58 @@ namespace Odmon.Worker.Services
             _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
                 stageTimer.ElapsedMilliseconds, newOrUpdatedCases.Count);
 
-            // ── Stage: Filter to new cases only (listener mode) ──
-            // In change-feed mode, skip cases that have no mapping AND were created before the watermark.
-            // These are old cases that got an edit but were never synced — they should not trigger a new Monday item.
-            // Cases WITH an existing mapping always pass (they need updates).
+            // ── Stage: Load / initialize ListenerState (T0 watermark) ──
+            var listenerUpdateOnly = _config.GetValue<bool>("Sync:ListenerUpdateOnly", true);
+            DateTime? listenerStartedAtUtc = null;
+
             if (_changeFeedWatermark.HasValue)
             {
                 stageTimer.Restart();
-                var watermark = _changeFeedWatermark.Value;
+                var listenerState = await _integrationDb.ListenerStates
+                    .FirstOrDefaultAsync(x => x.Id == 1, ct);
+
+                if (listenerState == null)
+                {
+                    // First run ever — set T0 = now
+                    listenerState = new ListenerState
+                    {
+                        Id = 1,
+                        StartedAtUtc = DateTime.UtcNow,
+                        LastChangeFeedWatermarkUtc = _changeFeedWatermark.Value,
+                        UpdatedAtUtc = DateTime.UtcNow
+                    };
+                    _integrationDb.ListenerStates.Add(listenerState);
+                    await _integrationDb.SaveChangesAsync(ct);
+                    _logger.LogInformation(
+                        "ListenerState initialized (first run). StartedAtUtc={StartedAtUtc:yyyy-MM-dd HH:mm:ss}",
+                        listenerState.StartedAtUtc);
+                }
+                else
+                {
+                    // Update the change-feed watermark on each run (StartedAtUtc stays fixed)
+                    listenerState.LastChangeFeedWatermarkUtc = _changeFeedWatermark.Value;
+                    listenerState.UpdatedAtUtc = DateTime.UtcNow;
+                    await _integrationDb.SaveChangesAsync(ct);
+                }
+
+                listenerStartedAtUtc = listenerState.StartedAtUtc;
+                stageTimer.Stop();
+                _logger.LogInformation(
+                    "ListenerState loaded: StartedAtUtc={StartedAtUtc:yyyy-MM-dd HH:mm:ss}, ChangeFeedWatermark={Watermark:yyyy-MM-dd HH:mm:ss}, ListenerUpdateOnly={ListenerUpdateOnly}",
+                    listenerStartedAtUtc.Value, _changeFeedWatermark.Value, listenerUpdateOnly);
+            }
+
+            // ── Stage: Listener-mode gating ──
+            // Mapped cases → always allowed (update path).
+            // Unmapped cases in listener mode:
+            //   - If ListenerUpdateOnly=true: allow creation ONLY if tsCreateDate >= StartedAtUtc (T0).
+            //   - Null tsCreateDate → blocked (strict).
+            // Unmapped cases when ListenerUpdateOnly=false: legacy watermark-based filtering.
+            int skippedOldUnmapped = 0, skippedUnmappedNoCreateDate = 0;
+
+            if (_changeFeedWatermark.HasValue)
+            {
+                stageTimer.Restart();
                 var existingMappedTikCounters = await _integrationDb.MondayItemMappings
                     .AsNoTracking()
                     .Where(m => m.BoardId == boardIdToUse)
@@ -209,7 +253,7 @@ namespace Odmon.Worker.Services
                 var mappedSet = new HashSet<int>(existingMappedTikCounters);
 
                 var beforeFilter = newOrUpdatedCases.Count;
-                var skippedOld = new List<(int TikCounter, string? TikNumber, DateTime? Created)>();
+                var t0 = listenerStartedAtUtc!.Value;
 
                 newOrUpdatedCases = newOrUpdatedCases.Where(c =>
                 {
@@ -217,28 +261,47 @@ namespace Odmon.Worker.Services
                     if (mappedSet.Contains(c.TikCounter))
                         return true;
 
-                    // Not mapped: only create if tsCreateDate >= watermark (truly new case)
-                    if (c.tsCreateDate.HasValue && c.tsCreateDate.Value < watermark)
+                    // Unmapped: apply creation rule
+                    if (listenerUpdateOnly)
                     {
-                        skippedOld.Add((c.TikCounter, c.TikNumber, c.tsCreateDate));
-                        return false;
+                        // Strict: only create if tsCreateDate >= T0 (StartedAtUtc)
+                        if (!c.tsCreateDate.HasValue)
+                        {
+                            skippedUnmappedNoCreateDate++;
+                            _logger.LogDebug(
+                                "Skipped unmapped case (reason=no_tsCreateDate): TikCounter={TikCounter}, TikNumber={TikNumber}",
+                                c.TikCounter, c.TikNumber ?? "<null>");
+                            return false;
+                        }
+                        if (c.tsCreateDate.Value < t0)
+                        {
+                            skippedOldUnmapped++;
+                            _logger.LogDebug(
+                                "Skipped unmapped case (reason=tsCreateDate_before_T0): TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate:yyyy-MM-dd HH:mm:ss}, T0={T0:yyyy-MM-dd HH:mm:ss}",
+                                c.TikCounter, c.TikNumber ?? "<null>", c.tsCreateDate.Value, t0);
+                            return false;
+                        }
+                        // tsCreateDate >= T0: allow creation
+                        return true;
                     }
-
-                    // Not mapped, no tsCreateDate: allow creation (conservative; avoid losing cases)
-                    return true;
+                    else
+                    {
+                        // Legacy: allow creation if tsCreateDate >= change-feed watermark
+                        if (c.tsCreateDate.HasValue && c.tsCreateDate.Value < _changeFeedWatermark.Value)
+                        {
+                            skippedOldUnmapped++;
+                            return false;
+                        }
+                        return true;
+                    }
                 }).ToList();
 
                 stageTimer.Stop();
                 _logger.LogInformation(
-                    "Stage: NewCaseFilter completed in {ElapsedMs}ms. Before={Before}, After={After}, SkippedOld={SkippedOld} (created before watermark {Watermark:yyyy-MM-dd HH:mm:ss}), AlreadyMapped={Mapped}",
-                    stageTimer.ElapsedMilliseconds, beforeFilter, newOrUpdatedCases.Count, skippedOld.Count, watermark, mappedSet.Count);
-
-                foreach (var s in skippedOld)
-                {
-                    _logger.LogDebug(
-                        "Skipped old case (not newly opened): TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate:yyyy-MM-dd HH:mm:ss}, Watermark={Watermark:yyyy-MM-dd HH:mm:ss}",
-                        s.TikCounter, s.TikNumber ?? "<null>", s.Created, watermark);
-                }
+                    "Stage: ListenerGating completed in {ElapsedMs}ms. ListenerUpdateOnly={ListenerUpdateOnly}, T0={T0}, Before={Before}, After={After}, SkippedOldUnmapped={SkippedOld}, SkippedNoCreateDate={SkippedNoDate}, AlreadyMapped={Mapped}",
+                    stageTimer.ElapsedMilliseconds, listenerUpdateOnly,
+                    listenerStartedAtUtc?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<null>",
+                    beforeFilter, newOrUpdatedCases.Count, skippedOldUnmapped, skippedUnmappedNoCreateDate, mappedSet.Count);
             }
 
             // ── Stage: Derive DocumentType ──
@@ -275,6 +338,7 @@ namespace Odmon.Worker.Services
             var processed = new List<object>();
             int created = 0, updated = 0;
             int skippedNonTest = 0, skippedExistingNonTest = 0, skippedNoChange = 0, skippedNonDemo = 0;
+            int skippedUnmappedGuardrail = 0, skippedInactive = 0;
             int failed = 0;
 
             foreach (var c in batch)
@@ -361,6 +425,27 @@ namespace Odmon.Worker.Services
                 switch (syncAction.Action)
                 {
                     case "create":
+                        // ── Hard guardrail: block creation if tsCreateDate < T0 or null in listener mode ──
+                        if (listenerUpdateOnly && listenerStartedAtUtc.HasValue)
+                        {
+                            var blockReason = !c.tsCreateDate.HasValue
+                                ? "no_tsCreateDate"
+                                : c.tsCreateDate.Value < listenerStartedAtUtc.Value
+                                    ? $"tsCreateDate({c.tsCreateDate.Value:yyyy-MM-dd HH:mm:ss})<T0({listenerStartedAtUtc.Value:yyyy-MM-dd HH:mm:ss})"
+                                    : null;
+
+                            if (blockReason != null)
+                            {
+                                action = "skipped_unmapped_listener_guardrail";
+                                skippedUnmappedGuardrail++;
+                                _logger.LogWarning(
+                                    "GUARDRAIL: Blocked Monday item creation in listener mode. TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, reason={Reason}",
+                                    c.TikCounter, c.TikNumber ?? "<null>", caseBoardId, blockReason);
+                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, $"Blocked: {blockReason}"));
+                                continue;
+                            }
+                        }
+
                         action = dryRun ? "dry-create" : "created";
                         _logger.LogInformation(
                             "Creating new Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, ItemName={ItemName}",
@@ -427,12 +512,13 @@ namespace Odmon.Worker.Services
                                 {
                                     // Item is inactive/archived/deleted — skip, do NOT revive or create new item.
                                     action = "skipped_inactive_monday_item";
+                                    skippedInactive++;
                                     _logger.LogWarning(
-                                        "Monday item inactive; skipping update (NO revive). TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, ItemState={ItemState}",
-                                        c.TikCounter, c.TikNumber ?? "<null>", caseBoardId, mapping.MondayItemId, itemState);
+                                        "Monday item inactive; skipping update (NO revive). TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, ItemState={ItemState}, ReviveInactiveItems={ReviveFlag}",
+                                        c.TikCounter, c.TikNumber ?? "<null>", caseBoardId, mapping.MondayItemId, itemState, _mondaySettings.ReviveInactiveItems);
 
                                     await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "update_skipped_inactive",
-                                        new InvalidOperationException($"Monday item {mapping.MondayItemId} is inactive (state={itemState}). Skipped update; no revive."),
+                                        new InvalidOperationException($"Monday item {mapping.MondayItemId} is inactive (state={itemState}). Skipped update; no revive. ReviveInactiveItems={_mondaySettings.ReviveInactiveItems}"),
                                         0, ct);
 
                                     processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, $"InactiveMondayItem (state={itemState})"));
@@ -461,6 +547,22 @@ namespace Odmon.Worker.Services
                                     c.TikNumber, c.TikCounter, mapping.MondayItemId, caseBoardId, critEx.ColumnId, critEx.FieldValue ?? "<null>", critEx.ValidationReason);
                                 
                                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+                                continue;
+                            }
+                            catch (Monday.MondayApiException mondayEx) when (mondayEx.IsInactiveItemError())
+                            {
+                                // Inactive-item error surfaced during actual Monday mutation (pre-check may have returned null).
+                                // Same policy as the GetItemStateAsync pre-check: skip, do NOT revive.
+                                action = "skipped_inactive_monday_item";
+                                skippedInactive++;
+                                _logger.LogWarning(
+                                    "Monday item inactive; skipping update (NO revive). TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, Source=MondayApiException, ListenerUpdateOnly={ListenerUpdateOnly}, ReviveInactiveItems={ReviveFlag}",
+                                    c.TikCounter, c.TikNumber ?? "<null>", caseBoardId, mapping.MondayItemId, listenerUpdateOnly, _mondaySettings.ReviveInactiveItems);
+
+                                await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "update_skipped_inactive",
+                                    mondayEx, 0, ct);
+
+                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, $"InactiveMondayItem (MondayApiException)"));
                                 continue;
                             }
                             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -537,6 +639,10 @@ namespace Odmon.Worker.Services
                 SkippedExistingNonTestMapping = skippedExistingNonTest,
                 SkippedNonDemo = skippedNonDemo,
                 SkippedNoChange = skippedNoChange,
+                SkippedOldUnmapped = skippedOldUnmapped,
+                SkippedUnmappedNoCreateDate = skippedUnmappedNoCreateDate,
+                SkippedUnmappedGuardrail = skippedUnmappedGuardrail,
+                SkippedInactive = skippedInactive,
                 Failed = failed,
                 Processed = processed
             };
@@ -546,7 +652,7 @@ namespace Odmon.Worker.Services
                 CreatedAtUtc = DateTime.UtcNow,
                 Source = "SyncService",
                 Level = failed > 0 ? "Warning" : "Info",
-                Message = $"Run {runId}: total={batch.Count}, success={successCount}, created={created}, updated={updated}, skipped={skippedNoChange}, failed={failed}, duration={totalDurationMs}ms",
+                Message = $"Run {runId}: total={batch.Count}, success={successCount}, created={created}, updated={updated}, skipped={skippedNoChange}, skippedOldUnmapped={skippedOldUnmapped}, skippedNoDate={skippedUnmappedNoCreateDate}, skippedInactive={skippedInactive}, failed={failed}, duration={totalDurationMs}ms",
                 Details = JsonSerializer.Serialize(runSummary)
             });
 
@@ -567,8 +673,12 @@ namespace Odmon.Worker.Services
             // ── SYNC RUN SUMMARY ──
             _logger.LogInformation(
                 "SYNC RUN SUMMARY | RunId={RunId} | Total={Total} | Success={Success} | Created={Created} | Updated={Updated} | " +
-                "SkippedNoChange={SkippedNoChange} | Failed={Failed} | Duration={DurationMs}ms",
-                runId, batch.Count, successCount, created, updated, skippedNoChange, failed, totalDurationMs);
+                "SkippedNoChange={SkippedNoChange} | SkippedOldUnmapped={SkippedOldUnmapped} | SkippedUnmappedNoCreateDate={SkippedNoDate} | SkippedInactive={SkippedInactive} | " +
+                "Failed={Failed} | Duration={DurationMs}ms | ListenerStartedAtUtc={T0} | ListenerUpdateOnly={ListenerUpdateOnly} | ReviveInactiveItems={ReviveInactiveItems}",
+                runId, batch.Count, successCount, created, updated, skippedNoChange,
+                skippedOldUnmapped, skippedUnmappedNoCreateDate, skippedInactive, failed, totalDurationMs,
+                listenerStartedAtUtc?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<not_listener_mode>",
+                listenerUpdateOnly, _mondaySettings.ReviveInactiveItems);
 
             // ── Failure rate notification ──
             if (batch.Count > 0 && failed > 0)
@@ -2427,10 +2537,11 @@ namespace Odmon.Worker.Services
                 BoardId = boardId,
                 MondayItemId = mondayItemId,
                 LastSyncFromOdcanitUtc = DateTime.UtcNow,
-                            OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
+                OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
                 MondayChecksum = itemName,
-                            HearingChecksum = ComputeHearingChecksum(c),
-                IsTest = testMode
+                HearingChecksum = ComputeHearingChecksum(c),
+                IsTest = testMode,
+                CreatedAtUtc = DateTime.UtcNow
             };
             _integrationDb.MondayItemMappings.Add(newMapping);
 
@@ -2776,6 +2887,10 @@ namespace Odmon.Worker.Services
             // Monday API: rate limit, server errors, complexity budget
             if (ex is Monday.MondayApiException mondayEx)
             {
+                // Inactive-item errors are NOT transient — do not retry
+                if (mondayEx.IsInactiveItemError())
+                    return false;
+
                 var msg = mondayEx.Message ?? "";
                 var raw = mondayEx.RawErrorJson ?? "";
                 if (msg.Contains("429", StringComparison.OrdinalIgnoreCase)

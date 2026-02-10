@@ -82,14 +82,42 @@ namespace Odmon.Worker.Services
                 "HearingNearest sync: Mode={Mode}, BoardId={BoardId}, Enable={Enable}, DryRun={DryRun}",
                 mode, boardId, enableWrites, dryRun);
 
-            var mappings = await _integrationDb.MondayItemMappings
+            // Load ListenerState T0 to filter out pre-T0 mappings
+            var listenerState = await _integrationDb.ListenerStates
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == 1, ct);
+
+            var allMappings = await _integrationDb.MondayItemMappings
                 .AsNoTracking()
                 .Where(m => m.BoardId == boardId)
                 .ToListAsync(ct);
 
+            List<MondayItemMapping> mappings;
+            if (listenerState != null)
+            {
+                // Only process mappings created after listener start (T0).
+                // Pre-existing/test mappings (CreatedAtUtc = 2000-01-01) are excluded.
+                mappings = allMappings
+                    .Where(m => m.CreatedAtUtc >= listenerState.StartedAtUtc)
+                    .ToList();
+
+                var excluded = allMappings.Count - mappings.Count;
+                if (excluded > 0)
+                {
+                    _logger.LogInformation(
+                        "HearingNearest: Filtered {Excluded} pre-T0 mappings (CreatedAtUtc < {T0:yyyy-MM-dd HH:mm:ss}). Remaining={Remaining}, BoardId={BoardId}",
+                        excluded, listenerState.StartedAtUtc, mappings.Count, boardId);
+                }
+            }
+            else
+            {
+                // No ListenerState yet — process all mappings (first run / allowlist mode)
+                mappings = allMappings;
+            }
+
             if (mappings.Count == 0)
             {
-                _logger.LogDebug("No Monday mappings for board {BoardId}; skipping hearing sync.", boardId);
+                _logger.LogDebug("No eligible Monday mappings for board {BoardId} after T0 filtering; skipping hearing sync.", boardId);
                 return;
             }
 
