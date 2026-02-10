@@ -298,35 +298,37 @@ static async Task VerifyIntegrationDbConnectionAsync(IServiceProvider services)
         }
 
         // Execute raw SQL to get actual server and database names
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT @@SERVERNAME AS ServerName, DB_NAME() AS DbName";
-
-        using var reader = await command.ExecuteReaderAsync();
-        if (await reader.ReadAsync())
+        // Use explicit block scope so the DataReader is closed before table checks
         {
-            var serverName = reader["ServerName"]?.ToString() ?? "<unknown>";
-            var dbName = reader["DbName"]?.ToString() ?? "<unknown>";
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT @@SERVERNAME AS ServerName, DB_NAME() AS DbName";
 
-            logger.LogInformation(
-                "IntegrationDb Runtime Verification: @@SERVERNAME={ServerName}, DB_NAME()={DbName}",
-                serverName,
-                dbName);
-
-            // Also log as warning if values don't match connection properties
-            if (database != "<unknown>" && !string.Equals(database, dbName, StringComparison.OrdinalIgnoreCase))
+            using var reader = await command.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
             {
-                logger.LogWarning(
-                    "IntegrationDb database name mismatch: Connection.Database={ConnectionDatabase}, DB_NAME()={ActualDbName}",
-                    database,
-                    dbName);
-            }
-        }
-        else
-        {
-            logger.LogWarning("IntegrationDb verification query returned no results.");
-        }
+                var serverName = reader["ServerName"]?.ToString() ?? "<unknown>";
+                var dbName = reader["DbName"]?.ToString() ?? "<unknown>";
 
-        // ── Check critical table existence ──
+                logger.LogInformation(
+                    "IntegrationDb Runtime Verification: @@SERVERNAME={ServerName}, DB_NAME()={DbName}",
+                    serverName,
+                    dbName);
+
+                if (database != "<unknown>" && !string.Equals(database, dbName, StringComparison.OrdinalIgnoreCase))
+                {
+                    logger.LogWarning(
+                        "IntegrationDb database name mismatch: Connection.Database={ConnectionDatabase}, DB_NAME()={ActualDbName}",
+                        database,
+                        dbName);
+                }
+            }
+            else
+            {
+                logger.LogWarning("IntegrationDb verification query returned no results.");
+            }
+        } // DataReader + command disposed here
+
+        // ── Check critical table existence (sequential, no open readers) ──
         await VerifyTableExistsAsync(connection, "HearingNearestSnapshots", logger);
         await VerifyTableExistsAsync(connection, "SyncRunLocks", logger);
         await VerifyTableExistsAsync(connection, "SyncFailures", logger);
@@ -344,9 +346,10 @@ static async Task VerifyTableExistsAsync(System.Data.Common.DbConnection connect
     try
     {
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT OBJECT_ID(N'[dbo].[{tableName}]', 'U')";
+        cmd.CommandText = $"SELECT CASE WHEN OBJECT_ID(N'[dbo].[{tableName}]', 'U') IS NULL THEN 0 ELSE 1 END";
         var result = await cmd.ExecuteScalarAsync();
-        if (result == null || result == DBNull.Value)
+        var exists = result is int i ? i == 1 : false;
+        if (!exists)
         {
             logger.LogWarning(
                 "IntegrationDb TABLE CHECK: dbo.{TableName} does NOT exist. The corrective migration may not have been applied yet.",
@@ -355,8 +358,8 @@ static async Task VerifyTableExistsAsync(System.Data.Common.DbConnection connect
         else
         {
             logger.LogInformation(
-                "IntegrationDb TABLE CHECK: dbo.{TableName} exists (object_id={ObjectId})",
-                tableName, result);
+                "IntegrationDb TABLE CHECK: dbo.{TableName} exists.",
+                tableName);
         }
     }
     catch (Exception ex)

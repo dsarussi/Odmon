@@ -445,12 +445,15 @@ namespace Odmon.Worker.Monday
         {
             var columnValues = new Dictionary<string, object>();
             if (!string.IsNullOrWhiteSpace(judgeColumnId) && !string.IsNullOrWhiteSpace(judgeName))
-                columnValues[judgeColumnId] = new { text = judgeName };
+                columnValues[judgeColumnId] = judgeName;
             if (!string.IsNullOrWhiteSpace(cityColumnId) && !string.IsNullOrWhiteSpace(city))
-                columnValues[cityColumnId] = new { text = city };
+                columnValues[cityColumnId] = city;
             if (columnValues.Count == 0)
                 return;
             var json = JsonSerializer.Serialize(columnValues);
+            _logger.LogDebug(
+                "UpdateHearingDetailsAsync columnValuesJson: BoardId={BoardId}, ItemId={ItemId}, JSON={Json}",
+                boardId, itemId, json);
             await UpdateItemAsync(boardId, itemId, json, ct);
         }
 
