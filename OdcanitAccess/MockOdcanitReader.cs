@@ -91,6 +91,19 @@ namespace Odmon.Worker.OdcanitAccess
                 .ToList();
             return Task.FromResult(result);
         }
+
+        public Task<List<int>> GetModifiedTikCountersSinceAsync(DateTime sinceUtc, IReadOnlyCollection<int> eligibleMappedTikCounters, CancellationToken ct)
+        {
+            var eligible = eligibleMappedTikCounters?.ToHashSet() ?? new HashSet<int>();
+            var result = _cases
+                .Where(c => eligible.Contains(c.TikCounter)
+                             && c.tsModifyDate.HasValue
+                             && c.tsModifyDate.Value >= sinceUtc)
+                .Select(c => c.TikCounter)
+                .Distinct()
+                .ToList();
+            return Task.FromResult(result);
+        }
     }
 }
 

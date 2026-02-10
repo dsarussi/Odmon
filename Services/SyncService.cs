@@ -214,94 +214,180 @@ namespace Odmon.Worker.Services
             }
 
             // ======================================================================
-            // PHASE B — ONGOING LISTENER (Change Feed)
-            // Uses change feed to discover recently-changed TikCounters.
-            // Only UPDATES cases that are already in the Managed Universe
-            // (mapped + tsCreateDate >= CutoffDate). Never creates items.
+            // PHASE B — ONGOING LISTENER (Change Feed + tsModifyDate fallback)
+            // Determines which eligible-mapped cases changed since the watermark.
+            // Uses UNION of change feed results and tsModifyDate fallback to ensure
+            // any field change propagates to Monday, even if the change feed misses it.
+            // Listener NEVER creates items — only updates managed cases.
             // ======================================================================
-            stageTimer.Restart();
-            int[] tikCounters = await DetermineTikCountersToLoadAsync(ct);
-            stageTimer.Stop();
-            _logger.LogInformation("Stage: ResolveTikCounters completed in {ElapsedMs}ms, count={Count}",
-                stageTimer.ElapsedMilliseconds, tikCounters.Length);
 
-            // Counters for listener gating
+            // B.1) Compute eligibleMapped = INTERSECT(eligibleFromOdcanit, mapped)
+            stageTimer.Restart();
+            int eligibleFromOdcanitCount = 0;
+            int mappedCount = 0;
+            int eligibleMappedCount = 0;
+            int feedRawCount = 0;
+            int feedIntersectedCount = 0;
+            int fallbackCount = 0;
+            int toProcessCount = 0;
             int skippedCutoffMapped = 0;
             int skippedUnmanagedListener = 0;
-            int eligibleMapped = 0;
 
+            HashSet<int> eligibleMappedSet;
+            int[] tikCounters;
             List<OdcanitCase> newOrUpdatedCases;
 
-            if (tikCounters.Length == 0)
+            if (listenerUpdateOnly && cutoffDate.HasValue)
             {
-                _logger.LogInformation("Change feed returned 0 TikCounters. Listener phase has nothing to process.");
-                newOrUpdatedCases = new List<OdcanitCase>();
+                var cutoff = cutoffDate.Value;
+
+                // A) eligibleFromOdcanit: all TikCounters with tsCreateDate >= cutoff
+                var eligibleFromOdcanit = await _odcanitReader.GetTikCountersSinceCutoffAsync(cutoff, ct);
+                eligibleFromOdcanitCount = eligibleFromOdcanit.Count;
+                var eligibleOdcanitSet = new HashSet<int>(eligibleFromOdcanit);
+
+                // B) mapped: all TikCounters with a mapping for this board
+                var mappedTikCounters = await _integrationDb.MondayItemMappings
+                    .AsNoTracking()
+                    .Where(m => m.BoardId == boardIdToUse)
+                    .Select(m => m.TikCounter)
+                    .Distinct()
+                    .ToListAsync(ct);
+                mappedCount = mappedTikCounters.Count;
+                var mappedSet = new HashSet<int>(mappedTikCounters);
+
+                // C) eligibleMapped = INTERSECT
+                eligibleMappedSet = new HashSet<int>(eligibleOdcanitSet);
+                eligibleMappedSet.IntersectWith(mappedSet);
+                eligibleMappedCount = eligibleMappedSet.Count;
+
+                stageTimer.Stop();
+                _logger.LogInformation(
+                    "Stage: ComputeEligibleMapped completed in {ElapsedMs}ms. CutoffDate={CutoffDate}, " +
+                    "EligibleFromOdcanit={EligibleFromOdcanit}, Mapped={Mapped}, EligibleMapped={EligibleMapped}",
+                    stageTimer.ElapsedMilliseconds, cutoff.ToString("yyyy-MM-dd"),
+                    eligibleFromOdcanitCount, mappedCount, eligibleMappedCount);
+
+                if (eligibleMappedCount == 0)
+                {
+                    _logger.LogInformation("No eligible-mapped cases exist. Listener phase has nothing to process.");
+                    tikCounters = Array.Empty<int>();
+                    newOrUpdatedCases = new List<OdcanitCase>();
+                }
+                else
+                {
+                    // B.2) Determine which of eligibleMapped changed since watermark
+                    stageTimer.Restart();
+
+                    // Source 1: Change feed
+                    var sinceUtc = await GetChangeFeedWatermarkAsync(ct);
+                    _changeFeedWatermark = sinceUtc;
+
+                    IReadOnlyList<int> feedTikCounters;
+                    try
+                    {
+                        feedTikCounters = await _changeFeed.GetChangedTikCountersSinceAsync(sinceUtc, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Change feed query failed; relying on tsModifyDate fallback only.");
+                        feedTikCounters = Array.Empty<int>();
+                    }
+                    feedRawCount = feedTikCounters.Count;
+
+                    // Intersect feed with eligibleMapped
+                    var feedIntersected = new HashSet<int>(feedTikCounters);
+                    feedIntersected.IntersectWith(eligibleMappedSet);
+                    feedIntersectedCount = feedIntersected.Count;
+
+                    // Track unmapped/pre-cutoff skips from the feed for logging
+                    foreach (var tc in feedTikCounters)
+                    {
+                        if (!mappedSet.Contains(tc))
+                            skippedUnmanagedListener++;
+                        else if (!eligibleOdcanitSet.Contains(tc))
+                            skippedCutoffMapped++;
+                    }
+
+                    // Source 2: tsModifyDate fallback — deterministic catch-all
+                    List<int> fallbackTikCounters;
+                    try
+                    {
+                        fallbackTikCounters = await _odcanitReader.GetModifiedTikCountersSinceAsync(
+                            sinceUtc, eligibleMappedSet.ToList().AsReadOnly(), ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "tsModifyDate fallback query failed; relying on change feed only.");
+                        fallbackTikCounters = new List<int>();
+                    }
+                    fallbackCount = fallbackTikCounters.Count;
+
+                    // UNION
+                    var toProcess = new HashSet<int>(feedIntersected);
+                    toProcess.UnionWith(fallbackTikCounters);
+                    toProcessCount = toProcess.Count;
+                    tikCounters = toProcess.OrderBy(tc => tc).ToArray();
+
+                    stageTimer.Stop();
+
+                    // Debug log for a sample TikCounter showing source
+                    if (tikCounters.Length > 0)
+                    {
+                        var sample = tikCounters[0];
+                        var fromFeed = feedIntersected.Contains(sample);
+                        var fromFallback = fallbackTikCounters.Contains(sample);
+                        _logger.LogDebug(
+                            "LISTENER | Sample TikCounter={TikCounter}: fromFeed={FromFeed}, fromFallback={FromFallback}",
+                            sample, fromFeed, fromFallback);
+                    }
+
+                    _logger.LogInformation(
+                        "Stage: ListenerDetection completed in {ElapsedMs}ms. sinceUtc={SinceUtc}, " +
+                        "FeedRaw={FeedRaw}, FeedIntersected={FeedIntersected}, Fallback={Fallback}, " +
+                        "ToProcess={ToProcess}, SkippedUnmanaged={SkippedUnmanaged}, SkippedCutoffMapped={SkippedCutoff}",
+                        stageTimer.ElapsedMilliseconds,
+                        sinceUtc.ToString("yyyy-MM-dd HH:mm:ss"),
+                        feedRawCount, feedIntersectedCount, fallbackCount,
+                        toProcessCount, skippedUnmanagedListener, skippedCutoffMapped);
+
+                    if (tikCounters.Length == 0)
+                    {
+                        _logger.LogInformation("No changed eligible-mapped cases found. Listener phase has nothing to process.");
+                        newOrUpdatedCases = new List<OdcanitCase>();
+                    }
+                    else
+                    {
+                        // B.3) Load full enriched case snapshots
+                        stageTimer.Restart();
+                        newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
+                        stageTimer.Stop();
+                        _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
+                            stageTimer.ElapsedMilliseconds, newOrUpdatedCases.Count);
+                    }
+                }
             }
             else
             {
-                // ── Load cases from Odcanit ──
+                // Legacy/allowlist mode: use DetermineTikCountersToLoadAsync as before
                 stageTimer.Restart();
-                newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
+                tikCounters = await DetermineTikCountersToLoadAsync(ct);
                 stageTimer.Stop();
-                _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
-                    stageTimer.ElapsedMilliseconds, newOrUpdatedCases.Count);
+                _logger.LogInformation("Stage: ResolveTikCounters completed in {ElapsedMs}ms, count={Count}",
+                    stageTimer.ElapsedMilliseconds, tikCounters.Length);
+                eligibleMappedSet = new HashSet<int>();
 
-                // ── Listener gating: filter to Managed Universe only ──
-                // Rule: Listener NEVER creates items. Only updates mapped + eligible cases.
-                if (listenerUpdateOnly && cutoffDate.HasValue)
+                if (tikCounters.Length == 0)
+                {
+                    newOrUpdatedCases = new List<OdcanitCase>();
+                }
+                else
                 {
                     stageTimer.Restart();
-                    var mappedTikCounters = await _integrationDb.MondayItemMappings
-                        .AsNoTracking()
-                        .Where(m => m.BoardId == boardIdToUse)
-                        .Select(m => m.TikCounter)
-                        .Distinct()
-                        .ToListAsync(ct);
-                    var mappedSet = new HashSet<int>(mappedTikCounters);
-                    var cutoff = cutoffDate.Value;
-                    var beforeFilter = newOrUpdatedCases.Count;
-
-                    newOrUpdatedCases = newOrUpdatedCases.Where(c =>
-                    {
-                        var isMapped = mappedSet.Contains(c.TikCounter);
-                        var caseDate = c.tsCreateDate?.Date;
-                        var isEligible = caseDate.HasValue && caseDate.Value >= cutoff;
-
-                        if (!isMapped)
-                        {
-                            // Listener never creates — skip unmapped entirely
-                            skippedUnmanagedListener++;
-                            _logger.LogDebug(
-                                "LISTENER | Skipped unmapped case (bootstrap handles creation): TikCounter={TikCounter}, tsCreateDate={CreateDate}",
-                                c.TikCounter, caseDate?.ToString("yyyy-MM-dd") ?? "<null>");
-                            return false;
-                        }
-
-                        if (!isEligible)
-                        {
-                            skippedCutoffMapped++;
-                            _logger.LogDebug(
-                                "LISTENER | Skipped pre-cutoff mapped case: TikCounter={TikCounter}, tsCreateDate={CreateDate}, CutoffDate={Cutoff}",
-                                c.TikCounter, caseDate?.ToString("yyyy-MM-dd") ?? "<null>", cutoff.ToString("yyyy-MM-dd"));
-                            return false;
-                        }
-
-                        // Mapped + eligible
-                        eligibleMapped++;
-                        return true;
-                    }).ToList();
-
+                    newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
                     stageTimer.Stop();
-                    _logger.LogInformation(
-                        "Stage: ListenerGating completed in {ElapsedMs}ms. CutoffDate={CutoffDate}, sinceUtc={SinceUtc}, " +
-                        "TotalFromFeed={TotalFromFeed}, Before={Before}, After={After}, " +
-                        "EligibleMapped={EligibleMapped}, SkippedUnmanagedListener={SkippedUnmanaged}, " +
-                        "SkippedCutoffMapped={SkippedCutoffMapped}",
-                        stageTimer.ElapsedMilliseconds,
-                        cutoff.ToString("yyyy-MM-dd"),
-                        _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<n/a>",
-                        tikCounters.Length, beforeFilter, newOrUpdatedCases.Count,
-                        eligibleMapped, skippedUnmanagedListener, skippedCutoffMapped);
+                    _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
+                        stageTimer.ElapsedMilliseconds, newOrUpdatedCases.Count);
                 }
             }
 
@@ -624,7 +710,14 @@ namespace Odmon.Worker.Services
                 MaxItems = maxItems,
                 CutoffDate = cutoffDate?.ToString("yyyy-MM-dd"),
                 SinceUtc = _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss"),
-                TotalFromFeed = tikCounters.Length,
+                // Detection counters
+                EligibleFromOdcanit = eligibleFromOdcanitCount,
+                Mapped = mappedCount,
+                EligibleMapped = eligibleMappedCount,
+                FeedRaw = feedRawCount,
+                FeedIntersected = feedIntersectedCount,
+                Fallback = fallbackCount,
+                ToProcess = toProcessCount,
                 // Bootstrap counters
                 BootstrapTotalFromOdcanit = bootstrapResult.TotalFromOdcanit,
                 BootstrapAlreadyMapped = bootstrapResult.AlreadyMapped,
@@ -652,7 +745,7 @@ namespace Odmon.Worker.Services
                 CreatedAtUtc = DateTime.UtcNow,
                 Source = "SyncService",
                 Level = totalFailed > 0 ? "Warning" : "Info",
-                Message = $"Run {runId}: bootstrap_onboarded={bootstrapCreated}, listener_total={batch.Count}, success={successCount}, created={created}, updated={updated}, skipped={skippedNoChange}, skippedCutoffMapped={skippedCutoffMapped}, skippedUnmanaged={skippedUnmanagedListener}, skippedInactive={skippedInactive}, failed={totalFailed}, duration={totalDurationMs}ms",
+                Message = $"Run {runId}: bootstrap_onboarded={bootstrapCreated}, eligibleMapped={eligibleMappedCount}, feedIntersected={feedIntersectedCount}, fallback={fallbackCount}, toProcess={toProcessCount}, updated={updated}, skipped={skippedNoChange}, skippedCutoff={skippedCutoffMapped}, skippedUnmanaged={skippedUnmanagedListener}, skippedInactive={skippedInactive}, failed={totalFailed}, duration={totalDurationMs}ms",
                 Details = JsonSerializer.Serialize(runSummary)
             });
 
@@ -674,14 +767,16 @@ namespace Odmon.Worker.Services
             _logger.LogInformation(
                 "SYNC RUN SUMMARY | RunId={RunId} | CutoffDate={CutoffDate} | " +
                 "Bootstrap: Onboarded={BootstrapOnboarded}, FromOdcanit={BootstrapFromOdcanit}, AlreadyMapped={BootstrapAlreadyMapped}, Failed={BootstrapFailed} | " +
-                "Listener: sinceUtc={SinceUtc}, FromFeed={TotalFromFeed}, Updated={Updated}, " +
-                "SkippedNoChange={SkippedNoChange}, SkippedCutoffMapped={SkippedCutoffMapped}, SkippedUnmanaged={SkippedUnmanaged}, SkippedInactive={SkippedInactive} | " +
+                "Listener: sinceUtc={SinceUtc}, EligibleMapped={EligibleMapped}, FeedRaw={FeedRaw}, FeedIntersected={FeedIntersected}, " +
+                "Fallback={Fallback}, ToProcess={ToProcess}, Updated={Updated}, " +
+                "SkippedNoChange={SkippedNoChange}, SkippedCutoff={SkippedCutoff}, SkippedUnmanaged={SkippedUnmanaged}, SkippedInactive={SkippedInactive} | " +
                 "Failed={Failed} | Duration={DurationMs}ms",
                 runId,
                 cutoffDate?.ToString("yyyy-MM-dd") ?? "<not_configured>",
                 bootstrapCreated, bootstrapResult.TotalFromOdcanit, bootstrapResult.AlreadyMapped, bootstrapResult.Failed,
                 _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<n/a>",
-                tikCounters.Length, updated,
+                eligibleMappedCount, feedRawCount, feedIntersectedCount,
+                fallbackCount, toProcessCount, updated,
                 skippedNoChange, skippedCutoffMapped, skippedUnmanagedListener, skippedInactive,
                 totalFailed, totalDurationMs);
 

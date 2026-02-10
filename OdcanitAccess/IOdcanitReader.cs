@@ -15,6 +15,17 @@ namespace Odmon.Worker.OdcanitAccess
         /// Used by the bootstrap phase to discover eligible cases independently of the change feed.
         /// </summary>
         Task<List<int>> GetTikCountersSinceCutoffAsync(DateTime cutoffDate, CancellationToken ct);
+
+        /// <summary>
+        /// Returns TikCounters from vwExportToOuterSystems_Files where tsModifyDate >= sinceUtc,
+        /// restricted to the provided eligibleMappedTikCounters set.
+        /// Used as a deterministic fallback when the change feed may miss edits.
+        /// Chunks the IN clause to avoid SQL parameter limits.
+        /// </summary>
+        Task<List<int>> GetModifiedTikCountersSinceAsync(
+            DateTime sinceUtc,
+            IReadOnlyCollection<int> eligibleMappedTikCounters,
+            CancellationToken ct);
     }
 }
 

@@ -133,6 +133,50 @@ namespace Odmon.Worker.OdcanitAccess
             return tikCounters;
         }
 
+        public async Task<List<int>> GetModifiedTikCountersSinceAsync(
+            DateTime sinceUtc,
+            IReadOnlyCollection<int> eligibleMappedTikCounters,
+            CancellationToken ct)
+        {
+            if (eligibleMappedTikCounters == null || eligibleMappedTikCounters.Count == 0)
+            {
+                return new List<int>();
+            }
+
+            _logger.LogDebug(
+                "GetModifiedTikCountersSinceAsync: querying vwExportToOuterSystems_Files WHERE tsModifyDate >= {SinceUtc:o} for {Count} eligible TikCounters",
+                sinceUtc, eligibleMappedTikCounters.Count);
+
+            const int chunkSize = 500;
+            var result = new HashSet<int>();
+            var eligibleList = eligibleMappedTikCounters.Distinct().ToList();
+
+            // Chunk to avoid SQL IN parameter limits
+            for (int i = 0; i < eligibleList.Count; i += chunkSize)
+            {
+                var chunk = eligibleList.Skip(i).Take(chunkSize).ToList();
+                var chunkSet = new HashSet<int>(chunk);
+
+                var modified = await _db.Cases
+                    .AsNoTracking()
+                    .Where(c => chunkSet.Contains(c.TikCounter)
+                                && c.tsModifyDate.HasValue
+                                && c.tsModifyDate.Value >= sinceUtc)
+                    .Select(c => c.TikCounter)
+                    .Distinct()
+                    .ToListAsync(ct);
+
+                foreach (var tc in modified)
+                    result.Add(tc);
+            }
+
+            _logger.LogInformation(
+                "GetModifiedTikCountersSinceAsync: found {Count} modified TikCounters (tsModifyDate >= {SinceUtc:yyyy-MM-dd HH:mm:ss}) out of {EligibleCount} eligible",
+                result.Count, sinceUtc, eligibleMappedTikCounters.Count);
+
+            return result.ToList();
+        }
+
         public async Task<List<OdcanitDiaryEvent>> GetDiaryEventsByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct)
         {
             var list = tikCounters?.Distinct().ToList() ?? new List<int>();
