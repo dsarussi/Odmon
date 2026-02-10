@@ -233,13 +233,21 @@ namespace Odmon.Worker.Services
                     listenerStartedAtUtc.Value, _changeFeedWatermark.Value, listenerUpdateOnly);
             }
 
-            // ── Stage: Listener-mode gating ──
-            // Mapped cases → always allowed (update path).
-            // Unmapped cases in listener mode:
-            //   - If ListenerUpdateOnly=true: allow creation ONLY if tsCreateDate >= StartedAtUtc (T0).
-            //   - Null tsCreateDate → blocked (strict).
-            // Unmapped cases when ListenerUpdateOnly=false: legacy watermark-based filtering.
-            int skippedOldUnmapped = 0, skippedUnmappedNoCreateDate = 0;
+            // ── Stage: Cutoff-based eligibility gating ──
+            // Business rule: only manage cases opened on or after a fixed cutoff date.
+            // tsCreateDate from Odcanit is DATE-only (time=00:00:00), so we compare date-to-date.
+            // Cases before cutoff are skipped regardless of whether they have a mapping.
+            int skippedCutoffMapped = 0, skippedCutoffUnmapped = 0;
+            int eligibleMapped = 0, eligibleUnmapped = 0;
+            DateTime? cutoffDate = null;
+
+            var cutoffStr = _config.GetValue<string>("Sync:ListenerCreationCutoffDate");
+            if (listenerUpdateOnly && !string.IsNullOrWhiteSpace(cutoffStr)
+                && DateTime.TryParse(cutoffStr, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var parsedCutoff))
+            {
+                cutoffDate = parsedCutoff.Date;
+            }
 
             if (_changeFeedWatermark.HasValue)
             {
@@ -253,55 +261,67 @@ namespace Odmon.Worker.Services
                 var mappedSet = new HashSet<int>(existingMappedTikCounters);
 
                 var beforeFilter = newOrUpdatedCases.Count;
-                var t0 = listenerStartedAtUtc!.Value;
 
-                newOrUpdatedCases = newOrUpdatedCases.Where(c =>
+                if (cutoffDate.HasValue)
                 {
-                    // Already mapped: always process (update path)
-                    if (mappedSet.Contains(c.TikCounter))
-                        return true;
+                    var cutoff = cutoffDate.Value;
 
-                    // Unmapped: apply creation rule
-                    if (listenerUpdateOnly)
+                    newOrUpdatedCases = newOrUpdatedCases.Where(c =>
                     {
-                        // Strict: only create if tsCreateDate >= T0 (StartedAtUtc)
-                        if (!c.tsCreateDate.HasValue)
+                        var isMapped = mappedSet.Contains(c.TikCounter);
+                        // Eligibility: tsCreateDate.Date >= cutoffDate (date-only comparison)
+                        var caseDate = c.tsCreateDate?.Date;
+                        var isEligible = caseDate.HasValue && caseDate.Value >= cutoff;
+
+                        if (!isEligible)
                         {
-                            skippedUnmappedNoCreateDate++;
-                            _logger.LogDebug(
-                                "Skipped unmapped case (reason=no_tsCreateDate): TikCounter={TikCounter}, TikNumber={TikNumber}",
-                                c.TikCounter, c.TikNumber ?? "<null>");
+                            if (isMapped)
+                            {
+                                skippedCutoffMapped++;
+                                _logger.LogDebug(
+                                    "Skipped pre-cutoff mapped case: TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate}, CutoffDate={Cutoff}",
+                                    c.TikCounter, c.TikNumber ?? "<null>",
+                                    caseDate?.ToString("yyyy-MM-dd") ?? "<null>", cutoff.ToString("yyyy-MM-dd"));
+                            }
+                            else
+                            {
+                                skippedCutoffUnmapped++;
+                                _logger.LogDebug(
+                                    "Skipped pre-cutoff unmapped case: TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate}, CutoffDate={Cutoff}",
+                                    c.TikCounter, c.TikNumber ?? "<null>",
+                                    caseDate?.ToString("yyyy-MM-dd") ?? "<null>", cutoff.ToString("yyyy-MM-dd"));
+                            }
                             return false;
                         }
-                        if (c.tsCreateDate.Value < t0)
-                        {
-                            skippedOldUnmapped++;
-                            _logger.LogDebug(
-                                "Skipped unmapped case (reason=tsCreateDate_before_T0): TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate:yyyy-MM-dd HH:mm:ss}, T0={T0:yyyy-MM-dd HH:mm:ss}",
-                                c.TikCounter, c.TikNumber ?? "<null>", c.tsCreateDate.Value, t0);
-                            return false;
-                        }
-                        // tsCreateDate >= T0: allow creation
+
+                        // Eligible
+                        if (isMapped) eligibleMapped++;
+                        else eligibleUnmapped++;
                         return true;
-                    }
-                    else
+                    }).ToList();
+                }
+                else
+                {
+                    // No cutoff configured: count only, no filtering
+                    foreach (var c in newOrUpdatedCases)
                     {
-                        // Legacy: allow creation if tsCreateDate >= change-feed watermark
-                        if (c.tsCreateDate.HasValue && c.tsCreateDate.Value < _changeFeedWatermark.Value)
-                        {
-                            skippedOldUnmapped++;
-                            return false;
-                        }
-                        return true;
+                        if (mappedSet.Contains(c.TikCounter)) eligibleMapped++;
+                        else eligibleUnmapped++;
                     }
-                }).ToList();
+                }
 
                 stageTimer.Stop();
                 _logger.LogInformation(
-                    "Stage: ListenerGating completed in {ElapsedMs}ms. ListenerUpdateOnly={ListenerUpdateOnly}, T0={T0}, Before={Before}, After={After}, SkippedOldUnmapped={SkippedOld}, SkippedNoCreateDate={SkippedNoDate}, AlreadyMapped={Mapped}",
-                    stageTimer.ElapsedMilliseconds, listenerUpdateOnly,
-                    listenerStartedAtUtc?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<null>",
-                    beforeFilter, newOrUpdatedCases.Count, skippedOldUnmapped, skippedUnmappedNoCreateDate, mappedSet.Count);
+                    "Stage: CutoffGating completed in {ElapsedMs}ms. CutoffDate={CutoffDate}, sinceUtc={SinceUtc}, " +
+                    "TotalFromFeed={TotalFromFeed}, Before={Before}, After={After}, " +
+                    "EligibleMapped={EligibleMapped}, EligibleUnmapped={EligibleUnmapped}, " +
+                    "SkippedCutoffMapped={SkippedCutoffMapped}, SkippedCutoffUnmapped={SkippedCutoffUnmapped}",
+                    stageTimer.ElapsedMilliseconds,
+                    cutoffDate?.ToString("yyyy-MM-dd") ?? "<not_configured>",
+                    _changeFeedWatermark.Value.ToString("yyyy-MM-dd HH:mm:ss"),
+                    tikCounters.Length, beforeFilter, newOrUpdatedCases.Count,
+                    eligibleMapped, eligibleUnmapped,
+                    skippedCutoffMapped, skippedCutoffUnmapped);
             }
 
             // ── Stage: Derive DocumentType ──
@@ -338,7 +358,7 @@ namespace Odmon.Worker.Services
             var processed = new List<object>();
             int created = 0, updated = 0;
             int skippedNonTest = 0, skippedExistingNonTest = 0, skippedNoChange = 0, skippedNonDemo = 0;
-            int skippedUnmappedGuardrail = 0, skippedInactive = 0;
+            int skippedInactive = 0;
             int failed = 0;
 
             foreach (var c in batch)
@@ -425,23 +445,19 @@ namespace Odmon.Worker.Services
                 switch (syncAction.Action)
                 {
                     case "create":
-                        // ── Hard guardrail: block creation if tsCreateDate < T0 or null in listener mode ──
-                        if (listenerUpdateOnly && listenerStartedAtUtc.HasValue)
+                        // ── Defense-in-depth: block pre-cutoff creation even if gating stage missed it ──
+                        if (listenerUpdateOnly && cutoffDate.HasValue)
                         {
-                            var blockReason = !c.tsCreateDate.HasValue
-                                ? "no_tsCreateDate"
-                                : c.tsCreateDate.Value < listenerStartedAtUtc.Value
-                                    ? $"tsCreateDate({c.tsCreateDate.Value:yyyy-MM-dd HH:mm:ss})<T0({listenerStartedAtUtc.Value:yyyy-MM-dd HH:mm:ss})"
-                                    : null;
-
-                            if (blockReason != null)
+                            var caseDate = c.tsCreateDate?.Date;
+                            if (!caseDate.HasValue || caseDate.Value < cutoffDate.Value)
                             {
-                                action = "skipped_unmapped_listener_guardrail";
-                                skippedUnmappedGuardrail++;
+                                action = "skipped_pre_cutoff_guardrail";
                                 _logger.LogWarning(
-                                    "GUARDRAIL: Blocked Monday item creation in listener mode. TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, reason={Reason}",
-                                    c.TikCounter, c.TikNumber ?? "<null>", caseBoardId, blockReason);
-                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, $"Blocked: {blockReason}"));
+                                    "GUARDRAIL: Blocked pre-cutoff creation. TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate}, CutoffDate={Cutoff}",
+                                    c.TikCounter, c.TikNumber ?? "<null>",
+                                    caseDate?.ToString("yyyy-MM-dd") ?? "<null>",
+                                    cutoffDate.Value.ToString("yyyy-MM-dd"));
+                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, "Blocked: pre-cutoff guardrail"));
                                 continue;
                             }
                         }
@@ -631,6 +647,9 @@ namespace Odmon.Worker.Services
                 FinishedAtUtc = DateTime.UtcNow,
                 DurationMs = totalDurationMs,
                 MaxItems = maxItems,
+                CutoffDate = cutoffDate?.ToString("yyyy-MM-dd"),
+                SinceUtc = _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss"),
+                TotalFromFeed = tikCounters.Length,
                 Total = batch.Count,
                 Success = successCount,
                 Created = created,
@@ -639,9 +658,8 @@ namespace Odmon.Worker.Services
                 SkippedExistingNonTestMapping = skippedExistingNonTest,
                 SkippedNonDemo = skippedNonDemo,
                 SkippedNoChange = skippedNoChange,
-                SkippedOldUnmapped = skippedOldUnmapped,
-                SkippedUnmappedNoCreateDate = skippedUnmappedNoCreateDate,
-                SkippedUnmappedGuardrail = skippedUnmappedGuardrail,
+                SkippedCutoffMapped = skippedCutoffMapped,
+                SkippedCutoffUnmapped = skippedCutoffUnmapped,
                 SkippedInactive = skippedInactive,
                 Failed = failed,
                 Processed = processed
@@ -652,7 +670,7 @@ namespace Odmon.Worker.Services
                 CreatedAtUtc = DateTime.UtcNow,
                 Source = "SyncService",
                 Level = failed > 0 ? "Warning" : "Info",
-                Message = $"Run {runId}: total={batch.Count}, success={successCount}, created={created}, updated={updated}, skipped={skippedNoChange}, skippedOldUnmapped={skippedOldUnmapped}, skippedNoDate={skippedUnmappedNoCreateDate}, skippedInactive={skippedInactive}, failed={failed}, duration={totalDurationMs}ms",
+                Message = $"Run {runId}: total={batch.Count}, success={successCount}, created={created}, updated={updated}, skipped={skippedNoChange}, skippedCutoffMapped={skippedCutoffMapped}, skippedCutoffUnmapped={skippedCutoffUnmapped}, skippedInactive={skippedInactive}, failed={failed}, duration={totalDurationMs}ms",
                 Details = JsonSerializer.Serialize(runSummary)
             });
 
@@ -672,13 +690,14 @@ namespace Odmon.Worker.Services
 
             // ── SYNC RUN SUMMARY ──
             _logger.LogInformation(
-                "SYNC RUN SUMMARY | RunId={RunId} | Total={Total} | Success={Success} | Created={Created} | Updated={Updated} | " +
-                "SkippedNoChange={SkippedNoChange} | SkippedOldUnmapped={SkippedOldUnmapped} | SkippedUnmappedNoCreateDate={SkippedNoDate} | SkippedInactive={SkippedInactive} | " +
-                "Failed={Failed} | Duration={DurationMs}ms | ListenerStartedAtUtc={T0} | ListenerUpdateOnly={ListenerUpdateOnly} | ReviveInactiveItems={ReviveInactiveItems}",
-                runId, batch.Count, successCount, created, updated, skippedNoChange,
-                skippedOldUnmapped, skippedUnmappedNoCreateDate, skippedInactive, failed, totalDurationMs,
-                listenerStartedAtUtc?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<not_listener_mode>",
-                listenerUpdateOnly, _mondaySettings.ReviveInactiveItems);
+                "SYNC RUN SUMMARY | RunId={RunId} | Total={Total} | Created={Created} | Updated={Updated} | " +
+                "SkippedNoChange={SkippedNoChange} | SkippedCutoffMapped={SkippedCutoffMapped} | SkippedCutoffUnmapped={SkippedCutoffUnmapped} | SkippedInactive={SkippedInactive} | " +
+                "Failed={Failed} | Duration={DurationMs}ms | CutoffDate={CutoffDate} | sinceUtc={SinceUtc} | TotalFromFeed={TotalFromFeed}",
+                runId, batch.Count, created, updated, skippedNoChange,
+                skippedCutoffMapped, skippedCutoffUnmapped, skippedInactive, failed, totalDurationMs,
+                cutoffDate?.ToString("yyyy-MM-dd") ?? "<not_configured>",
+                _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<n/a>",
+                tikCounters.Length);
 
             // ── Failure rate notification ──
             if (batch.Count > 0 && failed > 0)
