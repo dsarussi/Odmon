@@ -192,6 +192,55 @@ namespace Odmon.Worker.Services
             _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
                 stageTimer.ElapsedMilliseconds, newOrUpdatedCases.Count);
 
+            // ── Stage: Filter to new cases only (listener mode) ──
+            // In change-feed mode, skip cases that have no mapping AND were created before the watermark.
+            // These are old cases that got an edit but were never synced — they should not trigger a new Monday item.
+            // Cases WITH an existing mapping always pass (they need updates).
+            if (_changeFeedWatermark.HasValue)
+            {
+                stageTimer.Restart();
+                var watermark = _changeFeedWatermark.Value;
+                var existingMappedTikCounters = await _integrationDb.MondayItemMappings
+                    .AsNoTracking()
+                    .Where(m => m.BoardId == boardIdToUse)
+                    .Select(m => m.TikCounter)
+                    .Distinct()
+                    .ToListAsync(ct);
+                var mappedSet = new HashSet<int>(existingMappedTikCounters);
+
+                var beforeFilter = newOrUpdatedCases.Count;
+                var skippedOld = new List<(int TikCounter, string? TikNumber, DateTime? Created)>();
+
+                newOrUpdatedCases = newOrUpdatedCases.Where(c =>
+                {
+                    // Already mapped: always process (update path)
+                    if (mappedSet.Contains(c.TikCounter))
+                        return true;
+
+                    // Not mapped: only create if tsCreateDate >= watermark (truly new case)
+                    if (c.tsCreateDate.HasValue && c.tsCreateDate.Value < watermark)
+                    {
+                        skippedOld.Add((c.TikCounter, c.TikNumber, c.tsCreateDate));
+                        return false;
+                    }
+
+                    // Not mapped, no tsCreateDate: allow creation (conservative; avoid losing cases)
+                    return true;
+                }).ToList();
+
+                stageTimer.Stop();
+                _logger.LogInformation(
+                    "Stage: NewCaseFilter completed in {ElapsedMs}ms. Before={Before}, After={After}, SkippedOld={SkippedOld} (created before watermark {Watermark:yyyy-MM-dd HH:mm:ss}), AlreadyMapped={Mapped}",
+                    stageTimer.ElapsedMilliseconds, beforeFilter, newOrUpdatedCases.Count, skippedOld.Count, watermark, mappedSet.Count);
+
+                foreach (var s in skippedOld)
+                {
+                    _logger.LogDebug(
+                        "Skipped old case (not newly opened): TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate:yyyy-MM-dd HH:mm:ss}, Watermark={Watermark:yyyy-MM-dd HH:mm:ss}",
+                        s.TikCounter, s.TikNumber ?? "<null>", s.Created, watermark);
+                }
+            }
+
             // ── Stage: Derive DocumentType ──
             stageTimer.Restart();
             foreach (var c in newOrUpdatedCases)
@@ -550,7 +599,9 @@ namespace Odmon.Worker.Services
             } // end try (run-level)
             finally
             {
-                await ReleaseRunLockAsync(runId, ct);
+                // Use CancellationToken.None so lock release succeeds even during Ctrl+C shutdown.
+                // The host token (ct) may already be canceled at this point.
+                await ReleaseRunLockAsync(runId, CancellationToken.None);
             }
         }
 
@@ -847,8 +898,23 @@ namespace Odmon.Worker.Services
             TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
 
             // Legal user data (UserData view vwExportToOuterSystems_UserData): צד תובע / צד נתבע -> Monday status columns
-            TryAddStatusLabelColumn(columnValues, "color_mkxh8gsq", MapPlaintiffSideLabel(c.PlaintiffSideRaw));
-            TryAddStatusLabelColumn(columnValues, "color_mkxh5x31", MapDefendantSideLabel(c.DefendantSideRaw));
+            // These are NOT critical: items are created even if missing; values will be filled on a future update.
+            var plaintiffLabel = MapPlaintiffSideLabel(c.PlaintiffSideRaw);
+            var defendantLabel = MapDefendantSideLabel(c.DefendantSideRaw);
+            if (string.IsNullOrWhiteSpace(plaintiffLabel))
+            {
+                _logger.LogWarning(
+                    "PlaintiffSide missing for TikCounter={TikCounter}, TikNumber={TikNumber}; column omitted, will update later.",
+                    c.TikCounter, c.TikNumber ?? "<null>");
+            }
+            if (string.IsNullOrWhiteSpace(defendantLabel))
+            {
+                _logger.LogWarning(
+                    "DefendantSide missing for TikCounter={TikCounter}, TikNumber={TikNumber}; column omitted, will update later.",
+                    c.TikCounter, c.TikNumber ?? "<null>");
+            }
+            TryAddStatusLabelColumn(columnValues, "color_mkxh8gsq", plaintiffLabel);
+            TryAddStatusLabelColumn(columnValues, "color_mkxh5x31", defendantLabel);
             TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
 
             // DocumentType was already derived and assigned immediately after loading the case
@@ -2436,6 +2502,8 @@ namespace Odmon.Worker.Services
 
         // Critical columns that require strict validation (fail-fast)
         // NOTE: Column type is now detected dynamically from Monday metadata, not hardcoded
+        // PlaintiffSide and DefendantSide are NOT critical: they may be null for newly opened cases
+        // and will be populated on a subsequent update run once available in Odcanit.
         private static readonly List<CriticalColumnDefinition> CriticalColumns = new()
         {
             new CriticalColumnDefinition
@@ -2443,18 +2511,6 @@ namespace Odmon.Worker.Services
                 FieldName = "DocumentType",
                 GetValue = c => c.DocumentType,
                 ValidationMessage = "Document type (סוג מסמך) is critical - prevents automatic creation of wrong document types (e.g., 'כתב תביעה' vs 'כתב הגנה')"
-            },
-            new CriticalColumnDefinition
-            {
-                FieldName = "PlaintiffSide",
-                GetValue = c => c.PlaintiffSideRaw,
-                ValidationMessage = "Plaintiff side (צד תובע) is critical - prevents incorrect party designation"
-            },
-            new CriticalColumnDefinition
-            {
-                FieldName = "DefendantSide",
-                GetValue = c => c.DefendantSideRaw,
-                ValidationMessage = "Defendant side (צד נתבע) is critical - prevents incorrect party designation"
             }
         };
 
@@ -2829,23 +2885,29 @@ namespace Odmon.Worker.Services
 
         /// <summary>
         /// Releases the run lock after a sync run completes.
+        /// Uses a short internal timeout (10s) instead of the host token,
+        /// ensuring the lock is released even during Ctrl+C shutdown.
         /// </summary>
         private async Task ReleaseRunLockAsync(string runId, CancellationToken ct)
         {
             try
             {
-                var lockRow = await _integrationDb.SyncRunLocks.FirstOrDefaultAsync(x => x.Id == 1, ct);
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                var token = cts.Token;
+
+                var lockRow = await _integrationDb.SyncRunLocks.FirstOrDefaultAsync(x => x.Id == 1, token);
                 if (lockRow != null && lockRow.LockedByRunId == runId)
                 {
                     lockRow.LockedByRunId = null;
                     lockRow.LockedAtUtc = null;
                     lockRow.ExpiresAtUtc = null;
-                    await _integrationDb.SaveChangesAsync(ct);
+                    await _integrationDb.SaveChangesAsync(token);
+                    _logger.LogInformation("Run-lock released successfully for RunId={RunId}", runId);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to release run-lock for RunId={RunId}", runId);
+                _logger.LogWarning(ex, "Failed to release run-lock for RunId={RunId}. Lock will auto-expire.", runId);
             }
         }
     }

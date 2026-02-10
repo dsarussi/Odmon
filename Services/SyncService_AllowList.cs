@@ -10,11 +10,21 @@ namespace Odmon.Worker.Services
     public partial class SyncService
     {
         /// <summary>
+        /// The watermark used by the most recent change-feed query.
+        /// Set by DetermineTikCountersToLoadAsync; used by the main loop
+        /// to filter out old cases that should not trigger creates.
+        /// Null when using allowlist mode (no filtering needed).
+        /// </summary>
+        private DateTime? _changeFeedWatermark;
+
+        /// <summary>
         /// Determines which TikCounters to load based on OdcanitLoad configuration.
-        /// Enforces allowlist if enabled, otherwise uses incremental change-feed + existing mappings.
+        /// Enforces allowlist if enabled, otherwise uses incremental change-feed.
+        /// Sets _changeFeedWatermark for downstream "new case only" filtering.
         /// </summary>
         private async Task<int[]> DetermineTikCountersToLoadAsync(CancellationToken ct)
         {
+            _changeFeedWatermark = null;
             // ── Mode 1: Allowlist (debug / controlled rollout) ──
             if (_odcanitLoadOptions.EnableAllowList)
             {
@@ -58,6 +68,7 @@ namespace Odmon.Worker.Services
 
             // Determine watermark: last successful run timestamp from SyncLogs
             var sinceUtc = await GetChangeFeedWatermarkAsync(ct);
+            _changeFeedWatermark = sinceUtc;
 
             _logger.LogInformation(
                 "Change feed watermark: sinceUtc={SinceUtc:yyyy-MM-dd HH:mm:ss}",
