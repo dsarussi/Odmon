@@ -95,6 +95,7 @@ namespace Odmon.Worker.Data
             {
                 b.ToTable("SyncRunLocks");
                 b.HasKey(x => x.Id);
+                b.Property(x => x.Id).ValueGeneratedNever();
                 b.Property(x => x.LockedByRunId).HasMaxLength(64);
             });
 

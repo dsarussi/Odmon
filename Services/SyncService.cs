@@ -130,7 +130,7 @@ namespace Odmon.Worker.Services
                 dataSource = "Odcanit";
                 testMode = false;
             }
-            
+
             var safetySection = _config.GetSection("Safety");
             var testBoardId = safetySection.GetValue<long>("TestBoardId", 0);
             var testGroupId = _mondaySettings.TestGroupId;
@@ -229,7 +229,7 @@ namespace Odmon.Worker.Services
             {
                 var caseStopwatch = Stopwatch.StartNew();
                 try
-                {
+            {
                 var caseBoardId = boardIdToUse;
                 var caseGroupId = groupIdToUse;
 
@@ -396,11 +396,11 @@ namespace Odmon.Worker.Services
                                         await UpdateMondayItemAsync(mapping!, c, caseBoardId, itemName, syncAction.RequiresNameUpdate, syncAction.RequiresDataUpdate, syncAction.RequiresHearingUpdate, testMode, ct);
                                         return true;
                                     }, "update_item", c.TikCounter, ct);
-                                    updated++;
-                                    _logger.LogInformation(
+                                updated++;
+                                _logger.LogInformation(
                                         "Successfully updated Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, Retries={Retries}",
                                         c.TikNumber, c.TikCounter, mapping.MondayItemId, updateRetries);
-                                }
+                            }
                             }
                             catch (CriticalFieldValidationException critEx)
                             {
@@ -532,10 +532,10 @@ namespace Odmon.Worker.Services
                     catch (Exception nex) { _logger.LogWarning(nex, "Error notifier failed"); }
                 }
                 else
-                {
-                    _logger.LogWarning(
+            {
+                _logger.LogWarning(
                         "Sync run {RunId} completed with {FailedCount} failure(s). Failed cases are persisted in SyncFailures table.",
-                        runId, failed);
+                    runId, failed);
                 }
             }
 
@@ -728,7 +728,7 @@ namespace Odmon.Worker.Services
             // Date/hour: when gating passes
             if (canPublishDateHour)
             {
-                TryAddDateColumn(columnValues, _mondaySettings.HearingDateColumnId, c.HearingDate);
+            TryAddDateColumn(columnValues, _mondaySettings.HearingDateColumnId, c.HearingDate);
                 await TryAddHourColumnAsync(columnValues, boardId, _mondaySettings.HearingHourColumnId, c.HearingTime, c.TikCounter, ct);
                 if (!string.IsNullOrWhiteSpace(_mondaySettings.HearingDateColumnId)) hearingColumnsIncluded.Add(_mondaySettings.HearingDateColumnId);
                 if (!string.IsNullOrWhiteSpace(_mondaySettings.HearingHourColumnId) && c.HearingTime.HasValue) hearingColumnsIncluded.Add(_mondaySettings.HearingHourColumnId);
@@ -859,9 +859,9 @@ namespace Odmon.Worker.Services
             if (!isClient6)
             {
                 var documentType = c.DocumentType;
-                if (!string.IsNullOrWhiteSpace(documentType))
-                {
-                    TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
+            if (!string.IsNullOrWhiteSpace(documentType))
+            {
+                TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
                 }
             }
             else
@@ -2094,13 +2094,13 @@ namespace Odmon.Worker.Services
             string lookupMethod = "none";
 
             // Priority 1: Find mapping by TikCounter + BoardId (source of truth)
-            mapping = await _integrationDb.MondayItemMappings
+                mapping = await _integrationDb.MondayItemMappings
                 .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter && m.BoardId == boardId, ct);
-            
-            if (mapping != null)
-            {
+                
+                if (mapping != null)
+                {
                 lookupMethod = "mapping_by_tikcounter_boardid";
-                _logger.LogDebug(
+                    _logger.LogDebug(
                     "Found mapping by TikCounter+BoardId: TikCounter={TikCounter}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikNumber={TikNumber}",
                     c.TikCounter, boardId, mapping.MondayItemId, mapping.TikNumber ?? "<null>");
             }
@@ -2355,18 +2355,18 @@ namespace Odmon.Worker.Services
             var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: true, ct);
             var mondayItemId = await _mondayClient.CreateItemAsync(boardId, groupId, itemName, columnValuesJson, ct);
 
-                        var newMapping = new MondayItemMapping
-                        {
-                            TikCounter = c.TikCounter,
-                            TikNumber = c.TikNumber,
-                            BoardId = boardId,
-                            MondayItemId = mondayItemId,
-                            LastSyncFromOdcanitUtc = DateTime.UtcNow,
+            var newMapping = new MondayItemMapping
+            {
+                TikCounter = c.TikCounter,
+                TikNumber = c.TikNumber,
+                BoardId = boardId,
+                MondayItemId = mondayItemId,
+                LastSyncFromOdcanitUtc = DateTime.UtcNow,
                             OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
-                            MondayChecksum = itemName,
+                MondayChecksum = itemName,
                             HearingChecksum = ComputeHearingChecksum(c),
-                            IsTest = testMode
-                        };
+                IsTest = testMode
+            };
             _integrationDb.MondayItemMappings.Add(newMapping);
 
             return mondayItemId;

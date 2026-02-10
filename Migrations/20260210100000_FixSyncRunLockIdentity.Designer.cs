@@ -12,8 +12,8 @@ using Odmon.Worker.Data;
 namespace Odmon.Worker.Migrations
 {
     [DbContext(typeof(IntegrationDbContext))]
-    [Migration("20260208133054_AddSyncRunLock")]
-    partial class AddSyncRunLock
+    [Migration("20260210100000_FixSyncRunLockIdentity")]
+    partial class FixSyncRunLockIdentity
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
