@@ -276,50 +276,37 @@ namespace Odmon.Worker.Services
                 }
                 catch (MondayApiException apiEx) when (apiEx.IsInactiveItemError())
                 {
-                    // ── Revive inactive item: create new, update mapping, retry once ──
-                    var oldItemId = effectiveItemId;
+                    // ── Monday item is inactive — skip, do NOT revive or create new item ──
                     _logger.LogWarning(
-                        "Monday item inactive during hearing sync: TikCounter={TikCounter}, OldMondayItemId={OldItemId}, attempting to revive.",
-                        mapping.TikCounter, oldItemId);
+                        "Monday item inactive; skipping update (NO revive). TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, Operation=hearing_sync",
+                        mapping.TikCounter, mapping.TikNumber ?? "<null>", boardId, effectiveItemId);
 
+                    // Persist as SyncFailure for tracking
                     try
                     {
-                        var groupId = _mondaySettings.ToDoGroupId ?? "";
-                        var itemName = mapping.TikNumber ?? mapping.TikCounter.ToString();
-                        var newItemId = await _mondayClient.CreateItemAsync(boardId, groupId, itemName, "{}", ct);
-
-                        // Update mapping in IntegrationDb
-                        var trackedMapping = await _integrationDb.MondayItemMappings
-                            .FirstOrDefaultAsync(m => m.TikCounter == mapping.TikCounter && m.BoardId == boardId, ct);
-                        if (trackedMapping != null)
+                        _integrationDb.SyncFailures.Add(new SyncFailure
                         {
-                            trackedMapping.MondayItemId = newItemId;
-                            trackedMapping.LastSyncFromOdcanitUtc = DateTime.UtcNow;
-                            await _integrationDb.SaveChangesAsync(ct);
-                        }
-
-                        _logger.LogWarning(
-                            "Revived inactive Monday item: TikCounter={TikCounter}, TikNumber={TikNumber}, OldItemId={OldItemId}, NewItemId={NewItemId}, action=revived_inactive_item",
-                            mapping.TikCounter, mapping.TikNumber ?? "<null>", oldItemId, newItemId);
-
-                        // Retry hearing update once on the new item
-                        effectiveItemId = newItemId;
-                        executedSteps.Clear();
-                        columnsToUpdate.Clear();
-                        await ExecuteHearingUpdatesAsync(
-                            boardId, effectiveItemId, mapping.TikCounter,
-                            statusChanged, meetStatus, label, statusColumnId, allowedStatusLabels,
-                            judgeChanged, cityChanged, hasJudgeName, hasCourtCity, judgeName, city,
-                            startDateChanged, canUpdateDateHour, hearing,
-                            executedSteps, columnsToUpdate, ct);
+                            RunId = $"hearing_{DateTime.UtcNow:yyyyMMddHHmmss}",
+                            TikCounter = mapping.TikCounter,
+                            TikNumber = mapping.TikNumber,
+                            BoardId = boardId,
+                            Operation = "hearing_update_skipped_inactive",
+                            ErrorType = "InactiveMondayItem",
+                            ErrorMessage = $"Monday item {effectiveItemId} is inactive. Skipped hearing update; no revive. Error: {apiEx.Message}",
+                            OccurredAtUtc = DateTime.UtcNow,
+                            RetryAttempts = 0,
+                            Resolved = false
+                        });
+                        await _integrationDb.SaveChangesAsync(ct);
                     }
-                    catch (Exception reviveEx)
+                    catch (Exception persistEx)
                     {
-                        _logger.LogError(reviveEx,
-                            "Failed to revive inactive item: TikCounter={TikCounter}, OldItemId={OldItemId}",
-                            mapping.TikCounter, oldItemId);
-                        continue;
+                        _logger.LogWarning(persistEx,
+                            "Failed to persist SyncFailure for inactive hearing item: TikCounter={TikCounter}",
+                            mapping.TikCounter);
                     }
+
+                    continue;
                 }
                 catch (Exception ex)
                 {
@@ -374,7 +361,6 @@ namespace Odmon.Worker.Services
 
         /// <summary>
         /// Executes the individual Monday API calls for hearing update (status, judge/city, date/hour).
-        /// Extracted to allow a single retry after reviving an inactive item.
         /// </summary>
         private async Task ExecuteHearingUpdatesAsync(
             long boardId, long mondayItemId, int tikCounter,

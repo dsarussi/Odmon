@@ -421,38 +421,34 @@ namespace Odmon.Worker.Services
                         {
                             try
                             {
+                                // Check if Monday item is active before attempting update
                                 var itemState = await _mondayClient.GetItemStateAsync(caseBoardId, mapping.MondayItemId, ct);
                                 if (itemState != null && !string.Equals(itemState, "active", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    var oldItemId = mapping.MondayItemId;
-                                    var columnValuesJson = await BuildColumnValuesJsonAsync(caseBoardId, c, forceNotStartedStatus: true, ct);
-                                    var (recreateResult, _) = await ExecuteWithRetryAsync(
-                                        () => _mondayClient.CreateItemAsync(caseBoardId, caseGroupId!, itemName, columnValuesJson, ct),
-                                        "recreate_inactive_item", c.TikCounter, ct);
-                                    mapping.MondayItemId = recreateResult;
-                                    mapping.OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
-                                    mapping.MondayChecksum = itemName;
-                                    mapping.HearingChecksum = ComputeHearingChecksum(c);
-                                    mapping.LastSyncFromOdcanitUtc = DateTime.UtcNow;
-                                    mapping.IsTest = testMode;
-                                    await _integrationDb.SaveChangesAsync(ct);
+                                    // Item is inactive/archived/deleted — skip, do NOT revive or create new item.
+                                    action = "skipped_inactive_monday_item";
                                     _logger.LogWarning(
-                                        "Monday item inactive (state={State}), created new item and updated mapping: TikCounter={TikCounter}, TikNumber={TikNumber}, oldItemId={OldItemId}, newItemId={NewItemId}",
-                                        itemState, c.TikCounter, c.TikNumber ?? "<null>", oldItemId, recreateResult);
-                                    updated++;
+                                        "Monday item inactive; skipping update (NO revive). TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, ItemState={ItemState}",
+                                        c.TikCounter, c.TikNumber ?? "<null>", caseBoardId, mapping.MondayItemId, itemState);
+
+                                    await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "update_skipped_inactive",
+                                        new InvalidOperationException($"Monday item {mapping.MondayItemId} is inactive (state={itemState}). Skipped update; no revive."),
+                                        0, ct);
+
+                                    processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, $"InactiveMondayItem (state={itemState})"));
+                                    continue;
                                 }
-                                else
+
+                                // Item is active — proceed with normal update
+                                var (__, updateRetries) = await ExecuteWithRetryAsync(async () =>
                                 {
-                                    var (__, updateRetries) = await ExecuteWithRetryAsync(async () =>
-                                    {
-                                        await UpdateMondayItemAsync(mapping!, c, caseBoardId, itemName, syncAction.RequiresNameUpdate, syncAction.RequiresDataUpdate, syncAction.RequiresHearingUpdate, testMode, ct);
-                                        return true;
-                                    }, "update_item", c.TikCounter, ct);
+                                    await UpdateMondayItemAsync(mapping!, c, caseBoardId, itemName, syncAction.RequiresNameUpdate, syncAction.RequiresDataUpdate, syncAction.RequiresHearingUpdate, testMode, ct);
+                                    return true;
+                                }, "update_item", c.TikCounter, ct);
                                 updated++;
                                 _logger.LogInformation(
                                         "Successfully updated Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, Retries={Retries}",
                                         c.TikNumber, c.TikCounter, mapping.MondayItemId, updateRetries);
-                            }
                             }
                             catch (CriticalFieldValidationException critEx)
                             {
