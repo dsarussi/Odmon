@@ -114,6 +114,25 @@ namespace Odmon.Worker.OdcanitAccess
             return cases;
         }
 
+        public async Task<List<int>> GetTikCountersSinceCutoffAsync(DateTime cutoffDate, CancellationToken ct)
+        {
+            var cutoff = cutoffDate.Date; // date-only comparison
+            _logger.LogDebug("GetTikCountersSinceCutoffAsync: querying vwExportToOuterSystems_Files WHERE tsCreateDate >= {CutoffDate:yyyy-MM-dd}", cutoff);
+
+            var tikCounters = await _db.Cases
+                .AsNoTracking()
+                .Where(c => c.tsCreateDate.HasValue && c.tsCreateDate.Value >= cutoff)
+                .Select(c => c.TikCounter)
+                .Distinct()
+                .ToListAsync(ct);
+
+            _logger.LogInformation(
+                "GetTikCountersSinceCutoffAsync: found {Count} distinct TikCounters with tsCreateDate >= {CutoffDate:yyyy-MM-dd}",
+                tikCounters.Count, cutoff);
+
+            return tikCounters;
+        }
+
         public async Task<List<OdcanitDiaryEvent>> GetDiaryEventsByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct)
         {
             var list = tikCounters?.Distinct().ToList() ?? new List<int>();

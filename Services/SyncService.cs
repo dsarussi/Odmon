@@ -173,163 +173,136 @@ namespace Odmon.Worker.Services
                 throw new InvalidOperationException("FATAL: boardIdToUse is 0. Check Monday:CasesBoardId and Safety:TestBoardId configuration. Aborting run.");
             }
 
-            // ── Stage: Resolve TikCounters ──
-            var stageTimer = Stopwatch.StartNew();
-            int[] tikCounters = await DetermineTikCountersToLoadAsync(ct);
-            stageTimer.Stop();
-            _logger.LogInformation("Stage: ResolveTikCounters completed in {ElapsedMs}ms, count={Count}",
-                stageTimer.ElapsedMilliseconds, tikCounters.Length);
-            if (tikCounters.Length == 0)
-            {
-                _logger.LogError("No TikCounters to load. Worker stopped.");
-                return;
-            }
-
-            // ── Stage: Load cases from Odcanit ──
-            stageTimer.Restart();
-            List<OdcanitCase> newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
-            stageTimer.Stop();
-            _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
-                stageTimer.ElapsedMilliseconds, newOrUpdatedCases.Count);
-
-            // ── Stage: Load / initialize ListenerState (T0 watermark) ──
+            // ── Parse cutoff date (used by both phases) ──
             var listenerUpdateOnly = _config.GetValue<bool>("Sync:ListenerUpdateOnly", true);
-            DateTime? listenerStartedAtUtc = null;
-
-            if (_changeFeedWatermark.HasValue)
-            {
-                stageTimer.Restart();
-                var listenerState = await _integrationDb.ListenerStates
-                    .FirstOrDefaultAsync(x => x.Id == 1, ct);
-
-                if (listenerState == null)
-                {
-                    // First run ever — set T0 = now
-                    listenerState = new ListenerState
-                    {
-                        Id = 1,
-                        StartedAtUtc = DateTime.UtcNow,
-                        LastChangeFeedWatermarkUtc = _changeFeedWatermark.Value,
-                        UpdatedAtUtc = DateTime.UtcNow
-                    };
-                    _integrationDb.ListenerStates.Add(listenerState);
-                    await _integrationDb.SaveChangesAsync(ct);
-                    _logger.LogInformation(
-                        "ListenerState initialized (first run). StartedAtUtc={StartedAtUtc:yyyy-MM-dd HH:mm:ss}",
-                        listenerState.StartedAtUtc);
-                }
-                else
-                {
-                    // Update the change-feed watermark on each run (StartedAtUtc stays fixed)
-                    listenerState.LastChangeFeedWatermarkUtc = _changeFeedWatermark.Value;
-                    listenerState.UpdatedAtUtc = DateTime.UtcNow;
-                    await _integrationDb.SaveChangesAsync(ct);
-                }
-
-                listenerStartedAtUtc = listenerState.StartedAtUtc;
-                stageTimer.Stop();
-                _logger.LogInformation(
-                    "ListenerState loaded: StartedAtUtc={StartedAtUtc:yyyy-MM-dd HH:mm:ss}, ChangeFeedWatermark={Watermark:yyyy-MM-dd HH:mm:ss}, ListenerUpdateOnly={ListenerUpdateOnly}",
-                    listenerStartedAtUtc.Value, _changeFeedWatermark.Value, listenerUpdateOnly);
-            }
-
-            // ── Stage: Cutoff-based eligibility gating ──
-            // Business rule: only manage cases opened on or after a fixed cutoff date.
-            // tsCreateDate from Odcanit is DATE-only (time=00:00:00), so we compare date-to-date.
-            // Cases before cutoff are skipped regardless of whether they have a mapping.
-            int skippedCutoffMapped = 0, skippedCutoffUnmapped = 0;
-            int eligibleMapped = 0, eligibleUnmapped = 0;
             DateTime? cutoffDate = null;
-
             var cutoffStr = _config.GetValue<string>("Sync:ListenerCreationCutoffDate");
-            if (listenerUpdateOnly && !string.IsNullOrWhiteSpace(cutoffStr)
+            if (!string.IsNullOrWhiteSpace(cutoffStr)
                 && DateTime.TryParse(cutoffStr, System.Globalization.CultureInfo.InvariantCulture,
                     System.Globalization.DateTimeStyles.None, out var parsedCutoff))
             {
                 cutoffDate = parsedCutoff.Date;
             }
 
-            if (_changeFeedWatermark.HasValue)
+            // ======================================================================
+            // PHASE A — BOOTSTRAP ONBOARDING
+            // Discovers all cases with tsCreateDate >= CutoffDate from Odcanit,
+            // computes unmapped set, and creates Monday items.
+            // Independent of change feed. Idempotent. Safe to run every cycle.
+            // ======================================================================
+            var stageTimer = Stopwatch.StartNew();
+            BootstrapResult bootstrapResult = new();
+            int bootstrapCreated = 0;
+
+            if (listenerUpdateOnly && cutoffDate.HasValue)
             {
                 stageTimer.Restart();
-                var existingMappedTikCounters = await _integrationDb.MondayItemMappings
-                    .AsNoTracking()
-                    .Where(m => m.BoardId == boardIdToUse)
-                    .Select(m => m.TikCounter)
-                    .Distinct()
-                    .ToListAsync(ct);
-                var mappedSet = new HashSet<int>(existingMappedTikCounters);
+                bootstrapResult = await RunBootstrapOnboardingAsync(
+                    runId, boardIdToUse, groupIdToUse, testMode, dryRun,
+                    cutoffDate.Value, maxItems, ct);
+                bootstrapCreated = bootstrapResult.NewlyOnboarded;
+                stageTimer.Stop();
+                _logger.LogInformation("Stage: Bootstrap completed in {ElapsedMs}ms", stageTimer.ElapsedMilliseconds);
+            }
+            else if (!listenerUpdateOnly)
+            {
+                _logger.LogInformation("Bootstrap skipped: ListenerUpdateOnly=false (allowlist or legacy mode).");
+            }
+            else
+            {
+                _logger.LogWarning("Bootstrap skipped: CutoffDate not configured. Set Sync:ListenerCreationCutoffDate.");
+            }
 
-                var beforeFilter = newOrUpdatedCases.Count;
+            // ======================================================================
+            // PHASE B — ONGOING LISTENER (Change Feed)
+            // Uses change feed to discover recently-changed TikCounters.
+            // Only UPDATES cases that are already in the Managed Universe
+            // (mapped + tsCreateDate >= CutoffDate). Never creates items.
+            // ======================================================================
+            stageTimer.Restart();
+            int[] tikCounters = await DetermineTikCountersToLoadAsync(ct);
+            stageTimer.Stop();
+            _logger.LogInformation("Stage: ResolveTikCounters completed in {ElapsedMs}ms, count={Count}",
+                stageTimer.ElapsedMilliseconds, tikCounters.Length);
 
-                if (cutoffDate.HasValue)
+            // Counters for listener gating
+            int skippedCutoffMapped = 0;
+            int skippedUnmanagedListener = 0;
+            int eligibleMapped = 0;
+
+            List<OdcanitCase> newOrUpdatedCases;
+
+            if (tikCounters.Length == 0)
+            {
+                _logger.LogInformation("Change feed returned 0 TikCounters. Listener phase has nothing to process.");
+                newOrUpdatedCases = new List<OdcanitCase>();
+            }
+            else
+            {
+                // ── Load cases from Odcanit ──
+                stageTimer.Restart();
+                newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
+                stageTimer.Stop();
+                _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
+                    stageTimer.ElapsedMilliseconds, newOrUpdatedCases.Count);
+
+                // ── Listener gating: filter to Managed Universe only ──
+                // Rule: Listener NEVER creates items. Only updates mapped + eligible cases.
+                if (listenerUpdateOnly && cutoffDate.HasValue)
                 {
+                    stageTimer.Restart();
+                    var mappedTikCounters = await _integrationDb.MondayItemMappings
+                        .AsNoTracking()
+                        .Where(m => m.BoardId == boardIdToUse)
+                        .Select(m => m.TikCounter)
+                        .Distinct()
+                        .ToListAsync(ct);
+                    var mappedSet = new HashSet<int>(mappedTikCounters);
                     var cutoff = cutoffDate.Value;
+                    var beforeFilter = newOrUpdatedCases.Count;
 
                     newOrUpdatedCases = newOrUpdatedCases.Where(c =>
                     {
-                        // TEMPORARY DIAGNOSTIC — remove after root-cause confirmed
-                        _logger.LogWarning(
-                            "CUTOFF DEBUG | TikCounter={TikCounter} | tsCreateDate(raw)={CreateDate:o} | tsCreateDate.Date={CreateDateDate} | CutoffDate={CutoffDate}",
-                            c.TikCounter,
-                            c.tsCreateDate,
-                            c.tsCreateDate?.Date,
-                            cutoff);
-
                         var isMapped = mappedSet.Contains(c.TikCounter);
-                        // Eligibility: tsCreateDate.Date >= cutoffDate (date-only comparison)
                         var caseDate = c.tsCreateDate?.Date;
                         var isEligible = caseDate.HasValue && caseDate.Value >= cutoff;
 
-                        if (!isEligible)
+                        if (!isMapped)
                         {
-                            if (isMapped)
-                            {
-                                skippedCutoffMapped++;
-                                _logger.LogDebug(
-                                    "Skipped pre-cutoff mapped case: TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate}, CutoffDate={Cutoff}",
-                                    c.TikCounter, c.TikNumber ?? "<null>",
-                                    caseDate?.ToString("yyyy-MM-dd") ?? "<null>", cutoff.ToString("yyyy-MM-dd"));
-                            }
-                            else
-                            {
-                                skippedCutoffUnmapped++;
-                                _logger.LogDebug(
-                                    "Skipped pre-cutoff unmapped case: TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate}, CutoffDate={Cutoff}",
-                                    c.TikCounter, c.TikNumber ?? "<null>",
-                                    caseDate?.ToString("yyyy-MM-dd") ?? "<null>", cutoff.ToString("yyyy-MM-dd"));
-                            }
+                            // Listener never creates — skip unmapped entirely
+                            skippedUnmanagedListener++;
+                            _logger.LogDebug(
+                                "LISTENER | Skipped unmapped case (bootstrap handles creation): TikCounter={TikCounter}, tsCreateDate={CreateDate}",
+                                c.TikCounter, caseDate?.ToString("yyyy-MM-dd") ?? "<null>");
                             return false;
                         }
 
-                        // Eligible
-                        if (isMapped) eligibleMapped++;
-                        else eligibleUnmapped++;
+                        if (!isEligible)
+                        {
+                            skippedCutoffMapped++;
+                            _logger.LogDebug(
+                                "LISTENER | Skipped pre-cutoff mapped case: TikCounter={TikCounter}, tsCreateDate={CreateDate}, CutoffDate={Cutoff}",
+                                c.TikCounter, caseDate?.ToString("yyyy-MM-dd") ?? "<null>", cutoff.ToString("yyyy-MM-dd"));
+                            return false;
+                        }
+
+                        // Mapped + eligible
+                        eligibleMapped++;
                         return true;
                     }).ToList();
-                }
-                else
-                {
-                    // No cutoff configured: count only, no filtering
-                    foreach (var c in newOrUpdatedCases)
-                    {
-                        if (mappedSet.Contains(c.TikCounter)) eligibleMapped++;
-                        else eligibleUnmapped++;
-                    }
-                }
 
-                stageTimer.Stop();
-                _logger.LogInformation(
-                    "Stage: CutoffGating completed in {ElapsedMs}ms. CutoffDate={CutoffDate}, sinceUtc={SinceUtc}, " +
-                    "TotalFromFeed={TotalFromFeed}, Before={Before}, After={After}, " +
-                    "EligibleMapped={EligibleMapped}, EligibleUnmapped={EligibleUnmapped}, " +
-                    "SkippedCutoffMapped={SkippedCutoffMapped}, SkippedCutoffUnmapped={SkippedCutoffUnmapped}",
-                    stageTimer.ElapsedMilliseconds,
-                    cutoffDate?.ToString("yyyy-MM-dd") ?? "<not_configured>",
-                    _changeFeedWatermark.Value.ToString("yyyy-MM-dd HH:mm:ss"),
-                    tikCounters.Length, beforeFilter, newOrUpdatedCases.Count,
-                    eligibleMapped, eligibleUnmapped,
-                    skippedCutoffMapped, skippedCutoffUnmapped);
+                    stageTimer.Stop();
+                    _logger.LogInformation(
+                        "Stage: ListenerGating completed in {ElapsedMs}ms. CutoffDate={CutoffDate}, sinceUtc={SinceUtc}, " +
+                        "TotalFromFeed={TotalFromFeed}, Before={Before}, After={After}, " +
+                        "EligibleMapped={EligibleMapped}, SkippedUnmanagedListener={SkippedUnmanaged}, " +
+                        "SkippedCutoffMapped={SkippedCutoffMapped}",
+                        stageTimer.ElapsedMilliseconds,
+                        cutoff.ToString("yyyy-MM-dd"),
+                        _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<n/a>",
+                        tikCounters.Length, beforeFilter, newOrUpdatedCases.Count,
+                        eligibleMapped, skippedUnmanagedListener, skippedCutoffMapped);
+                }
             }
 
             // ── Stage: Derive DocumentType ──
@@ -453,21 +426,15 @@ namespace Odmon.Worker.Services
                 switch (syncAction.Action)
                 {
                     case "create":
-                        // ── Defense-in-depth: block pre-cutoff creation even if gating stage missed it ──
-                        if (listenerUpdateOnly && cutoffDate.HasValue)
+                        // ── Defense-in-depth: Listener NEVER creates items. Bootstrap handles creation. ──
+                        if (listenerUpdateOnly)
                         {
-                            var caseDate = c.tsCreateDate?.Date;
-                            if (!caseDate.HasValue || caseDate.Value < cutoffDate.Value)
-                            {
-                                action = "skipped_pre_cutoff_guardrail";
-                                _logger.LogWarning(
-                                    "GUARDRAIL: Blocked pre-cutoff creation. TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate}, CutoffDate={Cutoff}",
-                                    c.TikCounter, c.TikNumber ?? "<null>",
-                                    caseDate?.ToString("yyyy-MM-dd") ?? "<null>",
-                                    cutoffDate.Value.ToString("yyyy-MM-dd"));
-                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, "Blocked: pre-cutoff guardrail"));
-                                continue;
-                            }
+                            action = "skipped_listener_no_create";
+                            _logger.LogWarning(
+                                "GUARDRAIL: Listener blocked creation (bootstrap handles onboarding). TikCounter={TikCounter}, TikNumber={TikNumber}",
+                                c.TikCounter, c.TikNumber ?? "<null>");
+                            processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, "Blocked: listener never creates"));
+                            continue;
                         }
 
                         action = dryRun ? "dry-create" : "created";
@@ -658,6 +625,12 @@ namespace Odmon.Worker.Services
                 CutoffDate = cutoffDate?.ToString("yyyy-MM-dd"),
                 SinceUtc = _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss"),
                 TotalFromFeed = tikCounters.Length,
+                // Bootstrap counters
+                BootstrapTotalFromOdcanit = bootstrapResult.TotalFromOdcanit,
+                BootstrapAlreadyMapped = bootstrapResult.AlreadyMapped,
+                BootstrapNewlyOnboarded = bootstrapResult.NewlyOnboarded,
+                BootstrapFailed = bootstrapResult.Failed,
+                // Listener counters
                 Total = batch.Count,
                 Success = successCount,
                 Created = created,
@@ -667,18 +640,19 @@ namespace Odmon.Worker.Services
                 SkippedNonDemo = skippedNonDemo,
                 SkippedNoChange = skippedNoChange,
                 SkippedCutoffMapped = skippedCutoffMapped,
-                SkippedCutoffUnmapped = skippedCutoffUnmapped,
+                SkippedUnmanagedListener = skippedUnmanagedListener,
                 SkippedInactive = skippedInactive,
                 Failed = failed,
                 Processed = processed
             };
 
+            var totalFailed = failed + bootstrapResult.Failed;
             _integrationDb.SyncLogs.Add(new SyncLog
             {
                 CreatedAtUtc = DateTime.UtcNow,
                 Source = "SyncService",
-                Level = failed > 0 ? "Warning" : "Info",
-                Message = $"Run {runId}: total={batch.Count}, success={successCount}, created={created}, updated={updated}, skipped={skippedNoChange}, skippedCutoffMapped={skippedCutoffMapped}, skippedCutoffUnmapped={skippedCutoffUnmapped}, skippedInactive={skippedInactive}, failed={failed}, duration={totalDurationMs}ms",
+                Level = totalFailed > 0 ? "Warning" : "Info",
+                Message = $"Run {runId}: bootstrap_onboarded={bootstrapCreated}, listener_total={batch.Count}, success={successCount}, created={created}, updated={updated}, skipped={skippedNoChange}, skippedCutoffMapped={skippedCutoffMapped}, skippedUnmanaged={skippedUnmanagedListener}, skippedInactive={skippedInactive}, failed={totalFailed}, duration={totalDurationMs}ms",
                 Details = JsonSerializer.Serialize(runSummary)
             });
 
@@ -698,14 +672,18 @@ namespace Odmon.Worker.Services
 
             // ── SYNC RUN SUMMARY ──
             _logger.LogInformation(
-                "SYNC RUN SUMMARY | RunId={RunId} | Total={Total} | Created={Created} | Updated={Updated} | " +
-                "SkippedNoChange={SkippedNoChange} | SkippedCutoffMapped={SkippedCutoffMapped} | SkippedCutoffUnmapped={SkippedCutoffUnmapped} | SkippedInactive={SkippedInactive} | " +
-                "Failed={Failed} | Duration={DurationMs}ms | CutoffDate={CutoffDate} | sinceUtc={SinceUtc} | TotalFromFeed={TotalFromFeed}",
-                runId, batch.Count, created, updated, skippedNoChange,
-                skippedCutoffMapped, skippedCutoffUnmapped, skippedInactive, failed, totalDurationMs,
+                "SYNC RUN SUMMARY | RunId={RunId} | CutoffDate={CutoffDate} | " +
+                "Bootstrap: Onboarded={BootstrapOnboarded}, FromOdcanit={BootstrapFromOdcanit}, AlreadyMapped={BootstrapAlreadyMapped}, Failed={BootstrapFailed} | " +
+                "Listener: sinceUtc={SinceUtc}, FromFeed={TotalFromFeed}, Updated={Updated}, " +
+                "SkippedNoChange={SkippedNoChange}, SkippedCutoffMapped={SkippedCutoffMapped}, SkippedUnmanaged={SkippedUnmanaged}, SkippedInactive={SkippedInactive} | " +
+                "Failed={Failed} | Duration={DurationMs}ms",
+                runId,
                 cutoffDate?.ToString("yyyy-MM-dd") ?? "<not_configured>",
+                bootstrapCreated, bootstrapResult.TotalFromOdcanit, bootstrapResult.AlreadyMapped, bootstrapResult.Failed,
                 _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<n/a>",
-                tikCounters.Length);
+                tikCounters.Length, updated,
+                skippedNoChange, skippedCutoffMapped, skippedUnmanagedListener, skippedInactive,
+                totalFailed, totalDurationMs);
 
             // ── Failure rate notification ──
             if (batch.Count > 0 && failed > 0)
