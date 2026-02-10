@@ -268,6 +268,14 @@ namespace Odmon.Worker.Services
 
                     newOrUpdatedCases = newOrUpdatedCases.Where(c =>
                     {
+                        // TEMPORARY DIAGNOSTIC — remove after root-cause confirmed
+                        _logger.LogWarning(
+                            "CUTOFF DEBUG | TikCounter={TikCounter} | tsCreateDate(raw)={CreateDate:o} | tsCreateDate.Date={CreateDateDate} | CutoffDate={CutoffDate}",
+                            c.TikCounter,
+                            c.tsCreateDate,
+                            c.tsCreateDate?.Date,
+                            cutoff);
+
                         var isMapped = mappedSet.Contains(c.TikCounter);
                         // Eligibility: tsCreateDate.Date >= cutoffDate (date-only comparison)
                         var caseDate = c.tsCreateDate?.Date;
