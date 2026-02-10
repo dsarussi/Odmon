@@ -325,11 +325,42 @@ static async Task VerifyIntegrationDbConnectionAsync(IServiceProvider services)
         {
             logger.LogWarning("IntegrationDb verification query returned no results.");
         }
+
+        // ── Check critical table existence ──
+        await VerifyTableExistsAsync(connection, "HearingNearestSnapshots", logger);
+        await VerifyTableExistsAsync(connection, "SyncRunLocks", logger);
+        await VerifyTableExistsAsync(connection, "SyncFailures", logger);
     }
     catch (Exception ex)
     {
         var logger2 = services.GetRequiredService<ILoggerFactory>().CreateLogger("IntegrationDbVerification");
         logger2.LogError(ex, "Failed to verify IntegrationDb connection. This may indicate a configuration or connectivity issue.");
         throw;
+    }
+}
+
+static async Task VerifyTableExistsAsync(System.Data.Common.DbConnection connection, string tableName, ILogger logger)
+{
+    try
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT OBJECT_ID(N'[dbo].[{tableName}]', 'U')";
+        var result = await cmd.ExecuteScalarAsync();
+        if (result == null || result == DBNull.Value)
+        {
+            logger.LogWarning(
+                "IntegrationDb TABLE CHECK: dbo.{TableName} does NOT exist. The corrective migration may not have been applied yet.",
+                tableName);
+        }
+        else
+        {
+            logger.LogInformation(
+                "IntegrationDb TABLE CHECK: dbo.{TableName} exists (object_id={ObjectId})",
+                tableName, result);
+        }
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "IntegrationDb TABLE CHECK: Failed to verify existence of dbo.{TableName}", tableName);
     }
 }
