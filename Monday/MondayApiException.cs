@@ -74,6 +74,28 @@ namespace Odmon.Worker.Monday
             ColumnValuesSnippet = TruncateSnippet(columnValuesSnippet, 500);
         }
 
+        /// <summary>
+        /// Returns true if the Monday API error indicates the item is inactive (archived/deleted).
+        /// Checks both the RawErrorJson and the Message for the "inactiveItems" error code.
+        /// </summary>
+        public bool IsInactiveItemError()
+        {
+            // Check raw JSON for error_data.column_validation_error_code == "inactiveItems"
+            if (!string.IsNullOrWhiteSpace(RawErrorJson) &&
+                RawErrorJson.Contains("inactiveItems", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            // Fallback: check message text
+            if (Message != null && Message.Contains("inactive", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
         private static string? TruncateSnippet(string? snippet, int maxLength)
         {
             if (string.IsNullOrWhiteSpace(snippet))

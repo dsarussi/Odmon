@@ -43,6 +43,7 @@ namespace Odmon.Worker.Services
         private readonly IOdcanitReader _odcanitReader;
         private readonly IErrorNotifier _errorNotifier;
         private readonly OdcanitLoadOptions _odcanitLoadOptions;
+        private readonly IOdcanitChangeFeed _changeFeed;
         private readonly ConcurrentDictionary<long, ColumnCacheEntry> _columnIdCache = new();
 
         private const int MaxRetryAttempts = 3;
@@ -64,7 +65,8 @@ namespace Odmon.Worker.Services
             HearingNearestSyncService hearingNearestSyncService,
             ISkipLogger skipLogger,
             IOdcanitReader odcanitReader,
-            IErrorNotifier errorNotifier)
+            IErrorNotifier errorNotifier,
+            IOdcanitChangeFeed changeFeed)
         {
             _caseSource = caseSource;
             _integrationDb = integrationDb;
@@ -81,6 +83,7 @@ namespace Odmon.Worker.Services
             _skipLogger = skipLogger;
             _odcanitReader = odcanitReader;
             _errorNotifier = errorNotifier;
+            _changeFeed = changeFeed;
         }
 
         public async Task SyncOdcanitToMondayAsync(CancellationToken ct)

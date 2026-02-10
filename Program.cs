@@ -123,10 +123,7 @@ hostBuilder.ConfigureServices((context, services) =>
         return sp.GetRequiredService<OdcanitCaseSource>();
     });
 
-    if (!env.IsDevelopment())
-    {
-        services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
-    }
+    services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
 
     services.AddScoped<IOdcanitWriter, SqlOdcanitWriter>();
     services.AddScoped<ISkipLogger, SkipLogger>();
