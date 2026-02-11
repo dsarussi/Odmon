@@ -17,8 +17,14 @@ using Odmon.Worker.OdcanitAccess;
 using Odmon.Worker.Security;
 using Odmon.Worker.Services;
 using Odmon.Worker.Workers;
+using Serilog;
 
 var hostBuilder = Host.CreateDefaultBuilder(args);
+
+hostBuilder.UseSerilog((context, loggerConfiguration) =>
+{
+    loggerConfiguration.ReadFrom.Configuration(context.Configuration);
+});
 
 hostBuilder.ConfigureAppConfiguration((context, configBuilder) =>
 {
@@ -338,7 +344,7 @@ static async Task VerifyIntegrationDbConnectionAsync(IServiceProvider services)
     }
 }
 
-static async Task VerifyTableExistsAsync(System.Data.Common.DbConnection connection, string tableName, ILogger logger)
+static async Task VerifyTableExistsAsync(System.Data.Common.DbConnection connection, string tableName, Microsoft.Extensions.Logging.ILogger logger)
 {
     try
     {

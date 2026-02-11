@@ -46,9 +46,12 @@ namespace Odmon.Worker.Services
         private readonly IOdcanitChangeFeed _changeFeed;
         private readonly ConcurrentDictionary<long, ColumnCacheEntry> _columnIdCache = new();
 
-        private const int MaxRetryAttempts = 3;
-        private static readonly TimeSpan[] RetryDelays = { TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(12) };
         private static readonly TimeSpan RunLockDuration = TimeSpan.FromMinutes(30);
+
+        // ── Circuit breaker state (per run) ──
+        private int _consecutiveMondayFailures;
+        private bool _circuitBreakerTripped;
+        private HashSet<long> _updatedItemIdsThisRun = new();
 
         public SyncService(
             ICaseSource caseSource,
@@ -91,6 +94,11 @@ namespace Odmon.Worker.Services
             var runId = Guid.NewGuid().ToString("N");
             var runStartedAtUtc = DateTime.UtcNow;
             var runStopwatch = Stopwatch.StartNew();
+
+            // Reset per-run safety state
+            _consecutiveMondayFailures = 0;
+            _circuitBreakerTripped = false;
+            _updatedItemIdsThisRun = new HashSet<long>();
 
             var enabled = _config.GetValue<bool>("Sync:Enabled", true);
             if (!enabled)
@@ -214,26 +222,20 @@ namespace Odmon.Worker.Services
             }
 
             // ======================================================================
-            // PHASE B — ONGOING LISTENER (Change Feed + tsModifyDate fallback)
-            // Determines which eligible-mapped cases changed since the watermark.
-            // Uses UNION of change feed results and tsModifyDate fallback to ensure
-            // any field change propagates to Monday, even if the change feed misses it.
+            // PHASE B — FULL RECONCILE OF MANAGED UNIVERSE
+            // Loads ALL eligible-mapped cases from Odcanit every run.
+            // Does NOT depend on change feed or tsModifyDate for detection.
+            // The per-case OdcanitVersion comparison (DetermineSyncAction) handles
+            // skip-no-change, so only actual changes trigger Monday API calls.
             // Listener NEVER creates items — only updates managed cases.
             // ======================================================================
 
-            // B.1) Compute eligibleMapped = INTERSECT(eligibleFromOdcanit, mapped)
             stageTimer.Restart();
             int eligibleFromOdcanitCount = 0;
             int mappedCount = 0;
             int eligibleMappedCount = 0;
-            int feedRawCount = 0;
-            int feedIntersectedCount = 0;
-            int fallbackCount = 0;
-            int toProcessCount = 0;
-            int skippedCutoffMapped = 0;
-            int skippedUnmanagedListener = 0;
+            int loadedCasesCount = 0;
 
-            HashSet<int> eligibleMappedSet;
             int[] tikCounters;
             List<OdcanitCase> newOrUpdatedCases;
 
@@ -257,7 +259,7 @@ namespace Odmon.Worker.Services
                 var mappedSet = new HashSet<int>(mappedTikCounters);
 
                 // C) eligibleMapped = INTERSECT
-                eligibleMappedSet = new HashSet<int>(eligibleOdcanitSet);
+                var eligibleMappedSet = new HashSet<int>(eligibleOdcanitSet);
                 eligibleMappedSet.IntersectWith(mappedSet);
                 eligibleMappedCount = eligibleMappedSet.Count;
 
@@ -270,101 +272,22 @@ namespace Odmon.Worker.Services
 
                 if (eligibleMappedCount == 0)
                 {
-                    _logger.LogInformation("No eligible-mapped cases exist. Listener phase has nothing to process.");
+                    _logger.LogInformation("No eligible-mapped cases exist. Listener phase has nothing to reconcile.");
                     tikCounters = Array.Empty<int>();
                     newOrUpdatedCases = new List<OdcanitCase>();
                 }
                 else
                 {
-                    // B.2) Determine which of eligibleMapped changed since watermark
+                    // D) Load ALL eligible-mapped cases (full reconcile, no change-feed gating)
+                    tikCounters = eligibleMappedSet.OrderBy(tc => tc).ToArray();
+
                     stageTimer.Restart();
-
-                    // Source 1: Change feed
-                    var sinceUtc = await GetChangeFeedWatermarkAsync(ct);
-                    _changeFeedWatermark = sinceUtc;
-
-                    IReadOnlyList<int> feedTikCounters;
-                    try
-                    {
-                        feedTikCounters = await _changeFeed.GetChangedTikCountersSinceAsync(sinceUtc, ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Change feed query failed; relying on tsModifyDate fallback only.");
-                        feedTikCounters = Array.Empty<int>();
-                    }
-                    feedRawCount = feedTikCounters.Count;
-
-                    // Intersect feed with eligibleMapped
-                    var feedIntersected = new HashSet<int>(feedTikCounters);
-                    feedIntersected.IntersectWith(eligibleMappedSet);
-                    feedIntersectedCount = feedIntersected.Count;
-
-                    // Track unmapped/pre-cutoff skips from the feed for logging
-                    foreach (var tc in feedTikCounters)
-                    {
-                        if (!mappedSet.Contains(tc))
-                            skippedUnmanagedListener++;
-                        else if (!eligibleOdcanitSet.Contains(tc))
-                            skippedCutoffMapped++;
-                    }
-
-                    // Source 2: tsModifyDate fallback — deterministic catch-all
-                    List<int> fallbackTikCounters;
-                    try
-                    {
-                        fallbackTikCounters = await _odcanitReader.GetModifiedTikCountersSinceAsync(
-                            sinceUtc, eligibleMappedSet.ToList().AsReadOnly(), ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "tsModifyDate fallback query failed; relying on change feed only.");
-                        fallbackTikCounters = new List<int>();
-                    }
-                    fallbackCount = fallbackTikCounters.Count;
-
-                    // UNION
-                    var toProcess = new HashSet<int>(feedIntersected);
-                    toProcess.UnionWith(fallbackTikCounters);
-                    toProcessCount = toProcess.Count;
-                    tikCounters = toProcess.OrderBy(tc => tc).ToArray();
-
+                    newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
+                    loadedCasesCount = newOrUpdatedCases.Count;
                     stageTimer.Stop();
-
-                    // Debug log for a sample TikCounter showing source
-                    if (tikCounters.Length > 0)
-                    {
-                        var sample = tikCounters[0];
-                        var fromFeed = feedIntersected.Contains(sample);
-                        var fromFallback = fallbackTikCounters.Contains(sample);
-                        _logger.LogDebug(
-                            "LISTENER | Sample TikCounter={TikCounter}: fromFeed={FromFeed}, fromFallback={FromFallback}",
-                            sample, fromFeed, fromFallback);
-                    }
-
                     _logger.LogInformation(
-                        "Stage: ListenerDetection completed in {ElapsedMs}ms. sinceUtc={SinceUtc}, " +
-                        "FeedRaw={FeedRaw}, FeedIntersected={FeedIntersected}, Fallback={Fallback}, " +
-                        "ToProcess={ToProcess}, SkippedUnmanaged={SkippedUnmanaged}, SkippedCutoffMapped={SkippedCutoff}",
-                        stageTimer.ElapsedMilliseconds,
-                        sinceUtc.ToString("yyyy-MM-dd HH:mm:ss"),
-                        feedRawCount, feedIntersectedCount, fallbackCount,
-                        toProcessCount, skippedUnmanagedListener, skippedCutoffMapped);
-
-                    if (tikCounters.Length == 0)
-                    {
-                        _logger.LogInformation("No changed eligible-mapped cases found. Listener phase has nothing to process.");
-                        newOrUpdatedCases = new List<OdcanitCase>();
-                    }
-                    else
-                    {
-                        // B.3) Load full enriched case snapshots
-                        stageTimer.Restart();
-                        newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
-                        stageTimer.Stop();
-                        _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
-                            stageTimer.ElapsedMilliseconds, newOrUpdatedCases.Count);
-                    }
+                        "Stage: FullReconcileLoad completed in {ElapsedMs}ms. EligibleMapped={EligibleMapped}, LoadedCases={LoadedCases}",
+                        stageTimer.ElapsedMilliseconds, eligibleMappedCount, loadedCasesCount);
                 }
             }
             else
@@ -375,7 +298,6 @@ namespace Odmon.Worker.Services
                 stageTimer.Stop();
                 _logger.LogInformation("Stage: ResolveTikCounters completed in {ElapsedMs}ms, count={Count}",
                     stageTimer.ElapsedMilliseconds, tikCounters.Length);
-                eligibleMappedSet = new HashSet<int>();
 
                 if (tikCounters.Length == 0)
                 {
@@ -385,9 +307,10 @@ namespace Odmon.Worker.Services
                 {
                     stageTimer.Restart();
                     newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
+                    loadedCasesCount = newOrUpdatedCases.Count;
                     stageTimer.Stop();
                     _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
-                        stageTimer.ElapsedMilliseconds, newOrUpdatedCases.Count);
+                        stageTimer.ElapsedMilliseconds, loadedCasesCount);
                 }
             }
 
@@ -425,11 +348,21 @@ namespace Odmon.Worker.Services
             var processed = new List<object>();
             int created = 0, updated = 0;
             int skippedNonTest = 0, skippedExistingNonTest = 0, skippedNoChange = 0, skippedNonDemo = 0;
-            int skippedInactive = 0;
+            int skippedInactive = 0, skippedDuplicate = 0;
             int failed = 0;
+            bool circuitBreakerStopped = false;
+
+            var circuitBreakerThreshold = _config.GetValue<int>("Monday:CircuitBreakerFailureThreshold", 10);
 
             foreach (var c in batch)
             {
+                // ── Circuit breaker: stop processing if too many consecutive Monday failures ──
+                if (_circuitBreakerTripped)
+                {
+                    circuitBreakerStopped = true;
+                    break;
+                }
+
                 var caseStopwatch = Stopwatch.StartNew();
                 try
             {
@@ -524,7 +457,7 @@ namespace Odmon.Worker.Services
                         }
 
                         action = dryRun ? "dry-create" : "created";
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "Creating new Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, ItemName={ItemName}",
                             c.TikNumber, c.TikCounter, caseBoardId, itemName);
                         if (!dryRun)
@@ -536,7 +469,8 @@ namespace Odmon.Worker.Services
                                     "create_item", c.TikCounter, ct);
                                 mondayIdForLog = createResult;
                                 created++;
-                                _logger.LogInformation(
+                                _consecutiveMondayFailures = 0; // reset on success
+                                _logger.LogDebug(
                                     "Successfully created Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, Retries={Retries}",
                                     c.TikNumber, c.TikCounter, mondayIdForLog, createRetries);
                             }
@@ -558,12 +492,16 @@ namespace Odmon.Worker.Services
                                 action = "failed_create";
                                 failed++;
                                 errorMessage = ex.Message;
-                                
+
+                                // Circuit breaker: track consecutive Monday failures
+                                IncrementCircuitBreaker(circuitBreakerThreshold);
+
                                 _logger.LogError(ex,
                                     "Error during create_item (after retries): TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, Error={Error}",
                                     c.TikNumber, c.TikCounter, caseBoardId, ex.Message);
                                 
-                                await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "create", ex, MaxRetryAttempts, ct);
+                                var maxRetry = _config.GetValue<int>("Monday:MaxRetryAttempts", 3);
+                                await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "create", ex, maxRetry, ct);
                                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
                                 continue;
                             }
@@ -575,8 +513,20 @@ namespace Odmon.Worker.Services
                         break;
 
                     case "update":
+                        // ── Duplicate update prevention: skip if already updated this run ──
+                        if (mapping != null && _updatedItemIdsThisRun.Contains(mapping.MondayItemId))
+                        {
+                            action = "skipped_duplicate_update";
+                            skippedDuplicate++;
+                            _logger.LogDebug(
+                                "Duplicate update prevented for MondayItemId={MondayItemId}, TikCounter={TikCounter}, TikNumber={TikNumber}",
+                                mapping.MondayItemId, c.TikCounter, c.TikNumber);
+                            processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, false, "Duplicate update prevented"));
+                            continue;
+                        }
+
                         action = dryRun ? "dry-update" : "updated";
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "Updating existing Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}, RequiresHearingUpdate={RequiresHearingUpdate}",
                             c.TikNumber, c.TikCounter, mapping!.MondayItemId, caseBoardId, syncAction.RequiresDataUpdate, syncAction.RequiresNameUpdate, syncAction.RequiresHearingUpdate);
                         if (!dryRun)
@@ -609,7 +559,9 @@ namespace Odmon.Worker.Services
                                     return true;
                                 }, "update_item", c.TikCounter, ct);
                                 updated++;
-                                _logger.LogInformation(
+                                _consecutiveMondayFailures = 0; // reset on success
+                                _updatedItemIdsThisRun.Add(mapping.MondayItemId);
+                                _logger.LogDebug(
                                         "Successfully updated Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, Retries={Retries}",
                                         c.TikNumber, c.TikCounter, mapping.MondayItemId, updateRetries);
                             }
@@ -647,12 +599,16 @@ namespace Odmon.Worker.Services
                                 action = "failed_update";
                                 failed++;
                                 errorMessage = ex.Message;
-                                
+
+                                // Circuit breaker: track consecutive Monday failures
+                                IncrementCircuitBreaker(circuitBreakerThreshold);
+
                                 _logger.LogError(ex,
                                     "Error during update (after retries): TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, Error={Error}",
                                     c.TikNumber, c.TikCounter, mapping.MondayItemId, caseBoardId, ex.Message);
                                 
-                                await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "update", ex, MaxRetryAttempts, ct);
+                                var maxRetry = _config.GetValue<int>("Monday:MaxRetryAttempts", 3);
+                                await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "update", ex, maxRetry, ct);
                                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
                                 continue;
                             }
@@ -694,6 +650,14 @@ namespace Odmon.Worker.Services
             }
 
             stageTimer.Stop();
+
+            if (circuitBreakerStopped)
+            {
+                _logger.LogError(
+                    "CIRCUIT BREAKER ACTIVATED – stopping run due to {ConsecutiveFailures} consecutive Monday failures (threshold={Threshold}). RunId={RunId}",
+                    _consecutiveMondayFailures, circuitBreakerThreshold, runId);
+            }
+
             _logger.LogInformation("Stage: PerCaseProcessing completed in {ElapsedMs}ms for {BatchCount} cases", stageTimer.ElapsedMilliseconds, batch.Count);
 
             // ── Run summary ──
@@ -709,15 +673,11 @@ namespace Odmon.Worker.Services
                 DurationMs = totalDurationMs,
                 MaxItems = maxItems,
                 CutoffDate = cutoffDate?.ToString("yyyy-MM-dd"),
-                SinceUtc = _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss"),
-                // Detection counters
+                // Reconcile counters
                 EligibleFromOdcanit = eligibleFromOdcanitCount,
                 Mapped = mappedCount,
                 EligibleMapped = eligibleMappedCount,
-                FeedRaw = feedRawCount,
-                FeedIntersected = feedIntersectedCount,
-                Fallback = fallbackCount,
-                ToProcess = toProcessCount,
+                LoadedCases = loadedCasesCount,
                 // Bootstrap counters
                 BootstrapTotalFromOdcanit = bootstrapResult.TotalFromOdcanit,
                 BootstrapAlreadyMapped = bootstrapResult.AlreadyMapped,
@@ -732,9 +692,9 @@ namespace Odmon.Worker.Services
                 SkippedExistingNonTestMapping = skippedExistingNonTest,
                 SkippedNonDemo = skippedNonDemo,
                 SkippedNoChange = skippedNoChange,
-                SkippedCutoffMapped = skippedCutoffMapped,
-                SkippedUnmanagedListener = skippedUnmanagedListener,
                 SkippedInactive = skippedInactive,
+                SkippedDuplicate = skippedDuplicate,
+                CircuitBreakerStopped = circuitBreakerStopped,
                 Failed = failed,
                 Processed = processed
             };
@@ -745,7 +705,7 @@ namespace Odmon.Worker.Services
                 CreatedAtUtc = DateTime.UtcNow,
                 Source = "SyncService",
                 Level = totalFailed > 0 ? "Warning" : "Info",
-                Message = $"Run {runId}: bootstrap_onboarded={bootstrapCreated}, eligibleMapped={eligibleMappedCount}, feedIntersected={feedIntersectedCount}, fallback={fallbackCount}, toProcess={toProcessCount}, updated={updated}, skipped={skippedNoChange}, skippedCutoff={skippedCutoffMapped}, skippedUnmanaged={skippedUnmanagedListener}, skippedInactive={skippedInactive}, failed={totalFailed}, duration={totalDurationMs}ms",
+                Message = $"Run {runId}: bootstrap_onboarded={bootstrapCreated}, eligibleMapped={eligibleMappedCount}, loaded={loadedCasesCount}, updated={updated}, skipped={skippedNoChange}, skippedInactive={skippedInactive}, failed={totalFailed}, duration={totalDurationMs}ms",
                 Details = JsonSerializer.Serialize(runSummary)
             });
 
@@ -766,19 +726,16 @@ namespace Odmon.Worker.Services
             // ── SYNC RUN SUMMARY ──
             _logger.LogInformation(
                 "SYNC RUN SUMMARY | RunId={RunId} | CutoffDate={CutoffDate} | " +
-                "Bootstrap: Onboarded={BootstrapOnboarded}, FromOdcanit={BootstrapFromOdcanit}, AlreadyMapped={BootstrapAlreadyMapped}, Failed={BootstrapFailed} | " +
-                "Listener: sinceUtc={SinceUtc}, EligibleMapped={EligibleMapped}, FeedRaw={FeedRaw}, FeedIntersected={FeedIntersected}, " +
-                "Fallback={Fallback}, ToProcess={ToProcess}, Updated={Updated}, " +
-                "SkippedNoChange={SkippedNoChange}, SkippedCutoff={SkippedCutoff}, SkippedUnmanaged={SkippedUnmanaged}, SkippedInactive={SkippedInactive} | " +
-                "Failed={Failed} | Duration={DurationMs}ms",
+                "Bootstrap: Onboarded={BootstrapOnboarded}, FromOdcanit={BootstrapFromOdcanit}, AlreadyMapped={BootstrapAlreadyMapped}, CoolingFiltered={BootstrapCoolingFiltered}, Failed={BootstrapFailed} | " +
+                "Reconcile: EligibleFromOdcanit={EligibleFromOdcanit}, Mapped={Mapped}, EligibleMapped={EligibleMapped}, Loaded={Loaded}, " +
+                "Updated={Updated}, SkippedNoChange={SkippedNoChange}, SkippedInactive={SkippedInactive}, SkippedDuplicate={SkippedDuplicate} | " +
+                "Failed={Failed} | CircuitBreakerStopped={CircuitBreakerStopped} | Duration={DurationMs}ms",
                 runId,
                 cutoffDate?.ToString("yyyy-MM-dd") ?? "<not_configured>",
-                bootstrapCreated, bootstrapResult.TotalFromOdcanit, bootstrapResult.AlreadyMapped, bootstrapResult.Failed,
-                _changeFeedWatermark?.ToString("yyyy-MM-dd HH:mm:ss") ?? "<n/a>",
-                eligibleMappedCount, feedRawCount, feedIntersectedCount,
-                fallbackCount, toProcessCount, updated,
-                skippedNoChange, skippedCutoffMapped, skippedUnmanagedListener, skippedInactive,
-                totalFailed, totalDurationMs);
+                bootstrapCreated, bootstrapResult.TotalFromOdcanit, bootstrapResult.AlreadyMapped, bootstrapResult.CoolingFilteredOut, bootstrapResult.Failed,
+                eligibleFromOdcanitCount, mappedCount, eligibleMappedCount, loadedCasesCount,
+                updated, skippedNoChange, skippedInactive, skippedDuplicate,
+                totalFailed, circuitBreakerStopped, totalDurationMs);
 
             // ── Failure rate notification ──
             if (batch.Count > 0 && failed > 0)
@@ -856,7 +813,7 @@ namespace Odmon.Worker.Services
 
             if (string.IsNullOrWhiteSpace(errorMessage))
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "Case {TikCounter} ({TikNumber}) action={Action} testMode={TestMode} boardId={BoardId} dryRun={DryRun} prefixApplied={PrefixApplied}",
                     c.TikCounter,
                     c.TikNumber,
@@ -995,7 +952,7 @@ namespace Odmon.Worker.Services
             }
             else if (hasHearingDate && !canPublishDateHour)
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "Hearing date/hour update blocked for TikCounter={TikCounter}: HasHearingJudge={HasJudge}, HasEffectiveCourtCity={HasCity}, MeetStatus={MeetStatus}",
                     c.TikCounter, hasHearingJudge, hasEffectiveCourtCity, meetStatus?.ToString() ?? "<null>");
             }
@@ -1175,7 +1132,7 @@ namespace Odmon.Worker.Services
             ValidateHourColumnValues(columnValues, c.TikCounter);
 
             // DEBUG: Log column values before filtering
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "BuildColumnValues BEFORE filter: TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, Count={Count}, ColumnIds={ColumnIds}",
                 c.TikCounter,
                 c.TikNumber ?? "<null>",
@@ -1224,7 +1181,7 @@ namespace Odmon.Worker.Services
             }
 
             // DEBUG: Log column values before JSON serialization
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "BuildColumnValues BEFORE JSON: TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, Count={Count}, ColumnIds={ColumnIds}",
                 c.TikCounter,
                 c.TikNumber ?? "<null>",
@@ -2113,12 +2070,12 @@ namespace Odmon.Worker.Services
                 if (!allowedLabels.Contains(trimmedClientNumber))
                 {
                     _logger.LogWarning(
-                        "ClientNumber '{ClientNumber}' is not a valid label for dropdown column {ColumnId} on board {BoardId}. TikCounter={TikCounter}, TikNumber={TikNumber}. Column will be omitted.",
+                        "ClientNumber dropdown label missing. TikCounter={TikCounter}, TikNumber={TikNumber}, ClientVisualID={ClientVisualID}, ColumnId={ColumnId}, Reason={Reason}",
+                        tikCounter,
+                        tikNumber ?? "<null>",
                         trimmedClientNumber,
                         columnId,
-                        boardId,
-                        tikCounter,
-                        tikNumber ?? "<null>");
+                        "label not found in Monday dropdown options");
 
                     await _skipLogger.LogSkipAsync(
                         tikCounter,
@@ -2134,6 +2091,18 @@ namespace Odmon.Worker.Services
                             AllowedLabelCount = allowedLabels.Count
                         },
                         ct);
+
+                    // Fallback: populate optional text column with the raw ClientVisualID
+                    var fallbackColumnId = _mondaySettings.ClientNumberTextColumnId;
+                    if (!string.IsNullOrWhiteSpace(fallbackColumnId))
+                    {
+                        columnValues[fallbackColumnId] = trimmedClientNumber;
+                        _logger.LogDebug(
+                            "ClientNumber dropdown fallback: wrote '{ClientVisualID}' to text column {FallbackColumnId} for TikCounter={TikCounter}",
+                            trimmedClientNumber,
+                            fallbackColumnId,
+                            tikCounter);
+                    }
 
                     return;
                 }
@@ -2160,6 +2129,72 @@ namespace Odmon.Worker.Services
                     tikNumber ?? "<null>",
                     ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Pure decision logic for cooling period eligibility.
+        /// Returns true if the case has aged past the cooling period and is eligible for onboarding.
+        /// Does NOT check cutoff — use <see cref="IsBootstrapEligible"/> for the combined check.
+        /// </summary>
+        internal static bool IsCoolingEligible(DateTime? tsCreateDate, int coolingPeriodDays, DateTime utcNow)
+        {
+            // CoolingPeriodDays == 0 means no delay
+            if (coolingPeriodDays <= 0)
+                return tsCreateDate.HasValue; // eligible if tsCreateDate is non-null (null → not eligible)
+
+            if (!tsCreateDate.HasValue)
+                return false; // null tsCreateDate → not eligible
+
+            var coolingCutoff = utcNow.AddDays(-coolingPeriodDays).Date;
+            return tsCreateDate.Value.Date <= coolingCutoff;
+        }
+
+        /// <summary>
+        /// Combined bootstrap onboarding eligibility check.
+        /// A case is eligible for bootstrap creation ONLY if BOTH:
+        ///   1) tsCreateDate >= cutoffDate (post-cutoff)
+        ///   2) tsCreateDate &lt;= UtcNow - CoolingPeriodDays (cooling period passed)
+        /// In the actual bootstrap flow, condition (1) is enforced by the SQL query
+        /// and a defense-in-depth guardrail; this method provides a single testable predicate.
+        /// </summary>
+        internal static bool IsBootstrapEligible(DateTime? tsCreateDate, DateTime cutoffDate, int coolingPeriodDays, DateTime utcNow)
+        {
+            if (!tsCreateDate.HasValue)
+                return false;
+
+            // Condition 1: must be post-cutoff
+            if (tsCreateDate.Value.Date < cutoffDate.Date)
+                return false;
+
+            // Condition 2: must pass cooling period
+            return IsCoolingEligible(tsCreateDate, coolingPeriodDays, utcNow);
+        }
+
+        /// <summary>
+        /// Pure decision logic for client number dropdown resolution.
+        /// Returns which action to take: include dropdown, use fallback text, or omit entirely.
+        /// Extracted for testability.
+        /// </summary>
+        internal enum ClientDropdownAction { IncludeDropdown, UseFallbackText, OmitEntirely }
+
+        internal static ClientDropdownAction ResolveClientDropdownAction(
+            string? clientVisualId,
+            HashSet<string> allowedLabels,
+            string? fallbackTextColumnId)
+        {
+            if (string.IsNullOrWhiteSpace(clientVisualId))
+                return ClientDropdownAction.OmitEntirely;
+
+            var trimmed = clientVisualId.Trim();
+
+            if (allowedLabels.Contains(trimmed))
+                return ClientDropdownAction.IncludeDropdown;
+
+            // Label not found in Monday dropdown options
+            if (!string.IsNullOrWhiteSpace(fallbackTextColumnId))
+                return ClientDropdownAction.UseFallbackText;
+
+            return ClientDropdownAction.OmitEntirely;
         }
 
         private static string MapTaskTypeLabel(string? tikType)
@@ -2493,7 +2528,7 @@ namespace Odmon.Worker.Services
                             BoardId = boardId,
                             MondayItemId = existingItemId.Value,
                             LastSyncFromOdcanitUtc = DateTime.UtcNow,
-                            OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
+                            OdcanitVersion = ComputeContentVersion(c),
                             MondayChecksum = itemName,
                             HearingChecksum = ComputeHearingChecksum(c),
                             IsTest = testMode
@@ -2562,7 +2597,7 @@ namespace Odmon.Worker.Services
                     c.TikCounter, boardId, mapping.MondayItemId);
             }
 
-            var odcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
+            var odcanitVersion = ComputeContentVersion(c);
             var requiresDataUpdate = mapping.OdcanitVersion != odcanitVersion;
             var requiresNameUpdate = mapping.MondayChecksum != itemName;
 
@@ -2599,6 +2634,13 @@ namespace Odmon.Worker.Services
             _logger.LogDebug(
                 "DetermineSyncAction: Changes detected. TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}, RequiresHearingUpdate={RequiresHearingUpdate}. Action=update",
                 c.TikNumber, c.TikCounter, mapping.MondayItemId, requiresDataUpdate, requiresNameUpdate, requiresHearingUpdate);
+
+            if (requiresDataUpdate)
+            {
+                _logger.LogDebug(
+                    "ContentVersion diff: TikCounter={TikCounter}, OldVersion={OldVersion}, NewVersion={NewVersion}",
+                    c.TikCounter, mapping.OdcanitVersion ?? "<null>", odcanitVersion);
+            }
 
             return new SyncAction
             {
@@ -2637,7 +2679,7 @@ namespace Odmon.Worker.Services
                 BoardId = boardId,
                 MondayItemId = mondayItemId,
                 LastSyncFromOdcanitUtc = DateTime.UtcNow,
-                OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
+                OdcanitVersion = ComputeContentVersion(c),
                 MondayChecksum = itemName,
                 HearingChecksum = ComputeHearingChecksum(c),
                 IsTest = testMode,
@@ -2680,7 +2722,7 @@ namespace Odmon.Worker.Services
 
                 var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: false, ct);
                 await _mondayClient.UpdateItemAsync(boardId, mapping.MondayItemId, columnValuesJson, ct);
-                mapping.OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
+                mapping.OdcanitVersion = ComputeContentVersion(c);
             }
 
             // Update mapping metadata (including TikNumber and BoardId if they were missing)
@@ -2892,6 +2934,124 @@ namespace Odmon.Worker.Services
         /// even when the main case data (tsModifyDate / OdcanitVersion) hasn't changed.
         /// Fields: HearingDate, HearingTime, HearingJudgeName, EffectiveCourtCity (HearingCity->HearingCourtName), MeetStatus.
         /// </summary>
+        // ====================================================================
+        // Deterministic content-based version (SHA-256)
+        // Covers ALL fields that influence Monday column_values.
+        // Used by DetermineSyncAction for change detection instead of tsModifyDate.
+        // Canonical rules:
+        //   - Strings: trimmed, null => ""
+        //   - Dates:   yyyy-MM-dd (invariant), null => ""
+        //   - Decimals: InvariantCulture, null => ""
+        //   - Phones:  NormalizeIsraeliPhoneForDocument before hashing
+        //   - Fields in stable, deterministic order separated by '|'
+        // ====================================================================
+        internal static string ComputeContentVersion(OdcanitCase c)
+        {
+            var sb = new StringBuilder(4096);
+
+            // ── String columns (in column-mapping order from BuildColumnValuesJsonAsync) ──
+            AppendStr(sb, c.TikNumber);
+            AppendStr(sb, c.ClientVisualID);
+            AppendStr(sb, c.Additional ?? c.HozlapTikNumber);
+            AppendStr(sb, c.ClientEmail);
+            AppendStr(sb, c.Notes);
+            AppendStr(sb, c.ClientAddress);
+            AppendStr(sb, c.ClientTaxId);
+            AppendStr(sb, c.PolicyHolderName);
+            AppendStr(sb, c.PolicyHolderId);
+            AppendStr(sb, c.PolicyHolderAddress);
+            AppendStr(sb, c.PolicyHolderEmail);
+            AppendStr(sb, c.MainCarNumber);
+            AppendStr(sb, c.DriverName);
+            AppendStr(sb, c.DriverId);
+            AppendStr(sb, c.WitnessName);
+            AppendStr(sb, c.AdditionalDefendants);
+            AppendStr(sb, c.PlaintiffName);
+            AppendStr(sb, c.PlaintiffId);
+            AppendStr(sb, c.PlaintiffAddress);
+            AppendStr(sb, c.PlaintiffEmail);
+            AppendStr(sb, c.DefendantName);
+            AppendStr(sb, c.DefendantFax);
+            AppendStr(sb, c.ThirdPartyDriverName);
+            AppendStr(sb, c.ThirdPartyDriverId);
+            AppendStr(sb, c.ThirdPartyCarNumber);
+            AppendStr(sb, c.ThirdPartyInsurerName);
+            AppendStr(sb, c.InsuranceCompanyId);
+            AppendStr(sb, c.InsuranceCompanyAddress);
+            AppendStr(sb, c.InsuranceCompanyEmail);
+            AppendStr(sb, c.ThirdPartyEmployerName);
+            AppendStr(sb, c.ThirdPartyEmployerId);
+            AppendStr(sb, c.ThirdPartyEmployerAddress);
+            AppendStr(sb, c.ThirdPartyLawyerName);
+            AppendStr(sb, c.ThirdPartyLawyerAddress);
+            AppendStr(sb, c.ThirdPartyLawyerEmail);
+            AppendStr(sb, c.CourtName);
+            AppendStr(sb, c.CourtCaseNumber);
+            AppendStr(sb, c.AttorneyName);
+            AppendStr(sb, c.DefenseStreet);
+            AppendStr(sb, c.ClaimStreet);
+            AppendStr(sb, c.CaseFolderId);
+            AppendStr(sb, c.StatusName);
+
+            // ── Phone columns (normalized before hashing) ──
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.PolicyHolderPhone));
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.DriverPhone));
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.PlaintiffPhone));
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.ThirdPartyPhone));
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.ThirdPartyLawyerPhone));
+
+            // ── Date columns ──
+            AppendDate(sb, c.tsCreateDate);
+            AppendDate(sb, c.EventDate);
+            AppendDate(sb, c.TikCloseDate);
+            AppendDate(sb, c.ComplaintReceivedDate);
+
+            // ── Decimal columns ──
+            AppendDec(sb, c.RequestedClaimAmount);
+            AppendDec(sb, c.ProvenClaimAmount);
+            AppendDec(sb, c.JudgmentAmount);
+            AppendDec(sb, c.AppraiserFeeAmount);
+            AppendDec(sb, c.DirectDamageAmount);
+            AppendDec(sb, c.OtherLossesAmount);
+            AppendDec(sb, c.LossOfValueAmount);
+            AppendDec(sb, c.ResidualValueAmount);
+
+            // ── Hearing fields ──
+            AppendDate(sb, c.HearingDate);
+            AppendStr(sb, c.HearingTime.HasValue
+                ? $"{c.HearingTime.Value.Hours:D2}:{c.HearingTime.Value.Minutes:D2}"
+                : null);
+            AppendStr(sb, c.HearingJudgeName);
+            AppendStr(sb, c.HearingCity);
+            AppendStr(sb, c.HearingCourtName);
+            AppendStr(sb, c.MeetStatus?.ToString(CultureInfo.InvariantCulture));
+
+            // ── Derived fields (must be computed before calling this method) ──
+            AppendStr(sb, c.DocumentType);
+            AppendStr(sb, MapTaskTypeLabel(c.TikType));
+            AppendStr(sb, MapPlaintiffSideLabel(c.PlaintiffSideRaw));
+            AppendStr(sb, MapDefendantSideLabel(c.DefendantSideRaw));
+            AppendStr(sb, DetermineResponsibleText(c));
+
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+
+        private static void AppendStr(StringBuilder sb, string? value)
+        {
+            sb.Append(value?.Trim() ?? "").Append('|');
+        }
+
+        private static void AppendDate(StringBuilder sb, DateTime? value)
+        {
+            sb.Append(value?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "").Append('|');
+        }
+
+        private static void AppendDec(StringBuilder sb, decimal? value)
+        {
+            sb.Append(value?.ToString(CultureInfo.InvariantCulture) ?? "").Append('|');
+        }
+
         private static string ComputeHearingChecksum(OdcanitCase c)
         {
             var date = c.HearingDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "";
@@ -2941,6 +3101,7 @@ namespace Odmon.Worker.Services
 
         /// <summary>
         /// Executes an async operation with exponential backoff retry for transient failures.
+        /// Supports jitter, Retry-After header, and configurable max attempts.
         /// Non-transient exceptions (validation, permanent API errors) are re-thrown immediately.
         /// Returns (result, retryCount).
         /// </summary>
@@ -2950,8 +3111,10 @@ namespace Odmon.Worker.Services
             int tikCounter,
             CancellationToken ct)
         {
+            var maxRetryAttempts = _config.GetValue<int>("Monday:MaxRetryAttempts", 3);
             int retryCount = 0;
-            for (int attempt = 0; attempt <= MaxRetryAttempts; attempt++)
+
+            for (int attempt = 0; attempt <= maxRetryAttempts; attempt++)
             {
                 try
                 {
@@ -2960,26 +3123,100 @@ namespace Odmon.Worker.Services
                 }
                 catch (CriticalFieldValidationException) { throw; }
                 catch (OperationCanceledException) { throw; }
-                catch (Exception ex) when (attempt < MaxRetryAttempts && IsTransientError(ex))
+                catch (Exception ex) when (attempt < maxRetryAttempts && IsTransientError(ex))
                 {
                     retryCount = attempt + 1;
-                    var delay = RetryDelays[Math.Min(attempt, RetryDelays.Length - 1)];
-                    _logger.LogWarning(
+                    var delay = ComputeRetryDelay(attempt, ex);
+                    _logger.LogDebug(
                         "Transient error in {Operation} for TikCounter={TikCounter} (attempt {Attempt}/{MaxAttempts}). Retrying in {DelayMs}ms. Error: {Error}",
-                        operationName, tikCounter, attempt + 1, MaxRetryAttempts, delay.TotalMilliseconds, ex.Message);
+                        operationName, tikCounter, attempt + 1, maxRetryAttempts, delay.TotalMilliseconds, ex.Message);
                     await Task.Delay(delay, ct);
                 }
             }
-            // Final attempt — let exceptions propagate
-            var finalResult = await operation();
-            return (finalResult, retryCount);
+
+            // Final attempt — let exceptions propagate with a Warning
+            try
+            {
+                var finalResult = await operation();
+                return (finalResult, retryCount);
+            }
+            catch (Exception ex) when (ex is not CriticalFieldValidationException && ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(
+                    "Final retry attempt failed for {Operation}, TikCounter={TikCounter} after {RetryCount} retries. Error: {Error}",
+                    operationName, tikCounter, retryCount, ex.Message);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Computes retry delay with exponential backoff + random jitter.
+        /// Respects Retry-After header from Monday API (HTTP 429) if available.
+        /// </summary>
+        internal static TimeSpan ComputeRetryDelay(int attempt, Exception? ex)
+        {
+            // Check for Retry-After hint in Monday API exceptions
+            var retryAfterSeconds = ExtractRetryAfterSeconds(ex);
+            if (retryAfterSeconds.HasValue && retryAfterSeconds.Value > 0)
+            {
+                // Use at least the server-requested delay, capped at 60s
+                var serverDelay = Math.Min(retryAfterSeconds.Value, 60);
+                return TimeSpan.FromSeconds(serverDelay);
+            }
+
+            // Exponential backoff: 1s, 4s, 12s base delays
+            var baseDelays = new[] { 1.0, 4.0, 12.0 };
+            var baseSeconds = baseDelays[Math.Min(attempt, baseDelays.Length - 1)];
+
+            // Add random jitter: ±25% of base delay
+            var jitterFactor = 1.0 + (Random.Shared.NextDouble() - 0.5) * 0.5; // 0.75 to 1.25
+            var delaySeconds = baseSeconds * jitterFactor;
+
+            return TimeSpan.FromSeconds(Math.Max(delaySeconds, 0.5));
+        }
+
+        /// <summary>
+        /// Attempts to extract a Retry-After value (in seconds) from an exception.
+        /// Monday API returns Retry-After header on 429 responses.
+        /// </summary>
+        private static int? ExtractRetryAfterSeconds(Exception? ex)
+        {
+            if (ex is HttpRequestException httpEx && httpEx.InnerException is System.Net.Http.HttpRequestException)
+                return null;
+
+            // Check if the MondayApiException message or raw JSON contains a retry-after hint
+            if (ex is Monday.MondayApiException mondayEx)
+            {
+                var raw = mondayEx.RawErrorJson ?? mondayEx.Message ?? "";
+                // Monday rate-limit responses sometimes include a retry-after value in the error
+                var match = System.Text.RegularExpressions.Regex.Match(raw, @"[Rr]etry[- ][Aa]fter["":\s]+(\d+)");
+                if (match.Success && int.TryParse(match.Groups[1].Value, out var seconds))
+                    return seconds;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Increments the consecutive Monday failure counter and trips the circuit breaker if threshold exceeded.
+        /// </summary>
+        private void IncrementCircuitBreaker(int threshold)
+        {
+            _consecutiveMondayFailures++;
+            if (threshold > 0 && _consecutiveMondayFailures >= threshold && !_circuitBreakerTripped)
+            {
+                _circuitBreakerTripped = true;
+                _logger.LogError(
+                    "CIRCUIT BREAKER TRIPPED – {ConsecutiveFailures} consecutive Monday API failures reached threshold {Threshold}",
+                    _consecutiveMondayFailures, threshold);
+            }
         }
 
         /// <summary>
         /// Determines whether an exception represents a transient failure worth retrying.
         /// Transient: network errors, HTTP 429/5xx, SQL deadlocks/timeouts.
         /// </summary>
-        private static bool IsTransientError(Exception ex)
+        internal static bool IsTransientError(Exception ex)
         {
             if (ex is HttpRequestException) return true;
             if (ex is TaskCanceledException tce && tce.InnerException is TimeoutException) return true;

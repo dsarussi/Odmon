@@ -15,12 +15,10 @@ namespace Odmon.Worker.Monday
 {
     public class MondayMetadataProvider : IMondayMetadataProvider
     {
-        private const int DropdownLabelsCacheTtlMinutes = 15;
+        private const int BoardMetadataCacheTtlMinutes = 10;
         private readonly HttpClient _httpClient;
         private readonly ILogger<MondayMetadataProvider> _logger;
-        private readonly Dictionary<(long boardId, string title), string> _cache = new();
-        private readonly Dictionary<(long boardId, string columnId), DropdownLabelsCacheEntry> _dropdownLabelsCache = new();
-        private readonly Dictionary<(long boardId, string columnId), string> _columnTypeCache = new();
+        private readonly Dictionary<long, BoardMetadataCacheEntry> _boardMetadataCache = new();
 
         public MondayMetadataProvider(
             HttpClient httpClient,
@@ -83,23 +81,37 @@ namespace Odmon.Worker.Monday
             return false;
         }
 
-        public async Task<string> GetColumnIdByTitleAsync(long boardId, string title, CancellationToken ct = default)
+        // ================================================================
+        // Board-level metadata cache (single API call per board per TTL)
+        // ================================================================
+
+        public async Task<Dictionary<string, BoardColumnMetadata>> GetBoardColumnsMetadataAsync(long boardId, CancellationToken ct = default)
         {
-            var cacheKey = (boardId, title);
-            lock (_cache)
+            // Check cache with TTL
+            lock (_boardMetadataCache)
             {
-                if (_cache.TryGetValue(cacheKey, out var cachedId))
+                if (_boardMetadataCache.TryGetValue(boardId, out var cached))
                 {
-                    return cachedId;
+                    var age = DateTime.UtcNow - cached.Timestamp;
+                    if (age.TotalMinutes < BoardMetadataCacheTtlMinutes)
+                    {
+                        _logger.LogDebug("Using cached board columns metadata for board {BoardId} (age: {Age})", boardId, age);
+                        return cached.Columns;
+                    }
+                    _logger.LogDebug("Board metadata cache expired for board {BoardId} (age: {Age}), refreshing", boardId, age);
+                    _boardMetadataCache.Remove(boardId);
                 }
             }
 
+            // Single GraphQL call fetching all column metadata
             var query = @"query ($boardIds: [ID!]) {
                 boards (ids: $boardIds) {
                     id
                     columns {
                         id
                         title
+                        type
+                        settings_str
                     }
                 }
             }";
@@ -112,7 +124,24 @@ namespace Odmon.Worker.Monday
             var payload = JsonSerializer.Serialize(new { query, variables });
             var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
+            _logger.LogDebug(
+                "Calling Monday API for board columns metadata: board {BoardId}. BaseAddress: {BaseAddress}, HasAuthHeader: {HasAuthHeader}",
+                boardId,
+                _httpClient.BaseAddress,
+                _httpClient.DefaultRequestHeaders.Authorization != null);
+
             var resp = await _httpClient.PostAsync("", content, ct);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var errorBody = await resp.Content.ReadAsStringAsync(ct);
+                _logger.LogError(
+                    "Monday API request FAILED with status {StatusCode} for board columns metadata on board {BoardId}. Response: {ResponseBody}",
+                    resp.StatusCode,
+                    boardId,
+                    errorBody.Length > 500 ? errorBody.Substring(0, 500) + "..." : errorBody);
+            }
+
             resp.EnsureSuccessStatusCode();
             var body = await resp.Content.ReadAsStringAsync(ct);
 
@@ -121,206 +150,121 @@ namespace Odmon.Worker.Monday
 
             if (root.TryGetProperty("errors", out var errors))
             {
-                throw new InvalidOperationException($"Monday.com API error while fetching column metadata: {errors}");
+                throw new InvalidOperationException($"Monday.com API error while fetching board columns metadata: {errors}");
             }
 
             if (!root.TryGetProperty("data", out var data) ||
                 !data.TryGetProperty("boards", out var boards) ||
-                boards.ValueKind != System.Text.Json.JsonValueKind.Array ||
+                boards.ValueKind != JsonValueKind.Array ||
                 boards.GetArrayLength() == 0)
             {
-                throw new InvalidOperationException($"Monday.com unexpected response when fetching board metadata: {body}");
+                throw new InvalidOperationException($"Monday.com unexpected response when fetching board columns metadata for board {boardId}: {body}");
             }
 
             var board = boards[0];
             if (!board.TryGetProperty("columns", out var columns) ||
-                columns.ValueKind != System.Text.Json.JsonValueKind.Array)
+                columns.ValueKind != JsonValueKind.Array)
             {
-                throw new InvalidOperationException($"Monday.com board {boardId} has no columns in response: {body}");
+                throw new InvalidOperationException($"Monday.com board {boardId} has no columns in metadata response: {body}");
             }
 
+            var result = new Dictionary<string, BoardColumnMetadata>(StringComparer.Ordinal);
             foreach (var column in columns.EnumerateArray())
             {
-                if (column.TryGetProperty("title", out var columnTitle) &&
-                    column.TryGetProperty("id", out var columnId))
-                {
-                    var columnTitleValue = columnTitle.GetString();
-                    var columnIdValue = columnId.GetString();
+                var colId = column.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+                if (string.IsNullOrWhiteSpace(colId)) continue;
 
-                    if (columnTitleValue == title && !string.IsNullOrWhiteSpace(columnIdValue))
-                    {
-                        lock (_cache)
-                        {
-                            _cache[cacheKey] = columnIdValue;
-                        }
-                        return columnIdValue;
-                    }
+                result[colId] = new BoardColumnMetadata
+                {
+                    ColumnId = colId,
+                    Title = column.TryGetProperty("title", out var titleEl) ? titleEl.GetString() : null,
+                    ColumnType = column.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : null,
+                    SettingsStr = column.TryGetProperty("settings_str", out var settingsEl) ? settingsEl.GetString() : null
+                };
+            }
+
+            // Cache on success only
+            lock (_boardMetadataCache)
+            {
+                _boardMetadataCache[boardId] = new BoardMetadataCacheEntry
+                {
+                    Columns = result,
+                    Timestamp = DateTime.UtcNow
+                };
+            }
+
+            _logger.LogInformation(
+                "Fetched and cached {Count} column(s) metadata for board {BoardId}",
+                result.Count, boardId);
+
+            return result;
+        }
+
+        // ================================================================
+        // GetColumnIdByTitleAsync – delegates to board cache
+        // ================================================================
+
+        public async Task<string> GetColumnIdByTitleAsync(long boardId, string title, CancellationToken ct = default)
+        {
+            var columns = await GetBoardColumnsMetadataAsync(boardId, ct);
+
+            foreach (var kvp in columns)
+            {
+                if (string.Equals(kvp.Value.Title, title, StringComparison.Ordinal))
+                {
+                    return kvp.Key;
                 }
             }
 
-            throw new InvalidOperationException($"Column with title '{title}' not found on Monday board {boardId}. Available columns: {string.Join(", ", columns.EnumerateArray().Select(c => c.TryGetProperty("title", out var t) ? t.GetString() : "?"))}");
+            throw new InvalidOperationException(
+                $"Column with title '{title}' not found on Monday board {boardId}. " +
+                $"Available columns: {string.Join(", ", columns.Values.Select(c => c.Title))}");
         }
+
+        // ================================================================
+        // GetAllowedDropdownLabelsAsync – parses labels from board cache
+        // ================================================================
 
         public async Task<HashSet<string>> GetAllowedDropdownLabelsAsync(long boardId, string columnId, CancellationToken ct = default)
         {
-            var cacheKey = (boardId, columnId);
-            
-            // Check cache with TTL
-            lock (_dropdownLabelsCache)
-            {
-                if (_dropdownLabelsCache.TryGetValue(cacheKey, out var cachedEntry))
-                {
-                    var age = DateTime.UtcNow - cachedEntry.Timestamp;
-                    if (age.TotalMinutes < DropdownLabelsCacheTtlMinutes)
-                    {
-                        _logger.LogDebug("Using cached dropdown labels for column {ColumnId} on board {BoardId} (age: {Age})", columnId, boardId, age);
-                        return cachedEntry.Labels;
-                    }
-                    else
-                    {
-                        _logger.LogDebug("Dropdown labels cache expired for column {ColumnId} on board {BoardId} (age: {Age}), refreshing", columnId, boardId, age);
-                        _dropdownLabelsCache.Remove(cacheKey);
-                    }
-                }
-            }
-
             try
             {
-                var query = @"query ($boardIds: [ID!]) {
-                    boards (ids: $boardIds) {
-                        id
-                        columns {
-                            id
-                            type
-                            settings_str
-                        }
-                    }
-                }";
+                var columns = await GetBoardColumnsMetadataAsync(boardId, ct);
 
-                var variables = new Dictionary<string, object>
+                if (!columns.TryGetValue(columnId, out var meta))
                 {
-                    ["boardIds"] = new[] { boardId.ToString() }
-                };
-
-                var payload = JsonSerializer.Serialize(new { query, variables });
-                var content = new StringContent(payload, Encoding.UTF8, "application/json");
-
-                _logger.LogDebug(
-                    "Calling Monday API for board {BoardId}, column {ColumnId}. BaseAddress: {BaseAddress}, HasAuthHeader: {HasAuthHeader}",
-                    boardId,
-                    columnId,
-                    _httpClient.BaseAddress,
-                    _httpClient.DefaultRequestHeaders.Authorization != null);
-
-                var resp = await _httpClient.PostAsync("", content, ct);
-                
-                if (!resp.IsSuccessStatusCode)
-                {
-                    var errorBody = await resp.Content.ReadAsStringAsync(ct);
-                    _logger.LogError(
-                        "Monday API request FAILED with status {StatusCode} for board {BoardId}, column {ColumnId}. Response body: {ResponseBody}",
-                        resp.StatusCode,
-                        boardId,
-                        columnId,
-                        errorBody.Length > 500 ? errorBody.Substring(0, 500) + "..." : errorBody);
-                }
-                
-                resp.EnsureSuccessStatusCode();
-                var body = await resp.Content.ReadAsStringAsync(ct);
-
-                using var doc = JsonDocument.Parse(body);
-                var root = doc.RootElement;
-
-                if (root.TryGetProperty("errors", out var errors))
-                {
-                    _logger.LogWarning("Monday.com API error while fetching dropdown metadata for board {BoardId}: {Errors}", boardId, errors.ToString());
-                    throw new InvalidOperationException($"Monday.com API error while fetching dropdown metadata: {errors}");
-                }
-
-                if (!root.TryGetProperty("data", out var data) ||
-                    !data.TryGetProperty("boards", out var boards) ||
-                    boards.ValueKind != JsonValueKind.Array ||
-                    boards.GetArrayLength() == 0)
-                {
-                    throw new InvalidOperationException($"Monday.com unexpected response when fetching dropdown metadata for board {boardId}: {body}");
-                }
-
-                var board = boards[0];
-                if (!board.TryGetProperty("columns", out var columns) ||
-                    columns.ValueKind != JsonValueKind.Array)
-                {
-                    throw new InvalidOperationException($"Monday.com board {boardId} has no columns in dropdown metadata response: {body}");
-                }
-
-                JsonElement? targetColumn = null;
-                foreach (var column in columns.EnumerateArray())
-                {
-                    if (column.TryGetProperty("id", out var idElement))
-                    {
-                        var idValue = idElement.GetString();
-                        if (string.Equals(idValue, columnId, StringComparison.Ordinal))
-                        {
-                            targetColumn = column;
-                            break;
-                        }
-                    }
-                }
-
-                if (targetColumn is null)
-                {
-                    var availableColumns = string.Join(", ", columns.EnumerateArray().Select(c => c.TryGetProperty("id", out var id) ? id.GetString() : "?"));
+                    var availableColumns = string.Join(", ", columns.Keys);
                     _logger.LogError(
                         "Column {ColumnId} not found on board {BoardId} when resolving allowed labels. Available columns: {AvailableColumns}",
-                        columnId,
-                        boardId,
-                        availableColumns);
-                    
+                        columnId, boardId, availableColumns);
+
                     throw new InvalidOperationException(
                         $"Column {columnId} not found on board {boardId}. " +
                         $"This indicates a configuration mismatch. Available columns: {availableColumns}");
                 }
 
-                if (!targetColumn.Value.TryGetProperty("settings_str", out var settingsElement))
+                if (string.IsNullOrWhiteSpace(meta.SettingsStr))
                 {
-                    var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
                     _logger.LogError(
-                        "Column {ColumnId} (type={ColumnType}) on board {BoardId} has no settings_str; cannot resolve allowed labels.",
-                        columnId,
-                        columnType,
-                        boardId);
-                    
-                    throw new InvalidOperationException(
-                        $"Column {columnId} (type={columnType}) on board {boardId} has no settings_str. " +
-                        $"Cannot resolve allowed labels without settings.");
-                }
+                        "Column {ColumnId} (type={ColumnType}) on board {BoardId} has no/empty settings_str; cannot resolve allowed labels.",
+                        columnId, meta.ColumnType, boardId);
 
-                var settingsStr = settingsElement.GetString();
-                if (string.IsNullOrWhiteSpace(settingsStr))
-                {
-                    var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
-                    _logger.LogError(
-                        "Column {ColumnId} (type={ColumnType}) on board {BoardId} has empty settings_str",
-                        columnId,
-                        columnType,
-                        boardId);
-                    
                     throw new InvalidOperationException(
-                        $"Column {columnId} (type={columnType}) on board {boardId} has empty settings_str. " +
+                        $"Column {columnId} (type={meta.ColumnType}) on board {boardId} has empty settings_str. " +
                         $"Cannot resolve allowed labels.");
                 }
 
                 _logger.LogDebug(
                     "Parsing settings_str for column {ColumnId} on board {BoardId}: {SettingsStrPreview}",
-                    columnId,
-                    boardId,
-                    settingsStr.Length > 200 ? settingsStr.Substring(0, 200) + "..." : settingsStr);
+                    columnId, boardId,
+                    meta.SettingsStr.Length > 200 ? meta.SettingsStr.Substring(0, 200) + "..." : meta.SettingsStr);
 
-                using var settingsDoc = JsonDocument.Parse(settingsStr);
+                using var settingsDoc = JsonDocument.Parse(meta.SettingsStr);
                 var settingsRoot = settingsDoc.RootElement;
 
                 var labels = new HashSet<string>(StringComparer.Ordinal);
-                
-                // Try parsing labels array
+
+                // Dropdown labels: array of { "name": "..." }
                 if (settingsRoot.TryGetProperty("labels", out var labelsElement) &&
                     labelsElement.ValueKind == JsonValueKind.Array)
                 {
@@ -334,49 +278,33 @@ namespace Odmon.Worker.Monday
                                 labels.Add(name);
                                 _logger.LogDebug(
                                     "Found label for column {ColumnId}: '{LabelName}'",
-                                    columnId,
-                                    name);
+                                    columnId, name);
                             }
                         }
                     }
                 }
                 else
                 {
-                    var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
+                    var columnType = meta.ColumnType ?? "unknown";
                     _logger.LogWarning(
                         "Column {ColumnId} (type={ColumnType}) on board {BoardId} has settings_str but no 'labels' array. SettingsStr keys: {SettingsKeys}",
-                        columnId,
-                        columnType,
-                        boardId,
+                        columnId, columnType, boardId,
                         string.Join(", ", settingsRoot.EnumerateObject().Select(p => p.Name)));
                 }
 
                 if (labels.Count > 0)
                 {
-                    // Only cache non-empty results
-                    lock (_dropdownLabelsCache)
-                    {
-                        _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
-                        {
-                            Labels = labels,
-                            Timestamp = DateTime.UtcNow
-                        };
-                    }
-
                     _logger.LogInformation(
                         "Resolved {Count} allowed label(s) for column {ColumnId} on board {BoardId}: [{Labels}]",
-                        labels.Count,
-                        columnId,
-                        boardId,
+                        labels.Count, columnId, boardId,
                         string.Join(", ", labels));
                 }
                 else
                 {
                     _logger.LogError(
                         "No labels found for DROPDOWN column {ColumnId} on board {BoardId}. Settings parsed but labels array was empty or invalid. This should not happen for a valid dropdown column.",
-                        columnId,
-                        boardId);
-                    
+                        columnId, boardId);
+
                     throw new InvalidOperationException(
                         $"No labels found for dropdown column {columnId} on board {boardId}. " +
                         $"Settings parsed but labels array was empty or invalid.");
@@ -389,10 +317,8 @@ namespace Odmon.Worker.Monday
                 _logger.LogError(
                     ex,
                     "Failed to fetch/parse allowed labels for column {ColumnId} on board {BoardId}. Exception: {ExceptionType}, Message: {ExceptionMessage}",
-                    columnId,
-                    boardId,
-                    ex.GetType().Name,
-                    ex.Message);
+                    columnId, boardId,
+                    ex.GetType().Name, ex.Message);
 
                 // DO NOT return empty labels - this hides infrastructure failures
                 // Throw to surface the real issue (auth, network, config, etc.)
@@ -403,163 +329,49 @@ namespace Odmon.Worker.Monday
             }
         }
 
+        // ================================================================
+        // GetAllowedStatusLabelsAsync – parses status labels from board cache
+        // ================================================================
+
         public async Task<HashSet<string>> GetAllowedStatusLabelsAsync(long boardId, string columnId, CancellationToken ct = default)
         {
-            var cacheKey = (boardId, columnId);
-            
-            // Check cache with TTL (reuse dropdown cache structure)
-            lock (_dropdownLabelsCache)
-            {
-                if (_dropdownLabelsCache.TryGetValue(cacheKey, out var cachedEntry))
-                {
-                    var age = DateTime.UtcNow - cachedEntry.Timestamp;
-                    if (age.TotalMinutes < DropdownLabelsCacheTtlMinutes)
-                    {
-                        _logger.LogDebug("Using cached status labels for column {ColumnId} on board {BoardId} (age: {Age})", columnId, boardId, age);
-                        return cachedEntry.Labels;
-                    }
-                    else
-                    {
-                        _logger.LogDebug("Status labels cache expired for column {ColumnId} on board {BoardId} (age: {Age}), refreshing", columnId, boardId, age);
-                        _dropdownLabelsCache.Remove(cacheKey);
-                    }
-                }
-            }
-
             try
             {
-                var query = @"query ($boardIds: [ID!]) {
-                    boards (ids: $boardIds) {
-                        id
-                        columns {
-                            id
-                            type
-                            settings_str
-                        }
-                    }
-                }";
+                var columns = await GetBoardColumnsMetadataAsync(boardId, ct);
 
-                var variables = new Dictionary<string, object>
+                if (!columns.TryGetValue(columnId, out var meta))
                 {
-                    ["boardIds"] = new[] { boardId.ToString() }
-                };
-
-                var payload = JsonSerializer.Serialize(new { query, variables });
-                var content = new StringContent(payload, Encoding.UTF8, "application/json");
-
-                _logger.LogDebug(
-                    "Calling Monday API for STATUS column labels: board {BoardId}, column {ColumnId}",
-                    boardId,
-                    columnId);
-
-                var resp = await _httpClient.PostAsync("", content, ct);
-                
-                if (!resp.IsSuccessStatusCode)
-                {
-                    var errorBody = await resp.Content.ReadAsStringAsync(ct);
-                    _logger.LogError(
-                        "Monday API request FAILED for STATUS labels with status {StatusCode} for board {BoardId}, column {ColumnId}. Response: {ResponseBody}",
-                        resp.StatusCode,
-                        boardId,
-                        columnId,
-                        errorBody.Length > 500 ? errorBody.Substring(0, 500) + "..." : errorBody);
-                }
-                
-                resp.EnsureSuccessStatusCode();
-                var body = await resp.Content.ReadAsStringAsync(ct);
-
-                using var doc = JsonDocument.Parse(body);
-                var root = doc.RootElement;
-
-                if (root.TryGetProperty("errors", out var errors))
-                {
-                    _logger.LogWarning("Monday.com API error while fetching status column metadata for board {BoardId}: {Errors}", boardId, errors.ToString());
-                    throw new InvalidOperationException($"Monday.com API error while fetching status column metadata: {errors}");
-                }
-
-                if (!root.TryGetProperty("data", out var data) ||
-                    !data.TryGetProperty("boards", out var boards) ||
-                    boards.ValueKind != JsonValueKind.Array ||
-                    boards.GetArrayLength() == 0)
-                {
-                    throw new InvalidOperationException($"Monday.com unexpected response when fetching status column metadata for board {boardId}: {body}");
-                }
-
-                var board = boards[0];
-                if (!board.TryGetProperty("columns", out var columns) ||
-                    columns.ValueKind != JsonValueKind.Array)
-                {
-                    throw new InvalidOperationException($"Monday.com board {boardId} has no columns in status metadata response: {body}");
-                }
-
-                JsonElement? targetColumn = null;
-                foreach (var column in columns.EnumerateArray())
-                {
-                    if (column.TryGetProperty("id", out var idElement))
-                    {
-                        var idValue = idElement.GetString();
-                        if (string.Equals(idValue, columnId, StringComparison.Ordinal))
-                        {
-                            targetColumn = column;
-                            break;
-                        }
-                    }
-                }
-
-                if (targetColumn is null)
-                {
-                    var availableColumns = string.Join(", ", columns.EnumerateArray().Select(c => c.TryGetProperty("id", out var id) ? id.GetString() : "?"));
+                    var availableColumns = string.Join(", ", columns.Keys);
                     _logger.LogError(
                         "Status column {ColumnId} not found on board {BoardId} when resolving allowed labels. Available columns: {AvailableColumns}",
-                        columnId,
-                        boardId,
-                        availableColumns);
-                    
+                        columnId, boardId, availableColumns);
+
                     throw new InvalidOperationException(
                         $"Status column {columnId} not found on board {boardId}. " +
                         $"This indicates a configuration mismatch. Available columns: {availableColumns}");
                 }
 
-                if (!targetColumn.Value.TryGetProperty("settings_str", out var settingsElement))
+                if (string.IsNullOrWhiteSpace(meta.SettingsStr))
                 {
-                    var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
                     _logger.LogError(
-                        "Status column {ColumnId} (type={ColumnType}) on board {BoardId} has no settings_str; cannot resolve allowed labels.",
-                        columnId,
-                        columnType,
-                        boardId);
-                    
-                    throw new InvalidOperationException(
-                        $"Status column {columnId} (type={columnType}) on board {boardId} has no settings_str. " +
-                        $"Cannot resolve allowed labels without settings.");
-                }
+                        "Status column {ColumnId} (type={ColumnType}) on board {BoardId} has no/empty settings_str; cannot resolve allowed labels.",
+                        columnId, meta.ColumnType, boardId);
 
-                var settingsStr = settingsElement.GetString();
-                if (string.IsNullOrWhiteSpace(settingsStr))
-                {
-                    var columnType = targetColumn.Value.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "unknown";
-                    _logger.LogError(
-                        "Status column {ColumnId} (type={ColumnType}) on board {BoardId} has empty settings_str",
-                        columnId,
-                        columnType,
-                        boardId);
-                    
                     throw new InvalidOperationException(
-                        $"Status column {columnId} (type={columnType}) on board {boardId} has empty settings_str. " +
+                        $"Status column {columnId} (type={meta.ColumnType}) on board {boardId} has empty settings_str. " +
                         $"Cannot resolve allowed labels.");
                 }
 
                 _logger.LogDebug(
                     "Parsing settings_str for STATUS column {ColumnId} on board {BoardId}: {SettingsStrPreview}",
-                    columnId,
-                    boardId,
-                    settingsStr.Length > 200 ? settingsStr.Substring(0, 200) + "..." : settingsStr);
+                    columnId, boardId,
+                    meta.SettingsStr.Length > 200 ? meta.SettingsStr.Substring(0, 200) + "..." : meta.SettingsStr);
 
-                using var settingsDoc = JsonDocument.Parse(settingsStr);
+                using var settingsDoc = JsonDocument.Parse(meta.SettingsStr);
                 var settingsRoot = settingsDoc.RootElement;
 
                 var labels = new HashSet<string>(StringComparer.Ordinal);
-                
+
                 // STATUS columns: labels is a DICTIONARY where values are the label strings
                 // Example: {"labels": {"0": "כתב תביעה", "1": "כתב הגנה", "11": "תצהיר עד ראשי"}}
                 if (settingsRoot.TryGetProperty("labels", out var labelsElement) &&
@@ -573,9 +385,7 @@ namespace Odmon.Worker.Monday
                             labels.Add(labelValue);
                             _logger.LogDebug(
                                 "Found STATUS label for column {ColumnId} (key={Key}): '{LabelValue}'",
-                                columnId,
-                                labelProperty.Name,
-                                labelValue);
+                                columnId, labelProperty.Name, labelValue);
                         }
                     }
                 }
@@ -583,38 +393,24 @@ namespace Odmon.Worker.Monday
                 {
                     _logger.LogWarning(
                         "Status column {ColumnId} on board {BoardId} has settings_str but 'labels' is not an object. ValueKind: {ValueKind}, SettingsStr keys: {SettingsKeys}",
-                        columnId,
-                        boardId,
+                        columnId, boardId,
                         labelsElement.ValueKind,
                         string.Join(", ", settingsRoot.EnumerateObject().Select(p => p.Name)));
                 }
 
                 if (labels.Count > 0)
                 {
-                    // Cache successful results
-                    lock (_dropdownLabelsCache)
-                    {
-                        _dropdownLabelsCache[cacheKey] = new DropdownLabelsCacheEntry
-                        {
-                            Labels = labels,
-                            Timestamp = DateTime.UtcNow
-                        };
-                    }
-
                     _logger.LogInformation(
                         "Resolved {Count} allowed STATUS label(s) for column {ColumnId} on board {BoardId}: [{Labels}]",
-                        labels.Count,
-                        columnId,
-                        boardId,
+                        labels.Count, columnId, boardId,
                         string.Join(", ", labels));
                 }
                 else
                 {
                     _logger.LogError(
                         "No labels found for STATUS column {ColumnId} on board {BoardId}. Settings parsed but labels object was empty or invalid. This should not happen for a valid status column.",
-                        columnId,
-                        boardId);
-                    
+                        columnId, boardId);
+
                     throw new InvalidOperationException(
                         $"No labels found for status column {columnId} on board {boardId}. " +
                         $"Settings parsed but labels object was empty or invalid.");
@@ -627,10 +423,8 @@ namespace Odmon.Worker.Monday
                 _logger.LogError(
                     ex,
                     "Failed to fetch/parse allowed STATUS labels for column {ColumnId} on board {BoardId}. Exception: {ExceptionType}, Message: {ExceptionMessage}",
-                    columnId,
-                    boardId,
-                    ex.GetType().Name,
-                    ex.Message);
+                    columnId, boardId,
+                    ex.GetType().Name, ex.Message);
 
                 // DO NOT return empty labels - this hides infrastructure failures
                 // Throw to surface the real issue (auth, network, config, etc.)
@@ -641,101 +435,27 @@ namespace Odmon.Worker.Monday
             }
         }
 
+        // ================================================================
+        // GetColumnTypeAsync – looks up type from board cache
+        // ================================================================
+
         public async Task<string?> GetColumnTypeAsync(long boardId, string columnId, CancellationToken ct = default)
         {
-            var cacheKey = (boardId, columnId);
-            
-            // Check cache
-            lock (_columnTypeCache)
-            {
-                if (_columnTypeCache.TryGetValue(cacheKey, out var cachedType))
-                {
-                    return cachedType;
-                }
-            }
-
             try
             {
-                var query = @"query ($boardIds: [ID!]) {
-                    boards (ids: $boardIds) {
-                        id
-                        columns {
-                            id
-                            type
-                        }
-                    }
-                }";
+                var columns = await GetBoardColumnsMetadataAsync(boardId, ct);
 
-                var variables = new Dictionary<string, object>
+                if (columns.TryGetValue(columnId, out var meta) && !string.IsNullOrWhiteSpace(meta.ColumnType))
                 {
-                    ["boardIds"] = new[] { boardId.ToString() }
-                };
-
-                var payload = JsonSerializer.Serialize(new { query, variables });
-                var content = new StringContent(payload, Encoding.UTF8, "application/json");
-
-                var resp = await _httpClient.PostAsync("", content, ct);
-                resp.EnsureSuccessStatusCode();
-                var body = await resp.Content.ReadAsStringAsync(ct);
-
-                using var doc = JsonDocument.Parse(body);
-                var root = doc.RootElement;
-
-                if (root.TryGetProperty("errors", out var errors))
-                {
-                    _logger.LogWarning("Monday.com API error while fetching column type for board {BoardId}: {Errors}", boardId, errors.ToString());
-                    return null;
-                }
-
-                if (!root.TryGetProperty("data", out var data) ||
-                    !data.TryGetProperty("boards", out var boards) ||
-                    boards.ValueKind != JsonValueKind.Array ||
-                    boards.GetArrayLength() == 0)
-                {
-                    _logger.LogWarning("Monday.com unexpected response when fetching column type for board {BoardId}", boardId);
-                    return null;
-                }
-
-                var board = boards[0];
-                if (!board.TryGetProperty("columns", out var columns) ||
-                    columns.ValueKind != JsonValueKind.Array)
-                {
-                    _logger.LogWarning("Monday.com board {BoardId} has no columns in type response", boardId);
-                    return null;
-                }
-
-                foreach (var column in columns.EnumerateArray())
-                {
-                    if (column.TryGetProperty("id", out var idElement))
-                    {
-                        var idValue = idElement.GetString();
-                        if (string.Equals(idValue, columnId, StringComparison.Ordinal))
-                        {
-                            if (column.TryGetProperty("type", out var typeElement))
-                            {
-                                var columnType = typeElement.GetString();
-                                if (!string.IsNullOrWhiteSpace(columnType))
-                                {
-                                    lock (_columnTypeCache)
-                                    {
-                                        _columnTypeCache[cacheKey] = columnType;
-                                    }
-                                    _logger.LogDebug(
-                                        "Resolved column type for {ColumnId} on board {BoardId}: {ColumnType}",
-                                        columnId,
-                                        boardId,
-                                        columnType);
-                                    return columnType;
-                                }
-                            }
-                        }
-                    }
+                    _logger.LogDebug(
+                        "Resolved column type for {ColumnId} on board {BoardId}: {ColumnType}",
+                        columnId, boardId, meta.ColumnType);
+                    return meta.ColumnType;
                 }
 
                 _logger.LogWarning(
                     "Column {ColumnId} not found on board {BoardId} when resolving type",
-                    columnId,
-                    boardId);
+                    columnId, boardId);
                 return null;
             }
             catch (Exception ex)
@@ -743,17 +463,22 @@ namespace Odmon.Worker.Monday
                 _logger.LogWarning(
                     ex,
                     "Failed to fetch column type for column {ColumnId} on board {BoardId}",
-                    columnId,
-                    boardId);
+                    columnId, boardId);
                 return null;
             }
         }
 
-        private class DropdownLabelsCacheEntry
+        // ================================================================
+        // Internal types exposed for testing
+        // ================================================================
+
+        internal class BoardMetadataCacheEntry
         {
-            public HashSet<string> Labels { get; set; } = new();
+            public Dictionary<string, BoardColumnMetadata> Columns { get; set; } = new();
             public DateTime Timestamp { get; set; }
         }
+
+        /// <summary>Exposed for testing: allows inspecting/manipulating board metadata cache entries.</summary>
+        internal Dictionary<long, BoardMetadataCacheEntry> BoardMetadataCache => _boardMetadataCache;
     }
 }
-

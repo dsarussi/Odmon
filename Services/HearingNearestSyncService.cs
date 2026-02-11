@@ -257,7 +257,7 @@ namespace Odmon.Worker.Services
                 }
                 else if (startDateChanged && !canUpdateDateHour)
                 {
-                    _logger.LogInformation(
+                    _logger.LogDebug(
                         "Hearing date/hour update blocked (missing judge or court city): TikCounter={TikCounter}, TikNumber={TikNumber}, MondayItemId={MondayItemId}, HasJudgeName={HasJudgeName}, HasCourtCity={HasCourtCity}",
                         mapping.TikCounter,
                         mapping.TikNumber,
@@ -274,7 +274,7 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "Hearing sync planned: TikCounter={TikCounter}, TikNumber={TikNumber}, MondayItemId={MondayItemId}, StartDate={StartDate}, MeetStatus={MeetStatus}, Steps=[{Steps}], SnapshotOld=[StartDate={SnapshotStart}, Status={SnapshotStatus}], CanUpdateDateHour={CanUpdateDateHour}",
                     mapping.TikCounter, mapping.TikNumber, mapping.MondayItemId,
                     hearing.StartDate!.Value.ToString("yyyy-MM-dd HH:mm"), meetStatus, string.Join(", ", plannedSteps),
@@ -283,7 +283,7 @@ namespace Odmon.Worker.Services
 
                 if (!enableWrites || dryRun)
                 {
-                    _logger.LogInformation(
+                    _logger.LogDebug(
                         "Hearing sync dry run: TikCounter={TikCounter}, MondayItemId={MondayItemId}, would execute steps: [{Steps}]",
                         mapping.TikCounter, mapping.MondayItemId, string.Join(", ", plannedSteps));
                     continue;
@@ -374,7 +374,7 @@ namespace Odmon.Worker.Services
 
                     await _integrationDb.SaveChangesAsync(ct);
 
-                    _logger.LogInformation(
+                    _logger.LogDebug(
                         "Hearing sync succeeded: TikCounter={TikCounter}, MondayItemId={MondayItemId}, ExecutedSteps=[{Steps}], SnapshotNew=[StartDate={StartDate}, Status={MeetStatus}]",
                         mapping.TikCounter, effectiveItemId, string.Join(", ", executedSteps), startDateUtc.ToString("yyyy-MM-dd HH:mm"), meetStatus);
                 }

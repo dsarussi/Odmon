@@ -37,6 +37,11 @@ namespace Odmon.Worker.Services
             var result = new BootstrapResult();
             var sw = Stopwatch.StartNew();
 
+            // ── Cooling period: delay onboarding for cases younger than N days ──
+            var coolingPeriodDays = _config.GetValue<int>("Onboarding:CoolingPeriodDays", 3);
+            var utcNow = DateTime.UtcNow;
+            var coolingCutoff = coolingPeriodDays > 0 ? utcNow.AddDays(-coolingPeriodDays).Date : (DateTime?)null;
+
             // 1) Query Odcanit: all TikCounters with tsCreateDate >= cutoffDate
             var odcanitTikCounters = await _odcanitReader.GetTikCountersSinceCutoffAsync(cutoffDate, ct);
             result.TotalFromOdcanit = odcanitTikCounters.Count;
@@ -61,17 +66,65 @@ namespace Odmon.Worker.Services
             {
                 sw.Stop();
                 _logger.LogInformation(
-                    "BOOTSTRAP | No new cases to onboard. CutoffDate={CutoffDate:yyyy-MM-dd}, TotalFromOdcanit={TotalFromOdcanit}, AlreadyMapped={AlreadyMapped}, Duration={DurationMs}ms",
-                    cutoffDate, result.TotalFromOdcanit, result.AlreadyMapped, sw.ElapsedMilliseconds);
+                    "BOOTSTRAP | No new cases to onboard. CutoffDate={CutoffDate:yyyy-MM-dd}, CoolingPeriodDays={CoolingPeriodDays}, TotalFromOdcanit={TotalFromOdcanit}, AlreadyMapped={AlreadyMapped}, Duration={DurationMs}ms",
+                    cutoffDate, coolingPeriodDays, result.TotalFromOdcanit, result.AlreadyMapped, sw.ElapsedMilliseconds);
                 return result;
             }
 
             _logger.LogInformation(
-                "BOOTSTRAP | Found {UnmappedCount} unmapped eligible case(s) to onboard. CutoffDate={CutoffDate:yyyy-MM-dd}, TotalFromOdcanit={TotalFromOdcanit}, AlreadyMapped={AlreadyMapped}",
-                unmappedEligible.Count, cutoffDate, result.TotalFromOdcanit, result.AlreadyMapped);
+                "BOOTSTRAP | Found {UnmappedCount} unmapped candidate case(s). CutoffDate={CutoffDate:yyyy-MM-dd}, CoolingPeriodDays={CoolingPeriodDays}, TotalFromOdcanit={TotalFromOdcanit}, AlreadyMapped={AlreadyMapped}",
+                unmappedEligible.Count, cutoffDate, coolingPeriodDays, result.TotalFromOdcanit, result.AlreadyMapped);
 
             // 4) Load full case data from Odcanit for unmapped eligible TikCounters
             var casesToOnboard = await _odcanitReader.GetCasesByTikCountersAsync(unmappedEligible, ct);
+
+            // ── Apply cooling period filter ──
+            if (coolingCutoff.HasValue)
+            {
+                var beforeCount = casesToOnboard.Count;
+                var cooled = new List<OdcanitCase>();
+                var nullDateTikCounters = new List<(int TikCounter, string? TikNumber)>();
+
+                foreach (var c in casesToOnboard)
+                {
+                    if (!c.tsCreateDate.HasValue)
+                    {
+                        nullDateTikCounters.Add((c.TikCounter, c.TikNumber));
+                        result.CoolingFilteredOut++;
+                        continue;
+                    }
+
+                    // Case is "cool" if tsCreateDate <= coolingCutoff (i.e., age >= CoolingPeriodDays)
+                    if (c.tsCreateDate.Value.Date <= coolingCutoff.Value)
+                    {
+                        cooled.Add(c);
+                    }
+                    else
+                    {
+                        var eligibleAfter = c.tsCreateDate.Value.Date.AddDays(coolingPeriodDays);
+                        _logger.LogDebug(
+                            "Cooling period: skipping onboarding for TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate:yyyy-MM-dd}, EligibleAfter={EligibleAfter:yyyy-MM-dd}",
+                            c.TikCounter, c.TikNumber ?? "<null>", c.tsCreateDate.Value, eligibleAfter);
+                        result.CoolingFilteredOut++;
+                    }
+                }
+
+                // Log null tsCreateDate warnings (once per run, batched)
+                if (nullDateTikCounters.Count > 0)
+                {
+                    foreach (var (tikCounter, tikNumber) in nullDateTikCounters)
+                    {
+                        _logger.LogWarning(
+                            "Cooling period: NULL tsCreateDate, not eligible for onboarding. TikCounter={TikCounter}, TikNumber={TikNumber}",
+                            tikCounter, tikNumber ?? "<null>");
+                    }
+                }
+
+                casesToOnboard = cooled;
+                _logger.LogInformation(
+                    "BOOTSTRAP | Cooling filter applied: Candidates={Candidates}, CoolingFilteredOut={CoolingFilteredOut}, EligibleAfterCooling={Eligible}, CoolingCutoff={CoolingCutoff:yyyy-MM-dd}",
+                    beforeCount, result.CoolingFilteredOut, casesToOnboard.Count, coolingCutoff.Value);
+            }
 
             // Apply DocumentType derivation
             foreach (var c in casesToOnboard)
@@ -130,14 +183,14 @@ namespace Odmon.Worker.Services
                             "bootstrap_create", c.TikCounter, ct);
 
                         result.NewlyOnboarded++;
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "BOOTSTRAP | Created Monday item: TikCounter={TikCounter}, TikNumber={TikNumber}, MondayItemId={MondayItemId}, Retries={Retries}",
                             c.TikCounter, c.TikNumber, mondayItemId, retries);
                     }
                     else
                     {
                         result.NewlyOnboarded++;
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "BOOTSTRAP | DRY-RUN would create: TikCounter={TikCounter}, TikNumber={TikNumber}",
                             c.TikCounter, c.TikNumber);
                     }
@@ -155,17 +208,18 @@ namespace Odmon.Worker.Services
                     _logger.LogError(ex,
                         "BOOTSTRAP | Error creating Monday item: TikCounter={TikCounter}, Error={Error}",
                         c.TikCounter, ex.Message);
-                    await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, boardId, "bootstrap_create", ex, MaxRetryAttempts, ct);
+                    var maxRetry = _config.GetValue<int>("Monday:MaxRetryAttempts", 3);
+                    await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, boardId, "bootstrap_create", ex, maxRetry, ct);
                 }
             }
 
             sw.Stop();
 
             _logger.LogInformation(
-                "BOOTSTRAP SUMMARY | CutoffDate={CutoffDate:yyyy-MM-dd} | TotalFromOdcanit={TotalFromOdcanit} | AlreadyMapped={AlreadyMapped} | " +
-                "NewlyOnboarded={NewlyOnboarded} | SkippedGuardrail={SkippedGuardrail} | Failed={Failed} | Duration={DurationMs}ms",
-                cutoffDate, result.TotalFromOdcanit, result.AlreadyMapped,
-                result.NewlyOnboarded, result.SkippedGuardrail, result.Failed, sw.ElapsedMilliseconds);
+                "BOOTSTRAP SUMMARY | CutoffDate={CutoffDate:yyyy-MM-dd} | CoolingPeriodDays={CoolingPeriodDays} | TotalFromOdcanit={TotalFromOdcanit} | AlreadyMapped={AlreadyMapped} | " +
+                "CoolingFilteredOut={CoolingFilteredOut} | NewlyOnboarded={NewlyOnboarded} | SkippedGuardrail={SkippedGuardrail} | Failed={Failed} | Duration={DurationMs}ms",
+                cutoffDate, coolingPeriodDays, result.TotalFromOdcanit, result.AlreadyMapped,
+                result.CoolingFilteredOut, result.NewlyOnboarded, result.SkippedGuardrail, result.Failed, sw.ElapsedMilliseconds);
 
             return result;
         }
@@ -175,6 +229,7 @@ namespace Odmon.Worker.Services
         {
             public int TotalFromOdcanit { get; set; }
             public int AlreadyMapped { get; set; }
+            public int CoolingFilteredOut { get; set; }
             public int NewlyOnboarded { get; set; }
             public int SkippedGuardrail { get; set; }
             public int Failed { get; set; }

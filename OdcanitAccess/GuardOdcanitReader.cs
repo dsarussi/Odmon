@@ -29,9 +29,6 @@ namespace Odmon.Worker.OdcanitAccess
 
         public Task<List<int>> GetTikCountersSinceCutoffAsync(DateTime cutoffDate, CancellationToken ct)
             => throw NewException();
-
-        public Task<List<int>> GetModifiedTikCountersSinceAsync(DateTime sinceUtc, IReadOnlyCollection<int> eligibleMappedTikCounters, CancellationToken ct)
-            => throw NewException();
     }
 }
 

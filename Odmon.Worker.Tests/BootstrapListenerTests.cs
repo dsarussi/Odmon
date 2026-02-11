@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Odmon.Worker.Models;
+using Odmon.Worker.Services;
 using Xunit;
 
 namespace Odmon.Worker.Tests
@@ -282,139 +283,131 @@ namespace Odmon.Worker.Tests
         }
 
         // ====================================================================
-        // Listener detection: feed UNION fallback, intersected with eligibleMapped
+        // Full Reconcile: ALL eligible-mapped cases loaded every run
         // ====================================================================
 
         /// <summary>
-        /// Replicates the listener detection logic:
-        /// 1) eligibleMapped = INTERSECT(eligibleFromOdcanit, mapped)
-        /// 2) feedIntersected = INTERSECT(feedTikCounters, eligibleMapped)
-        /// 3) fallbackTikCounters = TikCounters with tsModifyDate >= sinceUtc, restricted to eligibleMapped
-        /// 4) toProcess = DISTINCT(feedIntersected UNION fallbackTikCounters)
+        /// Replicates the full reconcile logic:
+        /// eligibleMapped = INTERSECT(eligibleFromOdcanit, mapped)
+        /// ALL eligibleMapped cases are loaded — no change feed or tsModifyDate gating.
         /// </summary>
-        private static HashSet<int> ComputeListenerToProcess(
-            HashSet<int> eligibleMappedSet,
-            IReadOnlyCollection<int> feedTikCounters,
-            IReadOnlyCollection<int> fallbackTikCounters)
+        private static HashSet<int> ComputeEligibleMapped(
+            HashSet<int> eligibleFromOdcanit,
+            HashSet<int> mapped)
         {
-            var feedIntersected = new HashSet<int>(feedTikCounters);
-            feedIntersected.IntersectWith(eligibleMappedSet);
-
-            var toProcess = new HashSet<int>(feedIntersected);
-            toProcess.UnionWith(fallbackTikCounters);
-            return toProcess;
+            var result = new HashSet<int>(eligibleFromOdcanit);
+            result.IntersectWith(mapped);
+            return result;
         }
 
         /// <summary>
-        /// Simulates GetModifiedTikCountersSinceAsync: returns TikCounters from cases
-        /// where tsModifyDate >= sinceUtc AND TikCounter is in eligibleMapped.
+        /// Simulates the OdcanitVersion comparison used by DetermineSyncAction:
+        /// Uses deterministic content checksum (ComputeContentVersion) instead of tsModifyDate.
         /// </summary>
-        private static List<int> SimulateFallback(
-            List<OdcanitCase> allCases,
-            DateTime sinceUtc,
-            HashSet<int> eligibleMappedSet)
+        private static bool HasChanged(OdcanitCase currentCase, string? storedVersion)
         {
-            return allCases
-                .Where(c => eligibleMappedSet.Contains(c.TikCounter)
-                            && c.tsModifyDate.HasValue
-                            && c.tsModifyDate.Value >= sinceUtc)
-                .Select(c => c.TikCounter)
-                .Distinct()
-                .ToList();
+            var currentVersion = SyncService.ComputeContentVersion(currentCase);
+            return currentVersion != (storedVersion ?? string.Empty);
         }
 
         [Fact]
-        public void Listener_FeedEmpty_FallbackFindsModified_UpdateHappens()
+        public void Reconcile_MappedPostCutoff_AnyFieldChange_Detected_EvenWithNullModifyDate()
         {
-            // Feed returns nothing, but the case was modified (tsModifyDate >= sinceUtc).
-            // The fallback should detect it and include it in toProcess.
-            var sinceUtc = new DateTime(2026, 2, 10, 12, 0, 0);
-            var cases = new List<OdcanitCase>
-            {
-                MakeCaseWithModify(10001, new DateTime(2026, 2, 12), new DateTime(2026, 2, 10, 14, 0, 0)), // modified after sinceUtc
-            };
-            var eligibleMapped = new HashSet<int> { 10001 };
-            var feedTikCounters = Array.Empty<int>(); // feed is empty
+            // A mapped post-cutoff case has a field change (e.g., defendant status).
+            // tsModifyDate is NULL and change feed is empty.
+            // Full reconcile must still include this case for processing.
+            var eligibleFromOdcanit = new HashSet<int> { 10001 };
+            var mapped = new HashSet<int> { 10001 };
+            var eligibleMapped = ComputeEligibleMapped(eligibleFromOdcanit, mapped);
 
-            var fallback = SimulateFallback(cases, sinceUtc, eligibleMapped);
-            var toProcess = ComputeListenerToProcess(eligibleMapped, feedTikCounters, fallback);
+            // The case IS in eligibleMapped regardless of tsModifyDate or feed
+            Assert.Single(eligibleMapped);
+            Assert.Contains(10001, eligibleMapped);
 
-            Assert.Single(toProcess);
-            Assert.Contains(10001, toProcess);
+            // Content checksum is based on actual field values, not tsModifyDate.
+            // If the case data is identical, stored version matches:
+            var caseData = MakeCase(10001, new DateTime(2026, 2, 12));
+            caseData.DocumentType = "כתב תביעה";
+            var storedVersion = SyncService.ComputeContentVersion(caseData);
+            Assert.False(HasChanged(caseData, storedVersion));
+
+            // If a field changes (even with null tsModifyDate), the hash differs:
+            var modifiedCase = MakeCase(10001, new DateTime(2026, 2, 12));
+            modifiedCase.DocumentType = "כתב תביעה";
+            modifiedCase.tsModifyDate = null;
+            modifiedCase.DefendantName = "New Defendant";
+            Assert.True(HasChanged(modifiedCase, storedVersion));
         }
 
         [Fact]
-        public void Listener_PreCutoffModifiedToday_NoUpdate()
+        public void Reconcile_PreCutoffCase_NeverInEligibleMapped()
         {
-            // Case created before cutoff but modified today.
-            // It should NOT be in eligibleMapped (because tsCreateDate < cutoff),
-            // so even if fallback picks it up, it's not in the eligible set.
-            var sinceUtc = new DateTime(2026, 2, 10, 12, 0, 0);
-            var preCutoffCase = MakeCaseWithModify(10002, new DateTime(2026, 1, 5), new DateTime(2026, 2, 10, 15, 0, 0));
+            // A pre-cutoff case (even if mapped) is excluded from eligibleFromOdcanit,
+            // so it never enters eligibleMapped and is never processed.
+            var preCutoffCase = MakeCase(10002, new DateTime(2026, 1, 5));
 
-            // eligibleFromOdcanit would not include 10002 (tsCreateDate < cutoff)
-            var eligibleFromOdcanit = new HashSet<int>(); // empty — pre-cutoff excluded
-            var mapped = new HashSet<int> { 10002 }; // it has a mapping
+            // eligibleFromOdcanit excludes pre-cutoff
+            var eligibleFromOdcanit = new HashSet<int>(); // empty — tsCreateDate < cutoff
+            var mapped = new HashSet<int> { 10002 };
 
-            // eligibleMapped = INTERSECT — empty because eligibleFromOdcanit is empty
-            var eligibleMapped = new HashSet<int>(eligibleFromOdcanit);
-            eligibleMapped.IntersectWith(mapped);
-
+            var eligibleMapped = ComputeEligibleMapped(eligibleFromOdcanit, mapped);
             Assert.Empty(eligibleMapped);
-
-            // Even if we somehow ran fallback against this empty set, nothing would process
-            var fallback = SimulateFallback(new List<OdcanitCase> { preCutoffCase }, sinceUtc, eligibleMapped);
-            var toProcess = ComputeListenerToProcess(eligibleMapped, Array.Empty<int>(), fallback);
-
-            Assert.Empty(toProcess);
         }
 
         [Fact]
-        public void Listener_FeedContainsUnmapped_NotProcessed()
+        public void Reconcile_UnmappedCase_NeverProcessed()
         {
-            // Feed returns a TikCounter that is not mapped.
-            // It must be excluded from toProcess.
+            // A post-cutoff case that is eligible but NOT mapped is excluded.
+            // Listener never creates — it only processes mapped cases.
             var eligibleFromOdcanit = new HashSet<int> { 10003, 10004 };
             var mapped = new HashSet<int> { 10003 }; // 10004 is NOT mapped
 
-            var eligibleMapped = new HashSet<int>(eligibleFromOdcanit);
-            eligibleMapped.IntersectWith(mapped);
+            var eligibleMapped = ComputeEligibleMapped(eligibleFromOdcanit, mapped);
 
-            // Feed contains both, but 10004 is not in eligibleMapped
-            var feedTikCounters = new[] { 10003, 10004 };
-            var toProcess = ComputeListenerToProcess(eligibleMapped, feedTikCounters, Array.Empty<int>());
-
-            Assert.Single(toProcess);
-            Assert.Contains(10003, toProcess);
-            Assert.DoesNotContain(10004, toProcess);
+            Assert.Single(eligibleMapped);
+            Assert.Contains(10003, eligibleMapped);
+            Assert.DoesNotContain(10004, eligibleMapped);
         }
 
         [Fact]
-        public void Listener_DuplicateAcrossFeedAndFallback_ProcessedOnce()
+        public void Reconcile_NoChangeCase_SkippedByVersionComparison()
         {
-            // TikCounter 10005 appears in both feed and fallback.
-            // It must appear only once in toProcess.
-            var eligibleMapped = new HashSet<int> { 10005 };
-            var feedTikCounters = new[] { 10005 };
-            var fallbackTikCounters = new[] { 10005 };
+            // When content checksum matches stored version, no update needed.
+            var caseData = MakeCase(10010, new DateTime(2026, 2, 12));
+            caseData.DocumentType = "כתב תביעה";
+            var storedVersion = SyncService.ComputeContentVersion(caseData);
 
-            var toProcess = ComputeListenerToProcess(eligibleMapped, feedTikCounters, fallbackTikCounters);
-
-            Assert.Single(toProcess);
-            Assert.Contains(10005, toProcess);
+            Assert.False(HasChanged(caseData, storedVersion)); // no change → skip
         }
 
         [Fact]
-        public void Listener_ChecksumUnchanged_SkippedNoChange()
+        public void Reconcile_ChangedCase_DetectedByVersionComparison()
         {
-            // This tests the concept that when the Odcanit version (tsModifyDate) hasn't changed
-            // from what's stored in MondayItemMappings.OdcanitVersion, DetermineSyncAction returns "skip".
-            // We simulate this by checking: if odcanitVersion == mappingVersion → skip.
-            var tsModifyDate = new DateTime(2026, 2, 12, 10, 30, 0);
-            var odcanitVersion = tsModifyDate.ToString("o");
-            var mappingVersion = odcanitVersion; // same → no change
+            // When any field changes, the content checksum differs → update detected.
+            var originalCase = MakeCase(10011, new DateTime(2026, 2, 12));
+            originalCase.DocumentType = "כתב תביעה";
+            var storedVersion = SyncService.ComputeContentVersion(originalCase);
 
-            Assert.Equal(odcanitVersion, mappingVersion); // confirms skip condition
+            var modifiedCase = MakeCase(10011, new DateTime(2026, 2, 12));
+            modifiedCase.DocumentType = "כתב תביעה";
+            modifiedCase.PlaintiffName = "Changed Plaintiff";
+
+            Assert.True(HasChanged(modifiedCase, storedVersion)); // changed → update
+        }
+
+        [Fact]
+        public void Reconcile_AllEligibleMapped_LoadedRegardlessOfFeedOrModifyDate()
+        {
+            // Full reconcile loads ALL eligible-mapped cases every run.
+            // Even if a case has null tsModifyDate and no change feed event,
+            // it is still loaded and checked.
+            var eligibleFromOdcanit = new HashSet<int> { 20001, 20002, 20003 };
+            var mapped = new HashSet<int> { 20001, 20002, 20003 };
+
+            var eligibleMapped = ComputeEligibleMapped(eligibleFromOdcanit, mapped);
+
+            Assert.Equal(3, eligibleMapped.Count);
+            // All three are loaded for reconcile — no feed/tsModifyDate dependency
         }
 
         // ====================================================================
@@ -434,18 +427,5 @@ namespace Odmon.Worker.Tests
             };
         }
 
-        private static OdcanitCase MakeCaseWithModify(int tikCounter, DateTime? tsCreateDate, DateTime? tsModifyDate)
-        {
-            return new OdcanitCase
-            {
-                TikCounter = tikCounter,
-                TikNumber = $"9/{tikCounter}",
-                TikName = "Test",
-                ClientName = "Test Client",
-                StatusName = "פעיל",
-                tsCreateDate = tsCreateDate,
-                tsModifyDate = tsModifyDate
-            };
-        }
     }
 }
