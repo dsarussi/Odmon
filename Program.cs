@@ -153,6 +153,11 @@ hostBuilder.ConfigureServices((context, services) =>
         client.BaseAddress = new Uri("https://api.monday.com/v2/");
     });
 
+    // Email monitoring
+    services.AddSingleton<EmailNotifier>();
+    services.AddSingleton<IEmailNotifier>(sp => sp.GetRequiredService<EmailNotifier>());
+    services.AddHostedService<EmailBackgroundService>();
+
     services.AddScoped<SyncService>();
     services.AddHostedService<SyncWorker>();
 });

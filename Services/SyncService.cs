@@ -42,6 +42,7 @@ namespace Odmon.Worker.Services
         private readonly ISkipLogger _skipLogger;
         private readonly IOdcanitReader _odcanitReader;
         private readonly IErrorNotifier _errorNotifier;
+        private readonly IEmailNotifier _emailNotifier;
         private readonly OdcanitLoadOptions _odcanitLoadOptions;
         private readonly IOdcanitChangeFeed _changeFeed;
         private readonly ConcurrentDictionary<long, ColumnCacheEntry> _columnIdCache = new();
@@ -69,6 +70,7 @@ namespace Odmon.Worker.Services
             ISkipLogger skipLogger,
             IOdcanitReader odcanitReader,
             IErrorNotifier errorNotifier,
+            IEmailNotifier emailNotifier,
             IOdcanitChangeFeed changeFeed)
         {
             _caseSource = caseSource;
@@ -86,6 +88,7 @@ namespace Odmon.Worker.Services
             _skipLogger = skipLogger;
             _odcanitReader = odcanitReader;
             _errorNotifier = errorNotifier;
+            _emailNotifier = emailNotifier;
             _changeFeed = changeFeed;
         }
 
@@ -147,9 +150,8 @@ namespace Odmon.Worker.Services
             var testGroupId = _mondaySettings.TestGroupId;
             
             _logger.LogInformation(
-                "Data source: {DataSource}, testMode={TestMode}",
-                dataSource,
-                testMode);
+                "SYNC RUN START | RunId={RunId} | DataSource={DataSource}, TestMode={TestMode}, DryRun={DryRun}, MaxItems={MaxItems}",
+                runId, dataSource, testMode, dryRun, maxItems);
 
             var casesBoardId = _mondaySettings.CasesBoardId;
             var defaultGroupId = _mondaySettings.ToDoGroupId;
@@ -178,6 +180,11 @@ namespace Odmon.Worker.Services
             // Fail-fast: BoardId must never be 0 at runtime
             if (boardIdToUse == 0)
             {
+                _emailNotifier.QueueCriticalAlert(
+                    "FATAL: BoardId is 0",
+                    "ODMON worker detected BoardId=0 at runtime. Check Monday:CasesBoardId and Safety:TestBoardId configuration. The run is aborting.",
+                    exceptionType: "InvalidOperationException",
+                    source: "SyncService.BoardIdValidation");
                 throw new InvalidOperationException("FATAL: boardIdToUse is 0. Check Monday:CasesBoardId and Safety:TestBoardId configuration. Aborting run.");
             }
 
@@ -737,6 +744,46 @@ namespace Odmon.Worker.Services
                 updated, skippedNoChange, skippedInactive, skippedDuplicate,
                 totalFailed, circuitBreakerStopped, totalDurationMs);
 
+            // ── Persist SyncRunMetric for daily summary ──
+            try
+            {
+                _integrationDb.SyncRunMetrics.Add(new Models.SyncRunMetric
+                {
+                    RunId = runId,
+                    StartedAtUtc = runStartedAtUtc,
+                    CompletedAtUtc = DateTime.UtcNow,
+                    DurationMs = (int)totalDurationMs,
+                    BootstrapCreated = bootstrapCreated,
+                    CoolingFilteredOut = bootstrapResult.CoolingFilteredOut,
+                    BootstrapFailed = bootstrapResult.Failed,
+                    Updated = updated,
+                    SkippedNoChange = skippedNoChange,
+                    SkippedInactive = skippedInactive,
+                    SkippedDuplicate = skippedDuplicate,
+                    Failed = failed,
+                    CircuitBreakerTripped = circuitBreakerStopped,
+                    DataSource = dataSource
+                });
+                await _integrationDb.SaveChangesAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to persist SyncRunMetric for RunId={RunId}", runId);
+            }
+
+            // ── Circuit breaker email alert ──
+            if (circuitBreakerStopped)
+            {
+                _emailNotifier.QueueCriticalAlert(
+                    "Circuit Breaker TRIPPED",
+                    $"ODMON circuit breaker tripped during RunId={runId}.\n" +
+                    $"Consecutive Monday API failures reached threshold.\n" +
+                    $"Failed={totalFailed}, Updated={updated}, Duration={totalDurationMs}ms.\n" +
+                    $"The remaining cases in this run were skipped. The worker will retry next cycle.",
+                    exceptionType: "CircuitBreaker",
+                    source: "SyncService");
+            }
+
             // ── Failure rate notification ──
             if (batch.Count > 0 && failed > 0)
             {
@@ -745,6 +792,13 @@ namespace Odmon.Worker.Services
                 {
                     try { await _errorNotifier.NotifyHighFailureRateAsync(runId, batch.Count, failed, ct); }
                     catch (Exception nex) { _logger.LogWarning(nex, "Error notifier failed"); }
+
+                    _emailNotifier.QueueCriticalAlert(
+                        $"High Failure Rate ({failureRate:P0})",
+                        $"ODMON sync run {runId} had a high failure rate: {failed}/{batch.Count} cases failed ({failureRate:P0}).\n" +
+                        $"Review the SyncFailures table and error logs.",
+                        exceptionType: "HighFailureRate",
+                        source: "SyncService");
                 }
                 else
             {
@@ -1938,12 +1992,12 @@ namespace Odmon.Worker.Services
             }
         }
 
-        private async Task ValidateCriticalColumnsAsync(long boardId, HashSet<string> validColumnIds, OdcanitCase c, CancellationToken ct)
+        private Task ValidateCriticalColumnsAsync(long boardId, HashSet<string> validColumnIds, OdcanitCase c, CancellationToken ct)
         {
             var criticalColumns = GetCriticalColumnIds();
             if (criticalColumns.Count == 0)
             {
-                return; // No critical columns configured
+                return Task.CompletedTask; // No critical columns configured
             }
 
             var missingCriticalColumns = new List<string>();
@@ -1980,6 +2034,8 @@ namespace Odmon.Worker.Services
                         $"TikCounter={c.TikCounter}, TikNumber={c.TikNumber ?? "<null>"}");
                 }
             }
+
+            return Task.CompletedTask;
         }
 
         private List<string> GetCriticalColumnIds()
@@ -2132,7 +2188,9 @@ namespace Odmon.Worker.Services
         }
 
         /// <summary>
-        /// Pure decision logic for cooling period eligibility.
+        /// Pure decision logic for cooling period eligibility using Israeli business days.
+        /// Israeli business days: Sunday–Thursday. Friday and Saturday are skipped.
+        /// The day the case is opened counts as business day #1.
         /// Returns true if the case has aged past the cooling period and is eligible for onboarding.
         /// Does NOT check cutoff — use <see cref="IsBootstrapEligible"/> for the combined check.
         /// </summary>
@@ -2145,15 +2203,22 @@ namespace Odmon.Worker.Services
             if (!tsCreateDate.HasValue)
                 return false; // null tsCreateDate → not eligible
 
-            var coolingCutoff = utcNow.AddDays(-coolingPeriodDays).Date;
-            return tsCreateDate.Value.Date <= coolingCutoff;
+            var israelTz = GetIsraelTimeZone();
+            // tsCreateDate from Odcanit is local Israel time (date-only, 00:00:00)
+            var openDateIsrael = DateOnly.FromDateTime(tsCreateDate.Value);
+            // Convert current UTC time to Israel date for comparison
+            var nowIsrael = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(
+                DateTime.SpecifyKind(utcNow, DateTimeKind.Utc), israelTz));
+
+            var eligibleFrom = AddIsraeliBusinessDays(openDateIsrael, coolingPeriodDays);
+            return nowIsrael >= eligibleFrom;
         }
 
         /// <summary>
         /// Combined bootstrap onboarding eligibility check.
         /// A case is eligible for bootstrap creation ONLY if BOTH:
         ///   1) tsCreateDate >= cutoffDate (post-cutoff)
-        ///   2) tsCreateDate &lt;= UtcNow - CoolingPeriodDays (cooling period passed)
+        ///   2) Israeli business day cooling period has passed
         /// In the actual bootstrap flow, condition (1) is enforced by the SQL query
         /// and a defense-in-depth guardrail; this method provides a single testable predicate.
         /// </summary>
@@ -2166,8 +2231,61 @@ namespace Odmon.Worker.Services
             if (tsCreateDate.Value.Date < cutoffDate.Date)
                 return false;
 
-            // Condition 2: must pass cooling period
+            // Condition 2: must pass cooling period (Israeli business days)
             return IsCoolingEligible(tsCreateDate, coolingPeriodDays, utcNow);
+        }
+
+        // ================================================================
+        // Israeli business day helpers
+        // ================================================================
+
+        /// <summary>
+        /// Returns true if the given date is an Israeli business day (Sunday–Thursday).
+        /// Friday (DayOfWeek.Friday) and Saturday (DayOfWeek.Saturday) are weekends.
+        /// </summary>
+        internal static bool IsIsraeliBusinessDay(DateOnly date)
+        {
+            var dow = date.DayOfWeek;
+            return dow != DayOfWeek.Friday && dow != DayOfWeek.Saturday;
+        }
+
+        /// <summary>
+        /// Computes the first date on which a case becomes eligible after N Israeli business days.
+        /// The start date counts as business day #1 (if it is a business day).
+        /// If the start date is Friday or Saturday, the first business day (Sunday) is day #1.
+        /// Returns the day AFTER the Nth business day (the first eligible date).
+        ///
+        /// Example: AddIsraeliBusinessDays(Thursday, 3) → Thu(1), Sun(2), Mon(3) → eligible Tuesday.
+        /// </summary>
+        internal static DateOnly AddIsraeliBusinessDays(DateOnly startIsraelDate, int businessDays)
+        {
+            if (businessDays <= 0)
+                return startIsraelDate;
+
+            var current = startIsraelDate;
+            int counted = 0;
+
+            while (counted < businessDays)
+            {
+                if (IsIsraeliBusinessDay(current))
+                    counted++;
+
+                if (counted < businessDays)
+                    current = current.AddDays(1);
+            }
+
+            // current is now the Nth business day; eligible from the next calendar day
+            return current.AddDays(1);
+        }
+
+        /// <summary>
+        /// Returns the Israel time zone. Handles both Windows ("Israel Standard Time") and Linux ("Asia/Jerusalem").
+        /// </summary>
+        internal static TimeZoneInfo GetIsraelTimeZone()
+        {
+            if (TimeZoneInfo.TryFindSystemTimeZoneById("Israel Standard Time", out var tz))
+                return tz;
+            return TimeZoneInfo.FindSystemTimeZoneById("Asia/Jerusalem");
         }
 
         /// <summary>
@@ -3264,7 +3382,7 @@ namespace Odmon.Worker.Services
                     BoardId = boardId,
                     Operation = operation,
                     ErrorType = ex.GetType().Name,
-                    ErrorMessage = Truncate(ex.Message, 2000),
+                    ErrorMessage = Truncate(ex.Message, 2000) ?? string.Empty,
                     StackTrace = Truncate(ex.StackTrace, 4000),
                     OccurredAtUtc = DateTime.UtcNow,
                     RetryAttempts = retryAttempts,

@@ -15,6 +15,7 @@ namespace Odmon.Worker.Workers
         private readonly ILogger<SyncWorker> _logger;
         private readonly IConfiguration _config;
         private readonly IErrorNotifier _errorNotifier;
+        private readonly IEmailNotifier _emailNotifier;
         private readonly IHostEnvironment _hostEnv;
 
         // Heartbeat state
@@ -28,12 +29,14 @@ namespace Odmon.Worker.Workers
             ILogger<SyncWorker> logger,
             IConfiguration config,
             IErrorNotifier errorNotifier,
+            IEmailNotifier emailNotifier,
             IHostEnvironment hostEnv)
         {
             _scopeFactory = scopeFactory;
             _logger = logger;
             _config = config;
             _errorNotifier = errorNotifier;
+            _emailNotifier = emailNotifier;
             _hostEnv = hostEnv;
         }
 

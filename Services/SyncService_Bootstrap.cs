@@ -37,10 +37,10 @@ namespace Odmon.Worker.Services
             var result = new BootstrapResult();
             var sw = Stopwatch.StartNew();
 
-            // ── Cooling period: delay onboarding for cases younger than N days ──
+            // ── Cooling period: delay onboarding for cases younger than N Israeli business days ──
             var coolingPeriodDays = _config.GetValue<int>("Onboarding:CoolingPeriodDays", 3);
             var utcNow = DateTime.UtcNow;
-            var coolingCutoff = coolingPeriodDays > 0 ? utcNow.AddDays(-coolingPeriodDays).Date : (DateTime?)null;
+            var coolingEnabled = coolingPeriodDays > 0;
 
             // 1) Query Odcanit: all TikCounters with tsCreateDate >= cutoffDate
             var odcanitTikCounters = await _odcanitReader.GetTikCountersSinceCutoffAsync(cutoffDate, ct);
@@ -78,12 +78,16 @@ namespace Odmon.Worker.Services
             // 4) Load full case data from Odcanit for unmapped eligible TikCounters
             var casesToOnboard = await _odcanitReader.GetCasesByTikCountersAsync(unmappedEligible, ct);
 
-            // ── Apply cooling period filter ──
-            if (coolingCutoff.HasValue)
+            // ── Apply cooling period filter (Israeli business days: Sun–Thu) ──
+            if (coolingEnabled)
             {
                 var beforeCount = casesToOnboard.Count;
                 var cooled = new List<OdcanitCase>();
                 var nullDateTikCounters = new List<(int TikCounter, string? TikNumber)>();
+
+                var israelTz = GetIsraelTimeZone();
+                var nowIsrael = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(
+                    DateTime.SpecifyKind(utcNow, DateTimeKind.Utc), israelTz));
 
                 foreach (var c in casesToOnboard)
                 {
@@ -94,17 +98,18 @@ namespace Odmon.Worker.Services
                         continue;
                     }
 
-                    // Case is "cool" if tsCreateDate <= coolingCutoff (i.e., age >= CoolingPeriodDays)
-                    if (c.tsCreateDate.Value.Date <= coolingCutoff.Value)
+                    var openDateIsrael = DateOnly.FromDateTime(c.tsCreateDate.Value);
+                    var eligibleFrom = AddIsraeliBusinessDays(openDateIsrael, coolingPeriodDays);
+
+                    if (nowIsrael >= eligibleFrom)
                     {
                         cooled.Add(c);
                     }
                     else
                     {
-                        var eligibleAfter = c.tsCreateDate.Value.Date.AddDays(coolingPeriodDays);
-                        _logger.LogDebug(
-                            "Cooling period: skipping onboarding for TikCounter={TikCounter}, TikNumber={TikNumber}, tsCreateDate={CreateDate:yyyy-MM-dd}, EligibleAfter={EligibleAfter:yyyy-MM-dd}",
-                            c.TikCounter, c.TikNumber ?? "<null>", c.tsCreateDate.Value, eligibleAfter);
+                        _logger.LogInformation(
+                            "COOLING FILTERED: TikCounter={TikCounter}, TikNumber={TikNumber}, OpenDateIsrael={OpenDateIsrael}, EligibleFromIsraelDate={EligibleFromIsraelDate}, NowIsraelDate={NowIsraelDate}",
+                            c.TikCounter, c.TikNumber ?? "<null>", openDateIsrael, eligibleFrom, nowIsrael);
                         result.CoolingFilteredOut++;
                     }
                 }
@@ -122,8 +127,8 @@ namespace Odmon.Worker.Services
 
                 casesToOnboard = cooled;
                 _logger.LogInformation(
-                    "BOOTSTRAP | Cooling filter applied: Candidates={Candidates}, CoolingFilteredOut={CoolingFilteredOut}, EligibleAfterCooling={Eligible}, CoolingCutoff={CoolingCutoff:yyyy-MM-dd}",
-                    beforeCount, result.CoolingFilteredOut, casesToOnboard.Count, coolingCutoff.Value);
+                    "BOOTSTRAP | Cooling filter applied (Israeli business days): Candidates={Candidates}, CoolingFilteredOut={CoolingFilteredOut}, EligibleAfterCooling={Eligible}, CoolingPeriodDays={CoolingPeriodDays}, NowIsrael={NowIsrael}",
+                    beforeCount, result.CoolingFilteredOut, casesToOnboard.Count, coolingPeriodDays, nowIsrael);
             }
 
             // Apply DocumentType derivation
