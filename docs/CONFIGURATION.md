@@ -213,6 +213,48 @@ InvalidOperationException: Required secret 'Monday__ApiToken' was not found. Pro
 InvalidOperationException: BoardId is 0 for TikCounter=900000. Missing config key Monday:BoardId or Monday:CasesBoardId.
 ```
 
+## Document Ingestion Settings
+
+### MondayDocumentIngestion
+
+| Config Key | Type | Default | Description |
+|------------|------|---------|-------------|
+| `MondayDocumentIngestion:Enabled` | bool | false | Enable/disable the document ingestion worker. |
+| `MondayDocumentIngestion:BoardId` | long | 5088708083 | Monday.com questionnaire board ID to poll. |
+| `MondayDocumentIngestion:LinkedCasesBoardId` | long | 5035534500 | Main cases board ID for TikVisualID resolution. |
+| `MondayDocumentIngestion:InboxPath` | string | `D:\Odlight\OdmonInbox` | Local directory for temporary file downloads. |
+| `MondayDocumentIngestion:MaxFileSizeBytes` | long | 52428800 | Maximum file size (50 MB). |
+| `MondayDocumentIngestion:AllowedExtensions` | string[] | `["pdf","jpg","jpeg","png"]` | Allowed file extensions. |
+| `MondayDocumentIngestion:Columns` | string[] | `["file_mm0qwtat","file_mkzr2cmr"]` | Monday file column IDs to ingest. |
+| `MondayDocumentIngestion:RelationColumnId` | string | `board_relation_mkzenscq` | Board relation column linking to the cases board. |
+| `MondayDocumentIngestion:LinkedCaseTikColumnId` | string | `text_mkwe19hn` | Column on the cases board that holds TikVisualID. |
+| `MondayDocumentIngestion:IntervalSeconds` | int | 300 | Polling interval in seconds. |
+| `MondayDocumentIngestion:MaxRetryCount` | int | 3 | Maximum retry attempts per failed asset. |
+| `MondayDocumentIngestion:CommandTimeoutSeconds` | int | 60 | SQL command timeout for SP calls. |
+
+### OdcanitDocuments
+
+| Config Key | Type | Default | Description |
+|------------|------|---------|-------------|
+| `OdcanitDocuments:CategoryCounter` | int | 1 | Odcanit document category. |
+| `OdcanitDocuments:SubCategoryCounter` | int | 0 | Odcanit document sub-category. |
+| `OdcanitDocuments:DocStatus` | int | 1 | Odcanit document status. |
+| `OdcanitDocuments:DocType` | int | 8 | Odcanit document type (8 works for PDF and JPG). |
+| `OdcanitDocuments:WriterCounter` | int | 1 | Odcanit writer user ID. |
+| `OdcanitDocuments:OwnerCounter` | int | 1 | Odcanit owner user ID. |
+| `OdcanitDocuments:Metapel` | int | 1 | Odcanit handler ID (sent as comma-separated string). |
+
+### IntegrationDb Tracking Table
+
+Document ingestion state is tracked in `MondayDocumentImports`:
+- Dedup key: `(MondayQuestionnaireItemId, ColumnId, AssetId)` — unique index
+- Status values: Pending(0), Downloaded(1), SpCreated(2), Copied(3), Verified(4), Success(5), Failed(6)
+- Each step is persisted so retries can resume from the last successful step
+
+### MainTik Column Compatibility
+
+The TikCounter resolution from TikVisualID tries column `TikCounter` first, then falls back to `Counter` (SqlException 207 handling). This ensures compatibility across different Odcanit DB versions without schema changes.
+
 ## Troubleshooting
 
 ### Worker throws "BoardId is 0" exception

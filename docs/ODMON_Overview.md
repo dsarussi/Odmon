@@ -2,7 +2,7 @@
 
 ## Project Purpose
 
-ODMON is a .NET 8 Worker Service that synchronizes case data from the Odcanit/Odlight database system into Monday.com boards. The system maintains a one-to-one mapping between Odcanit cases (identified by TikNumber) and Monday.com items, ensuring data consistency and enabling updates to existing items rather than creating duplicates.
+ODMON is a .NET 8 Worker Service that synchronizes case data from the Odcanit/Odlight database system into Monday.com boards, and ingests documents from Monday.com questionnaire boards back into Odcanit. The system maintains a one-to-one mapping between Odcanit cases (identified by TikNumber) and Monday.com items, ensuring data consistency and enabling updates to existing items rather than creating duplicates.
 
 ## High-Level Architecture
 
@@ -42,8 +42,18 @@ ODMON is a .NET 8 Worker Service that synchronizes case data from the Odcanit/Od
 
 - **IntegrationDbContext**: SQL Server database for sync state
   - Stores MondayItemMapping records (TikCounter, TikNumber, MondayItemId, BoardId)
+  - Stores MondayDocumentImport records for document ingestion tracking and dedup
   - Maintains SyncLog entries for audit trail
   - Tracks test mode flags and sync timestamps
+
+- **DocumentIngestionWorker / DocumentIngestionService**: Monday → Odcanit document ingestion
+  - Polls a questionnaire board for file attachments
+  - Downloads files to a local inbox, calls `dbo.ProcDocuments_AddNewDocument` with MoveFile=3
+  - Copies files to the DestPath returned by the SP, verifies, and cleans up
+  - Deduplicates by (MondayQuestionnaireItemId, ColumnId, AssetId) in MondayDocumentImports table
+
+- **OdcanitDocumentWriter**: Calls Odcanit stored procedures for document creation
+  - Resolves TikCounter from TikVisualID via dbo.MainTik (tries column "TikCounter" then "Counter" for DB compatibility)
 
 ## Data Flow
 
@@ -180,6 +190,42 @@ ODMON is a .NET 8 Worker Service that synchronizes case data from the Odcanit/Od
 - SyncService logs failed operations but continues processing other cases
 - Monday.com API errors are logged with full details
 - Failed operations are tracked in SyncLog with error messages
+
+## Document Ingestion (Monday → Odcanit)
+
+### Overview
+
+ODMON includes a document ingestion pipeline that downloads file attachments from a Monday.com questionnaire board ("שאלון פתיחת לקוח", board 5088708083) and creates corresponding document records in Odcanit.
+
+### Pipeline Steps
+
+1. **Fetch**: Query questionnaire board items with file columns and board relation column
+2. **Resolve**: Follow the board relation to the linked case item, read TikVisualID, resolve TikCounter from dbo.MainTik
+3. **Download**: Stream each file asset to a local inbox directory (e.g. `D:\Odlight\OdmonInbox\Cases\<TikVisualID>\`)
+4. **SP Call**: Execute `dbo.ProcDocuments_AddNewDocument` with `@MoveFile = 3` — creates the Documents row and returns DestPath + DocCounter without invoking xp_cmdshell
+5. **Copy**: Copy the file from inbox to the DestPath returned by the SP
+6. **Verify**: Confirm destination file exists and size matches source
+7. **Cleanup**: Delete the inbox file after successful verification
+
+### TikCounter Resolution Compatibility
+
+The `ResolveTikCounterAsync` method handles different Odcanit DB versions:
+- First tries: `SELECT TOP 1 TikCounter FROM dbo.MainTik WHERE VisualID = @TikVisualID`
+- If column "TikCounter" doesn't exist (SqlException 207) or returns null, falls back to: `SELECT TOP 1 Counter FROM dbo.MainTik WHERE VisualID = @TikVisualID`
+- Logs which column path was used for diagnostics
+
+### Deduplication & Tracking
+
+All ingestion state is tracked in the `MondayDocumentImports` table in IntegrationDb:
+- Unique constraint on (MondayQuestionnaireItemId, ColumnId, AssetId) prevents duplicate Odcanit documents
+- Status progression: Pending → Downloaded → SpCreated → Copied → Verified → Success
+- Failed imports are retried up to a configurable limit; each step is persisted for idempotent retry
+
+### Failure Handling
+
+- Failures trigger urgent email alerts via the existing EmailNotifier infrastructure
+- The AlertSent flag prevents duplicate alerts per record
+- Transient failures (network, SP timeout) are retried on the next polling cycle
 
 ## Test Mode Behavior
 
