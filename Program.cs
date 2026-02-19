@@ -146,6 +146,8 @@ hostBuilder.ConfigureServices((context, services) =>
     services.Configure<MondaySettings>(config.GetSection("Monday"));
     services.Configure<NispahWriterSettings>(config.GetSection("NispahWriter"));
     services.Configure<OdcanitLoadOptions>(config.GetSection("OdcanitLoad"));
+    services.Configure<DocumentIngestionSettings>(config.GetSection("MondayDocumentIngestion"));
+    services.Configure<OdcanitDocumentSettings>(config.GetSection("OdcanitDocuments"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
@@ -164,6 +166,16 @@ hostBuilder.ConfigureServices((context, services) =>
 
     services.AddScoped<SyncService>();
     services.AddHostedService<SyncWorker>();
+
+    // Document ingestion from Monday questionnaire board
+    services.AddHttpClient<DocumentIngestionMondayService>(client =>
+    {
+        client.BaseAddress = new Uri("https://api.monday.com/v2/");
+    });
+    services.AddHttpClient("MondayFileDownload");
+    services.AddScoped<OdcanitDocumentWriter>();
+    services.AddScoped<DocumentIngestionService>();
+    services.AddHostedService<DocumentIngestionWorker>();
 });
 
 var host = hostBuilder.Build();

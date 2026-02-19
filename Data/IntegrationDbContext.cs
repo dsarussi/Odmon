@@ -20,6 +20,7 @@ namespace Odmon.Worker.Data
         public DbSet<ListenerState> ListenerStates => Set<ListenerState>();
         public DbSet<EmailAlertDedup> EmailAlertDedups => Set<EmailAlertDedup>();
         public DbSet<SyncRunMetric> SyncRunMetrics => Set<SyncRunMetric>();
+        public DbSet<MondayDocumentImport> MondayDocumentImports => Set<MondayDocumentImport>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -132,6 +133,24 @@ namespace Odmon.Worker.Data
                 b.HasIndex(x => x.RunId).IsUnique();
                 b.Property(x => x.RunId).HasMaxLength(64).IsRequired();
                 b.Property(x => x.DataSource).HasMaxLength(128);
+            });
+
+            modelBuilder.Entity<MondayDocumentImport>(b =>
+            {
+                b.ToTable("MondayDocumentImports");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.MondayQuestionnaireItemId, x.ColumnId, x.AssetId }).IsUnique();
+                b.HasIndex(x => x.Status);
+                b.HasIndex(x => x.TikCounter);
+                b.Property(x => x.ColumnId).HasMaxLength(128).IsRequired();
+                b.Property(x => x.AssetId).HasMaxLength(128).IsRequired();
+                b.Property(x => x.TikVisualID).HasMaxLength(64);
+                b.Property(x => x.OriginalFileName).HasMaxLength(512).IsRequired();
+                b.Property(x => x.InboxFilePath).HasMaxLength(1024);
+                b.Property(x => x.OdcanitDestPath).HasMaxLength(1024);
+                b.Property(x => x.ErrorMessage).HasMaxLength(2000);
+                b.Property(x => x.CreatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
+                b.Property(x => x.UpdatedAtUtc).HasDefaultValueSql("SYSUTCDATETIME()");
             });
 
             modelBuilder.Entity<OdcanitCase>(b =>
