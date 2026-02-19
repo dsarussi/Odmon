@@ -20,7 +20,8 @@ using Odmon.Worker.Workers;
 using Serilog;
 
 var hostBuilder = Host.CreateDefaultBuilder(args)
-    .UseWindowsService();
+    .UseWindowsService()
+    .UseContentRoot(AppContext.BaseDirectory);
 
 hostBuilder.UseSerilog((context, loggerConfiguration) =>
 {
@@ -29,6 +30,8 @@ hostBuilder.UseSerilog((context, loggerConfiguration) =>
 
 hostBuilder.ConfigureAppConfiguration((context, configBuilder) =>
 {
+    configBuilder.SetBasePath(AppContext.BaseDirectory);
+
     var builtConfig = configBuilder.Build();
     if (IsKeyVaultEnabled(builtConfig))
     {
