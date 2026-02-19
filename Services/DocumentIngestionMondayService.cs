@@ -76,23 +76,29 @@ namespace Odmon.Worker.Services
                 string query;
                 Dictionary<string, object> variables;
 
-                if (cursor == null)
-                {
-                    query = @"query ($boardId: ID!, $columnIds: [String!], $limit: Int!) {
-                        boards(ids: [$boardId]) {
-                            items_page(limit: $limit) {
-                                cursor
-                                items {
-                                    id
-                                    name
+                var columnValuesFragment = @"
                                     column_values(ids: $columnIds) {
                                         id
                                         value
-                                    }
-                                }
-                            }
-                        }
-                    }";
+                                        ... on BoardRelationValue {
+                                            linked_item_ids
+                                        }
+                                    }";
+
+                if (cursor == null)
+                {
+                    query = $@"query ($boardId: ID!, $columnIds: [String!], $limit: Int!) {{
+                        boards(ids: [$boardId]) {{
+                            items_page(limit: $limit) {{
+                                cursor
+                                items {{
+                                    id
+                                    name
+                                    {columnValuesFragment}
+                                }}
+                            }}
+                        }}
+                    }}";
                     variables = new Dictionary<string, object>
                     {
                         ["boardId"] = boardId.ToString(),
@@ -102,19 +108,16 @@ namespace Odmon.Worker.Services
                 }
                 else
                 {
-                    query = @"query ($cursor: String!, $columnIds: [String!], $limit: Int!) {
-                        next_items_page(cursor: $cursor, limit: $limit) {
+                    query = $@"query ($cursor: String!, $columnIds: [String!], $limit: Int!) {{
+                        next_items_page(cursor: $cursor, limit: $limit) {{
                             cursor
-                            items {
+                            items {{
                                 id
                                 name
-                                column_values(ids: $columnIds) {
-                                    id
-                                    value
-                                }
-                            }
-                        }
-                    }";
+                                {columnValuesFragment}
+                            }}
+                        }}
+                    }}";
                     variables = new Dictionary<string, object>
                     {
                         ["cursor"] = cursor,
@@ -256,7 +259,7 @@ namespace Odmon.Worker.Services
 
         // ───────── Private helpers ─────────
 
-        private QuestionnaireItem? ParseQuestionnaireItem(
+        internal QuestionnaireItem? ParseQuestionnaireItem(
             JsonElement itemEl, string[] fileColumnIds, string relationColumnId)
         {
             var idStr = itemEl.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
@@ -278,50 +281,97 @@ namespace Odmon.Worker.Services
                 var colId = col.TryGetProperty("id", out var cidEl) ? cidEl.GetString() : null;
                 if (colId == null) continue;
 
-                var rawValue = col.TryGetProperty("value", out var valEl) && valEl.ValueKind == JsonValueKind.String
-                    ? valEl.GetString()
-                    : null;
-
-                if (string.IsNullOrWhiteSpace(rawValue)) continue;
-
                 if (colId == relationColumnId)
                 {
-                    qi.LinkedCaseItemIds = ParseLinkedPulseIds(rawValue);
+                    qi.LinkedCaseItemIds = ParseLinkedItemIds(col);
+
+                    if (qi.LinkedCaseItemIds.Count > 0)
+                    {
+                        _logger.LogDebug(
+                            "DOCINGESTION item {ItemId} relation column {ColumnId} → linked_item_ids=[{Ids}]",
+                            itemId, relationColumnId, string.Join(",", qi.LinkedCaseItemIds));
+                    }
+                    else
+                    {
+                        _logger.LogDebug(
+                            "DOCINGESTION item {ItemId} relation column {ColumnId} returned no linked_item_ids",
+                            itemId, relationColumnId);
+                    }
+                    continue;
                 }
-                else if (fileColumnSet.Contains(colId))
+
+                if (fileColumnSet.Contains(colId))
                 {
-                    var fileAssets = ParseFileAssets(rawValue);
-                    if (fileAssets.Count > 0)
-                        qi.FileColumns[colId] = fileAssets;
+                    var rawValue = col.TryGetProperty("value", out var valEl) && valEl.ValueKind == JsonValueKind.String
+                        ? valEl.GetString()
+                        : null;
+
+                    if (!string.IsNullOrWhiteSpace(rawValue))
+                    {
+                        var fileAssets = ParseFileAssets(rawValue);
+                        if (fileAssets.Count > 0)
+                            qi.FileColumns[colId] = fileAssets;
+                    }
                 }
             }
 
             return qi;
         }
 
-        private static List<long> ParseLinkedPulseIds(string json)
+        /// <summary>
+        /// Extracts linked item IDs from a BoardRelationValue column.
+        /// Primary path: reads "linked_item_ids" array from the inline fragment.
+        /// Fallback: parses the "value" JSON for "linkedPulseIds" (older API format).
+        /// </summary>
+        internal static List<long> ParseLinkedItemIds(JsonElement columnElement)
         {
-            var result = new List<long>();
-            try
+            // Primary: linked_item_ids from the BoardRelationValue inline fragment
+            if (columnElement.TryGetProperty("linked_item_ids", out var linkedArr) &&
+                linkedArr.ValueKind == JsonValueKind.Array)
             {
-                using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.TryGetProperty("linkedPulseIds", out var arr) &&
-                    arr.ValueKind == JsonValueKind.Array)
+                var result = new List<long>();
+                foreach (var el in linkedArr.EnumerateArray())
                 {
-                    foreach (var el in arr.EnumerateArray())
+                    if (el.ValueKind == JsonValueKind.String && long.TryParse(el.GetString(), out var id))
+                        result.Add(id);
+                    else if (el.ValueKind == JsonValueKind.Number && el.TryGetInt64(out var numId))
+                        result.Add(numId);
+                }
+                if (result.Count > 0)
+                    return result;
+            }
+
+            // Fallback: parse value JSON ({"linkedPulseIds":[{"linkedPulseId":123}]})
+            var rawValue = columnElement.TryGetProperty("value", out var valEl) && valEl.ValueKind == JsonValueKind.String
+                ? valEl.GetString()
+                : null;
+
+            if (!string.IsNullOrWhiteSpace(rawValue))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(rawValue);
+                    if (doc.RootElement.TryGetProperty("linkedPulseIds", out var arr) &&
+                        arr.ValueKind == JsonValueKind.Array)
                     {
-                        if (el.TryGetProperty("linkedPulseId", out var pid))
+                        var result = new List<long>();
+                        foreach (var el in arr.EnumerateArray())
                         {
-                            if (pid.ValueKind == JsonValueKind.Number && pid.TryGetInt64(out var id))
-                                result.Add(id);
-                            else if (pid.ValueKind == JsonValueKind.String && long.TryParse(pid.GetString(), out var sid))
-                                result.Add(sid);
+                            if (el.TryGetProperty("linkedPulseId", out var pid))
+                            {
+                                if (pid.ValueKind == JsonValueKind.Number && pid.TryGetInt64(out var id))
+                                    result.Add(id);
+                                else if (pid.ValueKind == JsonValueKind.String && long.TryParse(pid.GetString(), out var sid))
+                                    result.Add(sid);
+                            }
                         }
+                        return result;
                     }
                 }
+                catch { /* malformed JSON */ }
             }
-            catch { /* malformed JSON, return empty */ }
-            return result;
+
+            return [];
         }
 
         private static List<FileAssetRef> ParseFileAssets(string json)
