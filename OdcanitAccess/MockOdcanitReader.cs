@@ -80,6 +80,17 @@ namespace Odmon.Worker.OdcanitAccess
             }
             return Task.FromResult(resolved);
         }
+
+        public Task<List<int>> GetTikCountersSinceCutoffAsync(DateTime cutoffDate, CancellationToken ct)
+        {
+            var cutoff = cutoffDate.Date;
+            var result = _cases
+                .Where(c => c.tsCreateDate.HasValue && c.tsCreateDate.Value.Date >= cutoff)
+                .Select(c => c.TikCounter)
+                .Distinct()
+                .ToList();
+            return Task.FromResult(result);
+        }
     }
 }
 

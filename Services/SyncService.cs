@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -40,8 +41,18 @@ namespace Odmon.Worker.Services
         private readonly HearingNearestSyncService _hearingNearestSyncService;
         private readonly ISkipLogger _skipLogger;
         private readonly IOdcanitReader _odcanitReader;
+        private readonly IErrorNotifier _errorNotifier;
+        private readonly IEmailNotifier _emailNotifier;
         private readonly OdcanitLoadOptions _odcanitLoadOptions;
+        private readonly IOdcanitChangeFeed _changeFeed;
         private readonly ConcurrentDictionary<long, ColumnCacheEntry> _columnIdCache = new();
+
+        private static readonly TimeSpan RunLockDuration = TimeSpan.FromMinutes(30);
+
+        // ── Circuit breaker state (per run) ──
+        private int _consecutiveMondayFailures;
+        private bool _circuitBreakerTripped;
+        private HashSet<long> _updatedItemIdsThisRun = new();
 
         public SyncService(
             ICaseSource caseSource,
@@ -57,7 +68,10 @@ namespace Odmon.Worker.Services
             HearingApprovalSyncService hearingApprovalSyncService,
             HearingNearestSyncService hearingNearestSyncService,
             ISkipLogger skipLogger,
-            IOdcanitReader odcanitReader)
+            IOdcanitReader odcanitReader,
+            IErrorNotifier errorNotifier,
+            IEmailNotifier emailNotifier,
+            IOdcanitChangeFeed changeFeed)
         {
             _caseSource = caseSource;
             _integrationDb = integrationDb;
@@ -73,12 +87,21 @@ namespace Odmon.Worker.Services
             _hearingNearestSyncService = hearingNearestSyncService;
             _skipLogger = skipLogger;
             _odcanitReader = odcanitReader;
+            _errorNotifier = errorNotifier;
+            _emailNotifier = emailNotifier;
+            _changeFeed = changeFeed;
         }
 
         public async Task SyncOdcanitToMondayAsync(CancellationToken ct)
         {
             var runId = Guid.NewGuid().ToString("N");
             var runStartedAtUtc = DateTime.UtcNow;
+            var runStopwatch = Stopwatch.StartNew();
+
+            // Reset per-run safety state
+            _consecutiveMondayFailures = 0;
+            _circuitBreakerTripped = false;
+            _updatedItemIdsThisRun = new HashSet<long>();
 
             var enabled = _config.GetValue<bool>("Sync:Enabled", true);
             if (!enabled)
@@ -87,6 +110,15 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            // ── Run-lock: prevent overlapping runs ──
+            if (!await TryAcquireRunLockAsync(runId, ct))
+            {
+                _logger.LogWarning("Run-lock is held by another run. Skipping this cycle. RunId={RunId}", runId);
+                return;
+            }
+
+            try
+            {
             var dryRun = _config.GetValue<bool>("Sync:DryRun", false);
             var maxItems = _config.GetValue<int>("Sync:MaxItemsPerRun", 50);
 
@@ -112,15 +144,14 @@ namespace Odmon.Worker.Services
                 dataSource = "Odcanit";
                 testMode = false;
             }
-            
+
             var safetySection = _config.GetSection("Safety");
             var testBoardId = safetySection.GetValue<long>("TestBoardId", 0);
             var testGroupId = _mondaySettings.TestGroupId;
             
             _logger.LogInformation(
-                "Data source: {DataSource}, testMode={TestMode}",
-                dataSource,
-                testMode);
+                "SYNC RUN START | RunId={RunId} | DataSource={DataSource}, TestMode={TestMode}, DryRun={DryRun}, MaxItems={MaxItems}",
+                runId, dataSource, testMode, dryRun, maxItems);
 
             var casesBoardId = _mondaySettings.CasesBoardId;
             var defaultGroupId = _mondaySettings.ToDoGroupId;
@@ -146,21 +177,152 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            // Determine TikCounters to load
-            int[] tikCounters = await DetermineTikCountersToLoadAsync(ct);
-            if (tikCounters.Length == 0)
+            // Fail-fast: BoardId must never be 0 at runtime
+            if (boardIdToUse == 0)
             {
-                _logger.LogError("No TikCounters to load. Worker stopped.");
-                return;
+                _emailNotifier.QueueCriticalAlert(
+                    "FATAL: BoardId is 0",
+                    "ODMON worker detected BoardId=0 at runtime. Check Monday:CasesBoardId and Safety:TestBoardId configuration. The run is aborting.",
+                    exceptionType: "InvalidOperationException",
+                    source: "SyncService.BoardIdValidation");
+                throw new InvalidOperationException("FATAL: boardIdToUse is 0. Check Monday:CasesBoardId and Safety:TestBoardId configuration. Aborting run.");
             }
 
-            // Load cases from Odcanit (allowlist enforces real Odcanit reads, no synthetic test data)
-            List<OdcanitCase> newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
-            _logger.LogInformation("Loaded {Count} cases from Odcanit by TikCounter", newOrUpdatedCases.Count);
+            // ── Parse cutoff date (used by both phases) ──
+            var listenerUpdateOnly = _config.GetValue<bool>("Sync:ListenerUpdateOnly", true);
+            DateTime? cutoffDate = null;
+            var cutoffStr = _config.GetValue<string>("Sync:ListenerCreationCutoffDate");
+            if (!string.IsNullOrWhiteSpace(cutoffStr)
+                && DateTime.TryParse(cutoffStr, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var parsedCutoff))
+            {
+                cutoffDate = parsedCutoff.Date;
+            }
 
-            // CRITICAL: Derive DocumentType for ALL cases immediately after loading
-            // DocumentType does NOT exist in Odcanit DB and must be derived from ClientVisualID
-            // This MUST happen BEFORE validation and column building
+            // ======================================================================
+            // PHASE A — BOOTSTRAP ONBOARDING
+            // Discovers all cases with tsCreateDate >= CutoffDate from Odcanit,
+            // computes unmapped set, and creates Monday items.
+            // Independent of change feed. Idempotent. Safe to run every cycle.
+            // ======================================================================
+            var stageTimer = Stopwatch.StartNew();
+            BootstrapResult bootstrapResult = new();
+            int bootstrapCreated = 0;
+
+            if (listenerUpdateOnly && cutoffDate.HasValue)
+            {
+                stageTimer.Restart();
+                bootstrapResult = await RunBootstrapOnboardingAsync(
+                    runId, boardIdToUse, groupIdToUse, testMode, dryRun,
+                    cutoffDate.Value, maxItems, ct);
+                bootstrapCreated = bootstrapResult.NewlyOnboarded;
+                stageTimer.Stop();
+                _logger.LogInformation("Stage: Bootstrap completed in {ElapsedMs}ms", stageTimer.ElapsedMilliseconds);
+            }
+            else if (!listenerUpdateOnly)
+            {
+                _logger.LogInformation("Bootstrap skipped: ListenerUpdateOnly=false (allowlist or legacy mode).");
+            }
+            else
+            {
+                _logger.LogWarning("Bootstrap skipped: CutoffDate not configured. Set Sync:ListenerCreationCutoffDate.");
+            }
+
+            // ======================================================================
+            // PHASE B — FULL RECONCILE OF MANAGED UNIVERSE
+            // Loads ALL eligible-mapped cases from Odcanit every run.
+            // Does NOT depend on change feed or tsModifyDate for detection.
+            // The per-case OdcanitVersion comparison (DetermineSyncAction) handles
+            // skip-no-change, so only actual changes trigger Monday API calls.
+            // Listener NEVER creates items — only updates managed cases.
+            // ======================================================================
+
+            stageTimer.Restart();
+            int eligibleFromOdcanitCount = 0;
+            int mappedCount = 0;
+            int eligibleMappedCount = 0;
+            int loadedCasesCount = 0;
+
+            int[] tikCounters;
+            List<OdcanitCase> newOrUpdatedCases;
+
+            if (listenerUpdateOnly && cutoffDate.HasValue)
+            {
+                var cutoff = cutoffDate.Value;
+
+                // A) eligibleFromOdcanit: all TikCounters with tsCreateDate >= cutoff
+                var eligibleFromOdcanit = await _odcanitReader.GetTikCountersSinceCutoffAsync(cutoff, ct);
+                eligibleFromOdcanitCount = eligibleFromOdcanit.Count;
+                var eligibleOdcanitSet = new HashSet<int>(eligibleFromOdcanit);
+
+                // B) mapped: all TikCounters with a mapping for this board
+                var mappedTikCounters = await _integrationDb.MondayItemMappings
+                    .AsNoTracking()
+                    .Where(m => m.BoardId == boardIdToUse)
+                    .Select(m => m.TikCounter)
+                    .Distinct()
+                    .ToListAsync(ct);
+                mappedCount = mappedTikCounters.Count;
+                var mappedSet = new HashSet<int>(mappedTikCounters);
+
+                // C) eligibleMapped = INTERSECT
+                var eligibleMappedSet = new HashSet<int>(eligibleOdcanitSet);
+                eligibleMappedSet.IntersectWith(mappedSet);
+                eligibleMappedCount = eligibleMappedSet.Count;
+
+                stageTimer.Stop();
+                _logger.LogInformation(
+                    "Stage: ComputeEligibleMapped completed in {ElapsedMs}ms. CutoffDate={CutoffDate}, " +
+                    "EligibleFromOdcanit={EligibleFromOdcanit}, Mapped={Mapped}, EligibleMapped={EligibleMapped}",
+                    stageTimer.ElapsedMilliseconds, cutoff.ToString("yyyy-MM-dd"),
+                    eligibleFromOdcanitCount, mappedCount, eligibleMappedCount);
+
+                if (eligibleMappedCount == 0)
+                {
+                    _logger.LogInformation("No eligible-mapped cases exist. Listener phase has nothing to reconcile.");
+                    tikCounters = Array.Empty<int>();
+                    newOrUpdatedCases = new List<OdcanitCase>();
+                }
+                else
+                {
+                    // D) Load ALL eligible-mapped cases (full reconcile, no change-feed gating)
+                    tikCounters = eligibleMappedSet.OrderBy(tc => tc).ToArray();
+
+                    stageTimer.Restart();
+                    newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
+                    loadedCasesCount = newOrUpdatedCases.Count;
+                    stageTimer.Stop();
+                    _logger.LogInformation(
+                        "Stage: FullReconcileLoad completed in {ElapsedMs}ms. EligibleMapped={EligibleMapped}, LoadedCases={LoadedCases}",
+                        stageTimer.ElapsedMilliseconds, eligibleMappedCount, loadedCasesCount);
+                }
+            }
+            else
+            {
+                // Legacy/allowlist mode: use DetermineTikCountersToLoadAsync as before
+                stageTimer.Restart();
+                tikCounters = await DetermineTikCountersToLoadAsync(ct);
+                stageTimer.Stop();
+                _logger.LogInformation("Stage: ResolveTikCounters completed in {ElapsedMs}ms, count={Count}",
+                    stageTimer.ElapsedMilliseconds, tikCounters.Length);
+
+                if (tikCounters.Length == 0)
+                {
+                    newOrUpdatedCases = new List<OdcanitCase>();
+                }
+                else
+                {
+                    stageTimer.Restart();
+                    newOrUpdatedCases = await _odcanitReader.GetCasesByTikCountersAsync(tikCounters, ct);
+                    loadedCasesCount = newOrUpdatedCases.Count;
+                    stageTimer.Stop();
+                    _logger.LogInformation("Stage: LoadCases completed in {ElapsedMs}ms, count={Count}",
+                        stageTimer.ElapsedMilliseconds, loadedCasesCount);
+                }
+            }
+
+            // ── Stage: Derive DocumentType ──
+            stageTimer.Restart();
             foreach (var c in newOrUpdatedCases)
             {
                 try
@@ -182,17 +344,34 @@ namespace Odmon.Worker.Services
                         c.TikNumber ?? "<null>",
                         c.ClientVisualID ?? "<null>",
                         ex.Message);
-                    // Leave DocumentType null - will fail in ValidateCriticalFieldsAsync with clear error
                 }
             }
+            stageTimer.Stop();
+            _logger.LogInformation("Stage: DeriveDocumentType completed in {ElapsedMs}ms", stageTimer.ElapsedMilliseconds);
 
+            // ── Stage: Per-case processing ──
+            stageTimer.Restart();
             var batch = (maxItems > 0 ? newOrUpdatedCases.Take(maxItems) : newOrUpdatedCases).ToList();
             var processed = new List<object>();
             int created = 0, updated = 0;
             int skippedNonTest = 0, skippedExistingNonTest = 0, skippedNoChange = 0, skippedNonDemo = 0;
+            int skippedInactive = 0, skippedDuplicate = 0;
             int failed = 0;
+            bool circuitBreakerStopped = false;
+
+            var circuitBreakerThreshold = _config.GetValue<int>("Monday:CircuitBreakerFailureThreshold", 10);
 
             foreach (var c in batch)
+            {
+                // ── Circuit breaker: stop processing if too many consecutive Monday failures ──
+                if (_circuitBreakerTripped)
+                {
+                    circuitBreakerStopped = true;
+                    break;
+                }
+
+                var caseStopwatch = Stopwatch.StartNew();
+                try
             {
                 var caseBoardId = boardIdToUse;
                 var caseGroupId = groupIdToUse;
@@ -273,19 +452,34 @@ namespace Odmon.Worker.Services
                 switch (syncAction.Action)
                 {
                     case "create":
+                        // ── Defense-in-depth: Listener NEVER creates items. Bootstrap handles creation. ──
+                        if (listenerUpdateOnly)
+                        {
+                            action = "skipped_listener_no_create";
+                            _logger.LogWarning(
+                                "GUARDRAIL: Listener blocked creation (bootstrap handles onboarding). TikCounter={TikCounter}, TikNumber={TikNumber}",
+                                c.TikCounter, c.TikNumber ?? "<null>");
+                            processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, "Blocked: listener never creates"));
+                            continue;
+                        }
+
                         action = dryRun ? "dry-create" : "created";
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "Creating new Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, ItemName={ItemName}",
                             c.TikNumber, c.TikCounter, caseBoardId, itemName);
                         if (!dryRun)
                         {
                             try
                             {
-                                mondayIdForLog = await CreateMondayItemAsync(c, caseBoardId, caseGroupId!, itemName, testMode, ct);
+                                var (createResult, createRetries) = await ExecuteWithRetryAsync(
+                                    () => CreateMondayItemAsync(c, caseBoardId, caseGroupId!, itemName, testMode, ct),
+                                    "create_item", c.TikCounter, ct);
+                                mondayIdForLog = createResult;
                                 created++;
-                                _logger.LogInformation(
-                                    "Successfully created Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
-                                    c.TikNumber, c.TikCounter, mondayIdForLog);
+                                _consecutiveMondayFailures = 0; // reset on success
+                                _logger.LogDebug(
+                                    "Successfully created Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, Retries={Retries}",
+                                    c.TikNumber, c.TikCounter, mondayIdForLog, createRetries);
                             }
                             catch (CriticalFieldValidationException critEx)
                             {
@@ -293,7 +487,6 @@ namespace Odmon.Worker.Services
                                 failed++;
                                 errorMessage = critEx.ValidationReason;
                                 
-                                // Critical field validation failed - DO NOT create item
                                 _logger.LogError(
                                     "CRITICAL VALIDATION FAILED - Item NOT created: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, ColumnId={ColumnId}, Value='{Value}', Reason={Reason}",
                                     c.TikNumber, c.TikCounter, caseBoardId, critEx.ColumnId, critEx.FieldValue ?? "<null>", critEx.ValidationReason);
@@ -301,30 +494,21 @@ namespace Odmon.Worker.Services
                                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
                                 continue;
                             }
-                            catch (Monday.MondayApiException mondayEx)
-                            {
-                                action = "failed_create";
-                                failed++;
-                                errorMessage = mondayEx.Message;
-                                
-                                // Log with full context from MondayApiException
-                                _logger.LogError(mondayEx,
-                                    "Monday API error during create_item: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, Operation={Operation}, ItemId={ItemId}, Error={Error}, ColumnValuesSnippet={ColumnValuesSnippet}",
-                                    c.TikNumber, c.TikCounter, caseBoardId, mondayEx.Operation ?? "create_item", mondayEx.ItemId, mondayEx.Message, mondayEx.ColumnValuesSnippet ?? "<none>");
-                                
-                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
-                                continue;
-                            }
-                            catch (Exception ex)
+                            catch (Exception ex) when (ex is not OperationCanceledException)
                             {
                                 action = "failed_create";
                                 failed++;
                                 errorMessage = ex.Message;
-                                
+
+                                // Circuit breaker: track consecutive Monday failures
+                                IncrementCircuitBreaker(circuitBreakerThreshold);
+
                                 _logger.LogError(ex,
-                                    "Unexpected error during create_item: TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, Error={Error}",
+                                    "Error during create_item (after retries): TikNumber={TikNumber}, TikCounter={TikCounter}, BoardId={BoardId}, Error={Error}",
                                     c.TikNumber, c.TikCounter, caseBoardId, ex.Message);
                                 
+                                var maxRetry = _config.GetValue<int>("Monday:MaxRetryAttempts", 3);
+                                await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "create", ex, maxRetry, ct);
                                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
                                 continue;
                             }
@@ -336,40 +520,57 @@ namespace Odmon.Worker.Services
                         break;
 
                     case "update":
+                        // ── Duplicate update prevention: skip if already updated this run ──
+                        if (mapping != null && _updatedItemIdsThisRun.Contains(mapping.MondayItemId))
+                        {
+                            action = "skipped_duplicate_update";
+                            skippedDuplicate++;
+                            _logger.LogDebug(
+                                "Duplicate update prevented for MondayItemId={MondayItemId}, TikCounter={TikCounter}, TikNumber={TikNumber}",
+                                mapping.MondayItemId, c.TikCounter, c.TikNumber);
+                            processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, false, "Duplicate update prevented"));
+                            continue;
+                        }
+
                         action = dryRun ? "dry-update" : "updated";
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "Updating existing Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}, RequiresHearingUpdate={RequiresHearingUpdate}",
                             c.TikNumber, c.TikCounter, mapping!.MondayItemId, caseBoardId, syncAction.RequiresDataUpdate, syncAction.RequiresNameUpdate, syncAction.RequiresHearingUpdate);
                         if (!dryRun)
                         {
                             try
                             {
+                                // Check if Monday item is active before attempting update
                                 var itemState = await _mondayClient.GetItemStateAsync(caseBoardId, mapping.MondayItemId, ct);
                                 if (itemState != null && !string.Equals(itemState, "active", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    var oldItemId = mapping.MondayItemId;
-                                    var columnValuesJson = await BuildColumnValuesJsonAsync(caseBoardId, c, forceNotStartedStatus: true, ct);
-                                    var newItemId = await _mondayClient.CreateItemAsync(caseBoardId, caseGroupId!, itemName, columnValuesJson, ct);
-                                    mapping.MondayItemId = newItemId;
-                                    mapping.OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
-                                    mapping.MondayChecksum = itemName;
-                                    mapping.HearingChecksum = ComputeHearingChecksum(c);
-                                    mapping.LastSyncFromOdcanitUtc = DateTime.UtcNow;
-                                    mapping.IsTest = testMode;
-                                    await _integrationDb.SaveChangesAsync(ct);
+                                    // Item is inactive/archived/deleted — skip, do NOT revive or create new item.
+                                    action = "skipped_inactive_monday_item";
+                                    skippedInactive++;
                                     _logger.LogWarning(
-                                        "Monday item inactive (state={State}), created new item and updated mapping: TikCounter={TikCounter}, TikNumber={TikNumber}, oldItemId={OldItemId}, newItemId={NewItemId}",
-                                        itemState, c.TikCounter, c.TikNumber ?? "<null>", oldItemId, newItemId);
-                                    updated++;
+                                        "Monday item inactive; skipping update (NO revive). TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, ItemState={ItemState}, ReviveInactiveItems={ReviveFlag}",
+                                        c.TikCounter, c.TikNumber ?? "<null>", caseBoardId, mapping.MondayItemId, itemState, _mondaySettings.ReviveInactiveItems);
+
+                                    await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "update_skipped_inactive",
+                                        new InvalidOperationException($"Monday item {mapping.MondayItemId} is inactive (state={itemState}). Skipped update; no revive. ReviveInactiveItems={_mondaySettings.ReviveInactiveItems}"),
+                                        0, ct);
+
+                                    processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, $"InactiveMondayItem (state={itemState})"));
+                                    continue;
                                 }
-                                else
+
+                                // Item is active — proceed with normal update
+                                var (__, updateRetries) = await ExecuteWithRetryAsync(async () =>
                                 {
                                     await UpdateMondayItemAsync(mapping!, c, caseBoardId, itemName, syncAction.RequiresNameUpdate, syncAction.RequiresDataUpdate, syncAction.RequiresHearingUpdate, testMode, ct);
-                                    updated++;
-                                    _logger.LogInformation(
-                                        "Successfully updated Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}",
-                                        c.TikNumber, c.TikCounter, mapping.MondayItemId);
-                                }
+                                    return true;
+                                }, "update_item", c.TikCounter, ct);
+                                updated++;
+                                _consecutiveMondayFailures = 0; // reset on success
+                                _updatedItemIdsThisRun.Add(mapping.MondayItemId);
+                                _logger.LogDebug(
+                                        "Successfully updated Monday item: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, Retries={Retries}",
+                                        c.TikNumber, c.TikCounter, mapping.MondayItemId, updateRetries);
                             }
                             catch (CriticalFieldValidationException critEx)
                             {
@@ -377,7 +578,6 @@ namespace Odmon.Worker.Services
                                 failed++;
                                 errorMessage = critEx.ValidationReason;
                                 
-                                // Critical field validation failed - DO NOT update item
                                 _logger.LogError(
                                     "CRITICAL VALIDATION FAILED - Item NOT updated: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, ColumnId={ColumnId}, Value='{Value}', Reason={Reason}",
                                     c.TikNumber, c.TikCounter, mapping.MondayItemId, caseBoardId, critEx.ColumnId, critEx.FieldValue ?? "<null>", critEx.ValidationReason);
@@ -385,30 +585,37 @@ namespace Odmon.Worker.Services
                                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
                                 continue;
                             }
-                            catch (Monday.MondayApiException mondayEx)
+                            catch (Monday.MondayApiException mondayEx) when (mondayEx.IsInactiveItemError())
                             {
-                                action = "failed_update";
-                                failed++;
-                                errorMessage = mondayEx.Message;
-                                
-                                // Log with full context from MondayApiException
-                                _logger.LogError(mondayEx,
-                                    "Monday API error during update: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, Operation={Operation}, Error={Error}, ColumnValuesSnippet={ColumnValuesSnippet}",
-                                    c.TikNumber, c.TikCounter, mapping.MondayItemId, caseBoardId, mondayEx.Operation ?? "change_multiple_column_values", mondayEx.Message, mondayEx.ColumnValuesSnippet ?? "<none>");
-                                
-                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+                                // Inactive-item error surfaced during actual Monday mutation (pre-check may have returned null).
+                                // Same policy as the GetItemStateAsync pre-check: skip, do NOT revive.
+                                action = "skipped_inactive_monday_item";
+                                skippedInactive++;
+                                _logger.LogWarning(
+                                    "Monday item inactive; skipping update (NO revive). TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, Source=MondayApiException, ListenerUpdateOnly={ListenerUpdateOnly}, ReviveInactiveItems={ReviveFlag}",
+                                    c.TikCounter, c.TikNumber ?? "<null>", caseBoardId, mapping.MondayItemId, listenerUpdateOnly, _mondaySettings.ReviveInactiveItems);
+
+                                await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "update_skipped_inactive",
+                                    mondayEx, 0, ct);
+
+                                processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, $"InactiveMondayItem (MondayApiException)"));
                                 continue;
                             }
-                            catch (Exception ex)
+                            catch (Exception ex) when (ex is not OperationCanceledException)
                             {
                                 action = "failed_update";
                                 failed++;
                                 errorMessage = ex.Message;
-                                
+
+                                // Circuit breaker: track consecutive Monday failures
+                                IncrementCircuitBreaker(circuitBreakerThreshold);
+
                                 _logger.LogError(ex,
-                                    "Unexpected error during update: TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, Error={Error}",
-                                    c.TikCounter, c.TikCounter, mapping.MondayItemId, caseBoardId, ex.Message);
+                                    "Error during update (after retries): TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, BoardId={BoardId}, Error={Error}",
+                                    c.TikNumber, c.TikCounter, mapping.MondayItemId, caseBoardId, ex.Message);
                                 
+                                var maxRetry = _config.GetValue<int>("Monday:MaxRetryAttempts", 3);
+                                await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, caseBoardId, "update", ex, maxRetry, ct);
                                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
                                 continue;
                             }
@@ -430,58 +637,188 @@ namespace Odmon.Worker.Services
                 }
 
                 processed.Add(LogCase(action, c, itemName, prefixApplied, testMode, dryRun, caseBoardId, mondayIdForLog, wasNoChange, errorMessage));
+
+                } // end try (per-case)
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    failed++;
+                    _logger.LogError(ex,
+                        "UNHANDLED error processing case TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}: {Error}",
+                        c.TikCounter, c.TikNumber ?? "<null>", boardIdToUse, ex.Message);
+                    await PersistSyncFailureAsync(runId, c.TikCounter, c.TikNumber, boardIdToUse, "process_case", ex, 0, ct);
+                    processed.Add(LogCase("failed_unhandled", c, c.TikName ?? c.TikNumber ?? "<unknown>", false, testMode, dryRun, boardIdToUse, 0, false, ex.Message));
+                }
+                finally
+                {
+                    caseStopwatch.Stop();
+                    _logger.LogDebug("Case TikCounter={TikCounter} processed in {ElapsedMs}ms", c.TikCounter, caseStopwatch.ElapsedMilliseconds);
+                }
             }
+
+            stageTimer.Stop();
+
+            if (circuitBreakerStopped)
+            {
+                _logger.LogError(
+                    "CIRCUIT BREAKER ACTIVATED – stopping run due to {ConsecutiveFailures} consecutive Monday failures (threshold={Threshold}). RunId={RunId}",
+                    _consecutiveMondayFailures, circuitBreakerThreshold, runId);
+            }
+
+            _logger.LogInformation("Stage: PerCaseProcessing completed in {ElapsedMs}ms for {BatchCount} cases", stageTimer.ElapsedMilliseconds, batch.Count);
+
+            // ── Run summary ──
+            runStopwatch.Stop();
+            var totalDurationMs = runStopwatch.ElapsedMilliseconds;
+            var successCount = created + updated + skippedNoChange;
 
             var runSummary = new
             {
                 RunId = runId,
                 StartedAtUtc = runStartedAtUtc,
                 FinishedAtUtc = DateTime.UtcNow,
+                DurationMs = totalDurationMs,
                 MaxItems = maxItems,
+                CutoffDate = cutoffDate?.ToString("yyyy-MM-dd"),
+                // Reconcile counters
+                EligibleFromOdcanit = eligibleFromOdcanitCount,
+                Mapped = mappedCount,
+                EligibleMapped = eligibleMappedCount,
+                LoadedCases = loadedCasesCount,
+                // Bootstrap counters
+                BootstrapTotalFromOdcanit = bootstrapResult.TotalFromOdcanit,
+                BootstrapAlreadyMapped = bootstrapResult.AlreadyMapped,
+                BootstrapNewlyOnboarded = bootstrapResult.NewlyOnboarded,
+                BootstrapFailed = bootstrapResult.Failed,
+                // Listener counters
+                Total = batch.Count,
+                Success = successCount,
                 Created = created,
                 Updated = updated,
                 SkippedNonTest = skippedNonTest,
                 SkippedExistingNonTestMapping = skippedExistingNonTest,
                 SkippedNonDemo = skippedNonDemo,
                 SkippedNoChange = skippedNoChange,
+                SkippedInactive = skippedInactive,
+                SkippedDuplicate = skippedDuplicate,
+                CircuitBreakerStopped = circuitBreakerStopped,
                 Failed = failed,
                 Processed = processed
             };
 
+            var totalFailed = failed + bootstrapResult.Failed;
             _integrationDb.SyncLogs.Add(new SyncLog
             {
                 CreatedAtUtc = DateTime.UtcNow,
                 Source = "SyncService",
-                Level = "Info",
-                Message = $"Run {runId} summary: created={created}, updated={updated}, skipped_non_test={skippedNonTest}, skipped_existing_non_test_mapping={skippedExistingNonTest}, skipped_non_demo={skippedNonDemo}, skipped_no_change={skippedNoChange}, failed={failed}, batch={batch.Count}",
+                Level = totalFailed > 0 ? "Warning" : "Info",
+                Message = $"Run {runId}: bootstrap_onboarded={bootstrapCreated}, eligibleMapped={eligibleMappedCount}, loaded={loadedCasesCount}, updated={updated}, skipped={skippedNoChange}, skippedInactive={skippedInactive}, failed={totalFailed}, duration={totalDurationMs}ms",
                 Details = JsonSerializer.Serialize(runSummary)
             });
 
             await _integrationDb.SaveChangesAsync(ct);
 
             // Phase-2: hearing approval write-back runs even when main sync skips/no-change
+            stageTimer.Restart();
             await _hearingApprovalSyncService.SyncAsync(batch, ct);
+            stageTimer.Stop();
+            _logger.LogInformation("Stage: HearingApprovalSync completed in {ElapsedMs}ms", stageTimer.ElapsedMilliseconds);
 
             // Nearest hearing sync: update Monday hearing date/judge/city/status from vwExportToOuterSystems_YomanData
+            stageTimer.Restart();
             await _hearingNearestSyncService.SyncNearestHearingsAsync(boardIdToUse, ct);
+            stageTimer.Stop();
+            _logger.LogInformation("Stage: HearingNearestSync completed in {ElapsedMs}ms", stageTimer.ElapsedMilliseconds);
 
+            // ── SYNC RUN SUMMARY ──
             _logger.LogInformation(
-                "Sync run {RunId} completed: created={Created}, updated={Updated}, skipped_non_test={SkippedNonTest}, skipped_existing_non_test_mapping={SkippedExistingNonTest}, skipped_non_demo={SkippedNonDemo}, skipped_no_change={SkippedNoChange}, failed={Failed}, total_processed={TotalProcessed}",
+                "SYNC RUN SUMMARY | RunId={RunId} | CutoffDate={CutoffDate} | " +
+                "Bootstrap: Onboarded={BootstrapOnboarded}, FromOdcanit={BootstrapFromOdcanit}, AlreadyMapped={BootstrapAlreadyMapped}, CoolingFiltered={BootstrapCoolingFiltered}, Failed={BootstrapFailed} | " +
+                "Reconcile: EligibleFromOdcanit={EligibleFromOdcanit}, Mapped={Mapped}, EligibleMapped={EligibleMapped}, Loaded={Loaded}, " +
+                "Updated={Updated}, SkippedNoChange={SkippedNoChange}, SkippedInactive={SkippedInactive}, SkippedDuplicate={SkippedDuplicate} | " +
+                "Failed={Failed} | CircuitBreakerStopped={CircuitBreakerStopped} | Duration={DurationMs}ms",
                 runId,
-                created,
-                updated,
-                skippedNonTest,
-                skippedExistingNonTest,
-                skippedNonDemo,
-                skippedNoChange,
-                failed,
-                batch.Count);
-            
-            if (failed > 0)
+                cutoffDate?.ToString("yyyy-MM-dd") ?? "<not_configured>",
+                bootstrapCreated, bootstrapResult.TotalFromOdcanit, bootstrapResult.AlreadyMapped, bootstrapResult.CoolingFilteredOut, bootstrapResult.Failed,
+                eligibleFromOdcanitCount, mappedCount, eligibleMappedCount, loadedCasesCount,
+                updated, skippedNoChange, skippedInactive, skippedDuplicate,
+                totalFailed, circuitBreakerStopped, totalDurationMs);
+
+            // ── Persist SyncRunMetric for daily summary ──
+            try
+            {
+                _integrationDb.SyncRunMetrics.Add(new Models.SyncRunMetric
+                {
+                    RunId = runId,
+                    StartedAtUtc = runStartedAtUtc,
+                    CompletedAtUtc = DateTime.UtcNow,
+                    DurationMs = (int)totalDurationMs,
+                    BootstrapCreated = bootstrapCreated,
+                    CoolingFilteredOut = bootstrapResult.CoolingFilteredOut,
+                    BootstrapFailed = bootstrapResult.Failed,
+                    Updated = updated,
+                    SkippedNoChange = skippedNoChange,
+                    SkippedInactive = skippedInactive,
+                    SkippedDuplicate = skippedDuplicate,
+                    Failed = failed,
+                    CircuitBreakerTripped = circuitBreakerStopped,
+                    DataSource = dataSource
+                });
+                await _integrationDb.SaveChangesAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to persist SyncRunMetric for RunId={RunId}", runId);
+            }
+
+            // ── Circuit breaker email alert ──
+            if (circuitBreakerStopped)
+            {
+                _emailNotifier.QueueCriticalAlert(
+                    "Circuit Breaker TRIPPED",
+                    $"ODMON circuit breaker tripped during RunId={runId}.\n" +
+                    $"Consecutive Monday API failures reached threshold.\n" +
+                    $"Failed={totalFailed}, Updated={updated}, Duration={totalDurationMs}ms.\n" +
+                    $"The remaining cases in this run were skipped. The worker will retry next cycle.",
+                    exceptionType: "CircuitBreaker",
+                    source: "SyncService");
+            }
+
+            // ── Failure rate notification ──
+            if (batch.Count > 0 && failed > 0)
+            {
+                var failureRate = (double)failed / batch.Count;
+                if (failureRate >= 0.5)
+                {
+                    try { await _errorNotifier.NotifyHighFailureRateAsync(runId, batch.Count, failed, ct); }
+                    catch (Exception nex) { _logger.LogWarning(nex, "Error notifier failed"); }
+
+                    _emailNotifier.QueueCriticalAlert(
+                        $"High Failure Rate ({failureRate:P0})",
+                        $"ODMON sync run {runId} had a high failure rate: {failed}/{batch.Count} cases failed ({failureRate:P0}).\n" +
+                        $"Review the SyncFailures table and error logs.",
+                        exceptionType: "HighFailureRate",
+                        source: "SyncService");
+                }
+                else
             {
                 _logger.LogWarning(
-                    "Sync run {RunId} completed with {FailedCount} failure(s). Review error logs above for details.",
+                        "Sync run {RunId} completed with {FailedCount} failure(s). Failed cases are persisted in SyncFailures table.",
                     runId, failed);
+                }
+            }
+
+            // ── HEARTBEAT ──
+            _logger.LogInformation(
+                "HEARTBEAT | ODMON sync run {RunId} completed at {FinishedAtUtc:O} | Total={Total}, Failed={Failed}, Duration={DurationMs}ms",
+                runId, DateTime.UtcNow, batch.Count, failed, totalDurationMs);
+
+            } // end try (run-level)
+            finally
+            {
+                // Use CancellationToken.None so lock release succeeds even during Ctrl+C shutdown.
+                // The host token (ct) may already be canceled at this point.
+                await ReleaseRunLockAsync(runId, CancellationToken.None);
             }
         }
 
@@ -530,7 +867,7 @@ namespace Odmon.Worker.Services
 
             if (string.IsNullOrWhiteSpace(errorMessage))
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "Case {TikCounter} ({TikNumber}) action={Action} testMode={TestMode} boardId={BoardId} dryRun={DryRun} prefixApplied={PrefixApplied}",
                     c.TikCounter,
                     c.TikNumber,
@@ -662,14 +999,14 @@ namespace Odmon.Worker.Services
             // Date/hour: when gating passes
             if (canPublishDateHour)
             {
-                TryAddDateColumn(columnValues, _mondaySettings.HearingDateColumnId, c.HearingDate);
+            TryAddDateColumn(columnValues, _mondaySettings.HearingDateColumnId, c.HearingDate);
                 await TryAddHourColumnAsync(columnValues, boardId, _mondaySettings.HearingHourColumnId, c.HearingTime, c.TikCounter, ct);
                 if (!string.IsNullOrWhiteSpace(_mondaySettings.HearingDateColumnId)) hearingColumnsIncluded.Add(_mondaySettings.HearingDateColumnId);
                 if (!string.IsNullOrWhiteSpace(_mondaySettings.HearingHourColumnId) && c.HearingTime.HasValue) hearingColumnsIncluded.Add(_mondaySettings.HearingHourColumnId);
             }
             else if (hasHearingDate && !canPublishDateHour)
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "Hearing date/hour update blocked for TikCounter={TikCounter}: HasHearingJudge={HasJudge}, HasEffectiveCourtCity={HasCity}, MeetStatus={MeetStatus}",
                     c.TikCounter, hasHearingJudge, hasEffectiveCourtCity, meetStatus?.ToString() ?? "<null>");
             }
@@ -778,8 +1115,23 @@ namespace Odmon.Worker.Services
             TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
 
             // Legal user data (UserData view vwExportToOuterSystems_UserData): צד תובע / צד נתבע -> Monday status columns
-            TryAddStatusLabelColumn(columnValues, "color_mkxh8gsq", MapPlaintiffSideLabel(c.PlaintiffSideRaw));
-            TryAddStatusLabelColumn(columnValues, "color_mkxh5x31", MapDefendantSideLabel(c.DefendantSideRaw));
+            // These are NOT critical: items are created even if missing; values will be filled on a future update.
+            var plaintiffLabel = MapPlaintiffSideLabel(c.PlaintiffSideRaw);
+            var defendantLabel = MapDefendantSideLabel(c.DefendantSideRaw);
+            if (string.IsNullOrWhiteSpace(plaintiffLabel))
+            {
+                _logger.LogWarning(
+                    "PlaintiffSide missing for TikCounter={TikCounter}, TikNumber={TikNumber}; column omitted, will update later.",
+                    c.TikCounter, c.TikNumber ?? "<null>");
+            }
+            if (string.IsNullOrWhiteSpace(defendantLabel))
+            {
+                _logger.LogWarning(
+                    "DefendantSide missing for TikCounter={TikCounter}, TikNumber={TikNumber}; column omitted, will update later.",
+                    c.TikCounter, c.TikNumber ?? "<null>");
+            }
+            TryAddStatusLabelColumn(columnValues, "color_mkxh8gsq", plaintiffLabel);
+            TryAddStatusLabelColumn(columnValues, "color_mkxh5x31", defendantLabel);
             TryAddStringColumn(columnValues, _mondaySettings.ResponsibleTextColumnId, DetermineResponsibleText(c));
 
             // DocumentType was already derived and assigned immediately after loading the case
@@ -793,9 +1145,9 @@ namespace Odmon.Worker.Services
             if (!isClient6)
             {
                 var documentType = c.DocumentType;
-                if (!string.IsNullOrWhiteSpace(documentType))
-                {
-                    TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
+            if (!string.IsNullOrWhiteSpace(documentType))
+            {
+                TryAddStatusLabelColumn(columnValues, _mondaySettings.DocumentTypeStatusColumnId, documentType);
                 }
             }
             else
@@ -834,7 +1186,7 @@ namespace Odmon.Worker.Services
             ValidateHourColumnValues(columnValues, c.TikCounter);
 
             // DEBUG: Log column values before filtering
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "BuildColumnValues BEFORE filter: TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, Count={Count}, ColumnIds={ColumnIds}",
                 c.TikCounter,
                 c.TikNumber ?? "<null>",
@@ -883,7 +1235,7 @@ namespace Odmon.Worker.Services
             }
 
             // DEBUG: Log column values before JSON serialization
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "BuildColumnValues BEFORE JSON: TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, Count={Count}, ColumnIds={ColumnIds}",
                 c.TikCounter,
                 c.TikNumber ?? "<null>",
@@ -1640,12 +1992,12 @@ namespace Odmon.Worker.Services
             }
         }
 
-        private async Task ValidateCriticalColumnsAsync(long boardId, HashSet<string> validColumnIds, OdcanitCase c, CancellationToken ct)
+        private Task ValidateCriticalColumnsAsync(long boardId, HashSet<string> validColumnIds, OdcanitCase c, CancellationToken ct)
         {
             var criticalColumns = GetCriticalColumnIds();
             if (criticalColumns.Count == 0)
             {
-                return; // No critical columns configured
+                return Task.CompletedTask; // No critical columns configured
             }
 
             var missingCriticalColumns = new List<string>();
@@ -1682,6 +2034,8 @@ namespace Odmon.Worker.Services
                         $"TikCounter={c.TikCounter}, TikNumber={c.TikNumber ?? "<null>"}");
                 }
             }
+
+            return Task.CompletedTask;
         }
 
         private List<string> GetCriticalColumnIds()
@@ -1772,12 +2126,12 @@ namespace Odmon.Worker.Services
                 if (!allowedLabels.Contains(trimmedClientNumber))
                 {
                     _logger.LogWarning(
-                        "ClientNumber '{ClientNumber}' is not a valid label for dropdown column {ColumnId} on board {BoardId}. TikCounter={TikCounter}, TikNumber={TikNumber}. Column will be omitted.",
+                        "ClientNumber dropdown label missing. TikCounter={TikCounter}, TikNumber={TikNumber}, ClientVisualID={ClientVisualID}, ColumnId={ColumnId}, Reason={Reason}",
+                        tikCounter,
+                        tikNumber ?? "<null>",
                         trimmedClientNumber,
                         columnId,
-                        boardId,
-                        tikCounter,
-                        tikNumber ?? "<null>");
+                        "label not found in Monday dropdown options");
 
                     await _skipLogger.LogSkipAsync(
                         tikCounter,
@@ -1793,6 +2147,18 @@ namespace Odmon.Worker.Services
                             AllowedLabelCount = allowedLabels.Count
                         },
                         ct);
+
+                    // Fallback: populate optional text column with the raw ClientVisualID
+                    var fallbackColumnId = _mondaySettings.ClientNumberTextColumnId;
+                    if (!string.IsNullOrWhiteSpace(fallbackColumnId))
+                    {
+                        columnValues[fallbackColumnId] = trimmedClientNumber;
+                        _logger.LogDebug(
+                            "ClientNumber dropdown fallback: wrote '{ClientVisualID}' to text column {FallbackColumnId} for TikCounter={TikCounter}",
+                            trimmedClientNumber,
+                            fallbackColumnId,
+                            tikCounter);
+                    }
 
                     return;
                 }
@@ -1819,6 +2185,134 @@ namespace Odmon.Worker.Services
                     tikNumber ?? "<null>",
                     ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Pure decision logic for cooling period eligibility using Israeli business days.
+        /// Israeli business days: Sunday–Thursday. Friday and Saturday are skipped.
+        /// The day the case is opened counts as business day #1.
+        /// Returns true if the case has aged past the cooling period and is eligible for onboarding.
+        /// Does NOT check cutoff — use <see cref="IsBootstrapEligible"/> for the combined check.
+        /// </summary>
+        internal static bool IsCoolingEligible(DateTime? tsCreateDate, int coolingPeriodDays, DateTime utcNow)
+        {
+            // CoolingPeriodDays == 0 means no delay
+            if (coolingPeriodDays <= 0)
+                return tsCreateDate.HasValue; // eligible if tsCreateDate is non-null (null → not eligible)
+
+            if (!tsCreateDate.HasValue)
+                return false; // null tsCreateDate → not eligible
+
+            var israelTz = GetIsraelTimeZone();
+            // tsCreateDate from Odcanit is local Israel time (date-only, 00:00:00)
+            var openDateIsrael = DateOnly.FromDateTime(tsCreateDate.Value);
+            // Convert current UTC time to Israel date for comparison
+            var nowIsrael = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(
+                DateTime.SpecifyKind(utcNow, DateTimeKind.Utc), israelTz));
+
+            var eligibleFrom = AddIsraeliBusinessDays(openDateIsrael, coolingPeriodDays);
+            return nowIsrael >= eligibleFrom;
+        }
+
+        /// <summary>
+        /// Combined bootstrap onboarding eligibility check.
+        /// A case is eligible for bootstrap creation ONLY if BOTH:
+        ///   1) tsCreateDate >= cutoffDate (post-cutoff)
+        ///   2) Israeli business day cooling period has passed
+        /// In the actual bootstrap flow, condition (1) is enforced by the SQL query
+        /// and a defense-in-depth guardrail; this method provides a single testable predicate.
+        /// </summary>
+        internal static bool IsBootstrapEligible(DateTime? tsCreateDate, DateTime cutoffDate, int coolingPeriodDays, DateTime utcNow)
+        {
+            if (!tsCreateDate.HasValue)
+                return false;
+
+            // Condition 1: must be post-cutoff
+            if (tsCreateDate.Value.Date < cutoffDate.Date)
+                return false;
+
+            // Condition 2: must pass cooling period (Israeli business days)
+            return IsCoolingEligible(tsCreateDate, coolingPeriodDays, utcNow);
+        }
+
+        // ================================================================
+        // Israeli business day helpers
+        // ================================================================
+
+        /// <summary>
+        /// Returns true if the given date is an Israeli business day (Sunday–Thursday).
+        /// Friday (DayOfWeek.Friday) and Saturday (DayOfWeek.Saturday) are weekends.
+        /// </summary>
+        internal static bool IsIsraeliBusinessDay(DateOnly date)
+        {
+            var dow = date.DayOfWeek;
+            return dow != DayOfWeek.Friday && dow != DayOfWeek.Saturday;
+        }
+
+        /// <summary>
+        /// Computes the first date on which a case becomes eligible after N Israeli business days.
+        /// The start date counts as business day #1 (if it is a business day).
+        /// If the start date is Friday or Saturday, the first business day (Sunday) is day #1.
+        /// Returns the day AFTER the Nth business day (the first eligible date).
+        ///
+        /// Example: AddIsraeliBusinessDays(Thursday, 3) → Thu(1), Sun(2), Mon(3) → eligible Tuesday.
+        /// </summary>
+        internal static DateOnly AddIsraeliBusinessDays(DateOnly startIsraelDate, int businessDays)
+        {
+            if (businessDays <= 0)
+                return startIsraelDate;
+
+            var current = startIsraelDate;
+            int counted = 0;
+
+            while (counted < businessDays)
+            {
+                if (IsIsraeliBusinessDay(current))
+                    counted++;
+
+                if (counted < businessDays)
+                    current = current.AddDays(1);
+            }
+
+            // current is now the Nth business day; eligible from the next calendar day
+            return current.AddDays(1);
+        }
+
+        /// <summary>
+        /// Returns the Israel time zone. Handles both Windows ("Israel Standard Time") and Linux ("Asia/Jerusalem").
+        /// </summary>
+        internal static TimeZoneInfo GetIsraelTimeZone()
+        {
+            if (TimeZoneInfo.TryFindSystemTimeZoneById("Israel Standard Time", out var tz))
+                return tz;
+            return TimeZoneInfo.FindSystemTimeZoneById("Asia/Jerusalem");
+        }
+
+        /// <summary>
+        /// Pure decision logic for client number dropdown resolution.
+        /// Returns which action to take: include dropdown, use fallback text, or omit entirely.
+        /// Extracted for testability.
+        /// </summary>
+        internal enum ClientDropdownAction { IncludeDropdown, UseFallbackText, OmitEntirely }
+
+        internal static ClientDropdownAction ResolveClientDropdownAction(
+            string? clientVisualId,
+            HashSet<string> allowedLabels,
+            string? fallbackTextColumnId)
+        {
+            if (string.IsNullOrWhiteSpace(clientVisualId))
+                return ClientDropdownAction.OmitEntirely;
+
+            var trimmed = clientVisualId.Trim();
+
+            if (allowedLabels.Contains(trimmed))
+                return ClientDropdownAction.IncludeDropdown;
+
+            // Label not found in Monday dropdown options
+            if (!string.IsNullOrWhiteSpace(fallbackTextColumnId))
+                return ClientDropdownAction.UseFallbackText;
+
+            return ClientDropdownAction.OmitEntirely;
         }
 
         private static string MapTaskTypeLabel(string? tikType)
@@ -2028,13 +2522,13 @@ namespace Odmon.Worker.Services
             string lookupMethod = "none";
 
             // Priority 1: Find mapping by TikCounter + BoardId (source of truth)
-            mapping = await _integrationDb.MondayItemMappings
+                mapping = await _integrationDb.MondayItemMappings
                 .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter && m.BoardId == boardId, ct);
-            
-            if (mapping != null)
-            {
+                
+                if (mapping != null)
+                {
                 lookupMethod = "mapping_by_tikcounter_boardid";
-                _logger.LogDebug(
+                    _logger.LogDebug(
                     "Found mapping by TikCounter+BoardId: TikCounter={TikCounter}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikNumber={TikNumber}",
                     c.TikCounter, boardId, mapping.MondayItemId, mapping.TikNumber ?? "<null>");
             }
@@ -2152,7 +2646,7 @@ namespace Odmon.Worker.Services
                             BoardId = boardId,
                             MondayItemId = existingItemId.Value,
                             LastSyncFromOdcanitUtc = DateTime.UtcNow,
-                            OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
+                            OdcanitVersion = ComputeContentVersion(c),
                             MondayChecksum = itemName,
                             HearingChecksum = ComputeHearingChecksum(c),
                             IsTest = testMode
@@ -2221,7 +2715,7 @@ namespace Odmon.Worker.Services
                     c.TikCounter, boardId, mapping.MondayItemId);
             }
 
-            var odcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
+            var odcanitVersion = ComputeContentVersion(c);
             var requiresDataUpdate = mapping.OdcanitVersion != odcanitVersion;
             var requiresNameUpdate = mapping.MondayChecksum != itemName;
 
@@ -2259,6 +2753,13 @@ namespace Odmon.Worker.Services
                 "DetermineSyncAction: Changes detected. TikNumber={TikNumber}, TikCounter={TikCounter}, MondayItemId={MondayItemId}, RequiresDataUpdate={RequiresDataUpdate}, RequiresNameUpdate={RequiresNameUpdate}, RequiresHearingUpdate={RequiresHearingUpdate}. Action=update",
                 c.TikNumber, c.TikCounter, mapping.MondayItemId, requiresDataUpdate, requiresNameUpdate, requiresHearingUpdate);
 
+            if (requiresDataUpdate)
+            {
+                _logger.LogDebug(
+                    "ContentVersion diff: TikCounter={TikCounter}, OldVersion={OldVersion}, NewVersion={NewVersion}",
+                    c.TikCounter, mapping.OdcanitVersion ?? "<null>", odcanitVersion);
+            }
+
             return new SyncAction
             {
                 Action = "update",
@@ -2289,18 +2790,19 @@ namespace Odmon.Worker.Services
             var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: true, ct);
             var mondayItemId = await _mondayClient.CreateItemAsync(boardId, groupId, itemName, columnValuesJson, ct);
 
-                        var newMapping = new MondayItemMapping
-                        {
-                            TikCounter = c.TikCounter,
-                            TikNumber = c.TikNumber,
-                            BoardId = boardId,
-                            MondayItemId = mondayItemId,
-                            LastSyncFromOdcanitUtc = DateTime.UtcNow,
-                            OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty,
-                            MondayChecksum = itemName,
-                            HearingChecksum = ComputeHearingChecksum(c),
-                            IsTest = testMode
-                        };
+            var newMapping = new MondayItemMapping
+            {
+                TikCounter = c.TikCounter,
+                TikNumber = c.TikNumber,
+                BoardId = boardId,
+                MondayItemId = mondayItemId,
+                LastSyncFromOdcanitUtc = DateTime.UtcNow,
+                OdcanitVersion = ComputeContentVersion(c),
+                MondayChecksum = itemName,
+                HearingChecksum = ComputeHearingChecksum(c),
+                IsTest = testMode,
+                CreatedAtUtc = DateTime.UtcNow
+            };
             _integrationDb.MondayItemMappings.Add(newMapping);
 
             return mondayItemId;
@@ -2338,7 +2840,7 @@ namespace Odmon.Worker.Services
 
                 var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: false, ct);
                 await _mondayClient.UpdateItemAsync(boardId, mapping.MondayItemId, columnValuesJson, ct);
-                mapping.OdcanitVersion = c.tsModifyDate?.ToString("o") ?? string.Empty;
+                mapping.OdcanitVersion = ComputeContentVersion(c);
             }
 
             // Update mapping metadata (including TikNumber and BoardId if they were missing)
@@ -2367,6 +2869,8 @@ namespace Odmon.Worker.Services
 
         // Critical columns that require strict validation (fail-fast)
         // NOTE: Column type is now detected dynamically from Monday metadata, not hardcoded
+        // PlaintiffSide and DefendantSide are NOT critical: they may be null for newly opened cases
+        // and will be populated on a subsequent update run once available in Odcanit.
         private static readonly List<CriticalColumnDefinition> CriticalColumns = new()
         {
             new CriticalColumnDefinition
@@ -2374,18 +2878,6 @@ namespace Odmon.Worker.Services
                 FieldName = "DocumentType",
                 GetValue = c => c.DocumentType,
                 ValidationMessage = "Document type (סוג מסמך) is critical - prevents automatic creation of wrong document types (e.g., 'כתב תביעה' vs 'כתב הגנה')"
-            },
-            new CriticalColumnDefinition
-            {
-                FieldName = "PlaintiffSide",
-                GetValue = c => c.PlaintiffSideRaw,
-                ValidationMessage = "Plaintiff side (צד תובע) is critical - prevents incorrect party designation"
-            },
-            new CriticalColumnDefinition
-            {
-                FieldName = "DefendantSide",
-                GetValue = c => c.DefendantSideRaw,
-                ValidationMessage = "Defendant side (צד נתבע) is critical - prevents incorrect party designation"
             }
         };
 
@@ -2560,6 +3052,124 @@ namespace Odmon.Worker.Services
         /// even when the main case data (tsModifyDate / OdcanitVersion) hasn't changed.
         /// Fields: HearingDate, HearingTime, HearingJudgeName, EffectiveCourtCity (HearingCity->HearingCourtName), MeetStatus.
         /// </summary>
+        // ====================================================================
+        // Deterministic content-based version (SHA-256)
+        // Covers ALL fields that influence Monday column_values.
+        // Used by DetermineSyncAction for change detection instead of tsModifyDate.
+        // Canonical rules:
+        //   - Strings: trimmed, null => ""
+        //   - Dates:   yyyy-MM-dd (invariant), null => ""
+        //   - Decimals: InvariantCulture, null => ""
+        //   - Phones:  NormalizeIsraeliPhoneForDocument before hashing
+        //   - Fields in stable, deterministic order separated by '|'
+        // ====================================================================
+        internal static string ComputeContentVersion(OdcanitCase c)
+        {
+            var sb = new StringBuilder(4096);
+
+            // ── String columns (in column-mapping order from BuildColumnValuesJsonAsync) ──
+            AppendStr(sb, c.TikNumber);
+            AppendStr(sb, c.ClientVisualID);
+            AppendStr(sb, c.Additional ?? c.HozlapTikNumber);
+            AppendStr(sb, c.ClientEmail);
+            AppendStr(sb, c.Notes);
+            AppendStr(sb, c.ClientAddress);
+            AppendStr(sb, c.ClientTaxId);
+            AppendStr(sb, c.PolicyHolderName);
+            AppendStr(sb, c.PolicyHolderId);
+            AppendStr(sb, c.PolicyHolderAddress);
+            AppendStr(sb, c.PolicyHolderEmail);
+            AppendStr(sb, c.MainCarNumber);
+            AppendStr(sb, c.DriverName);
+            AppendStr(sb, c.DriverId);
+            AppendStr(sb, c.WitnessName);
+            AppendStr(sb, c.AdditionalDefendants);
+            AppendStr(sb, c.PlaintiffName);
+            AppendStr(sb, c.PlaintiffId);
+            AppendStr(sb, c.PlaintiffAddress);
+            AppendStr(sb, c.PlaintiffEmail);
+            AppendStr(sb, c.DefendantName);
+            AppendStr(sb, c.DefendantFax);
+            AppendStr(sb, c.ThirdPartyDriverName);
+            AppendStr(sb, c.ThirdPartyDriverId);
+            AppendStr(sb, c.ThirdPartyCarNumber);
+            AppendStr(sb, c.ThirdPartyInsurerName);
+            AppendStr(sb, c.InsuranceCompanyId);
+            AppendStr(sb, c.InsuranceCompanyAddress);
+            AppendStr(sb, c.InsuranceCompanyEmail);
+            AppendStr(sb, c.ThirdPartyEmployerName);
+            AppendStr(sb, c.ThirdPartyEmployerId);
+            AppendStr(sb, c.ThirdPartyEmployerAddress);
+            AppendStr(sb, c.ThirdPartyLawyerName);
+            AppendStr(sb, c.ThirdPartyLawyerAddress);
+            AppendStr(sb, c.ThirdPartyLawyerEmail);
+            AppendStr(sb, c.CourtName);
+            AppendStr(sb, c.CourtCaseNumber);
+            AppendStr(sb, c.AttorneyName);
+            AppendStr(sb, c.DefenseStreet);
+            AppendStr(sb, c.ClaimStreet);
+            AppendStr(sb, c.CaseFolderId);
+            AppendStr(sb, c.StatusName);
+
+            // ── Phone columns (normalized before hashing) ──
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.PolicyHolderPhone));
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.DriverPhone));
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.PlaintiffPhone));
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.ThirdPartyPhone));
+            AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.ThirdPartyLawyerPhone));
+
+            // ── Date columns ──
+            AppendDate(sb, c.tsCreateDate);
+            AppendDate(sb, c.EventDate);
+            AppendDate(sb, c.TikCloseDate);
+            AppendDate(sb, c.ComplaintReceivedDate);
+
+            // ── Decimal columns ──
+            AppendDec(sb, c.RequestedClaimAmount);
+            AppendDec(sb, c.ProvenClaimAmount);
+            AppendDec(sb, c.JudgmentAmount);
+            AppendDec(sb, c.AppraiserFeeAmount);
+            AppendDec(sb, c.DirectDamageAmount);
+            AppendDec(sb, c.OtherLossesAmount);
+            AppendDec(sb, c.LossOfValueAmount);
+            AppendDec(sb, c.ResidualValueAmount);
+
+            // ── Hearing fields ──
+            AppendDate(sb, c.HearingDate);
+            AppendStr(sb, c.HearingTime.HasValue
+                ? $"{c.HearingTime.Value.Hours:D2}:{c.HearingTime.Value.Minutes:D2}"
+                : null);
+            AppendStr(sb, c.HearingJudgeName);
+            AppendStr(sb, c.HearingCity);
+            AppendStr(sb, c.HearingCourtName);
+            AppendStr(sb, c.MeetStatus?.ToString(CultureInfo.InvariantCulture));
+
+            // ── Derived fields (must be computed before calling this method) ──
+            AppendStr(sb, c.DocumentType);
+            AppendStr(sb, MapTaskTypeLabel(c.TikType));
+            AppendStr(sb, MapPlaintiffSideLabel(c.PlaintiffSideRaw));
+            AppendStr(sb, MapDefendantSideLabel(c.DefendantSideRaw));
+            AppendStr(sb, DetermineResponsibleText(c));
+
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+
+        private static void AppendStr(StringBuilder sb, string? value)
+        {
+            sb.Append(value?.Trim() ?? "").Append('|');
+        }
+
+        private static void AppendDate(StringBuilder sb, DateTime? value)
+        {
+            sb.Append(value?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "").Append('|');
+        }
+
+        private static void AppendDec(StringBuilder sb, decimal? value)
+        {
+            sb.Append(value?.ToString(CultureInfo.InvariantCulture) ?? "").Append('|');
+        }
+
         private static string ComputeHearingChecksum(OdcanitCase c)
         {
             var date = c.HearingDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "";
@@ -2601,6 +3211,270 @@ namespace Odmon.Worker.Services
             }
             
             return clientNumberStr == "6";
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        // Retry, Dead-Letter, Run-Lock helpers
+        // ══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Executes an async operation with exponential backoff retry for transient failures.
+        /// Supports jitter, Retry-After header, and configurable max attempts.
+        /// Non-transient exceptions (validation, permanent API errors) are re-thrown immediately.
+        /// Returns (result, retryCount).
+        /// </summary>
+        private async Task<(T Result, int RetryCount)> ExecuteWithRetryAsync<T>(
+            Func<Task<T>> operation,
+            string operationName,
+            int tikCounter,
+            CancellationToken ct)
+        {
+            var maxRetryAttempts = _config.GetValue<int>("Monday:MaxRetryAttempts", 3);
+            int retryCount = 0;
+
+            for (int attempt = 0; attempt <= maxRetryAttempts; attempt++)
+            {
+                try
+                {
+                    var result = await operation();
+                    return (result, retryCount);
+                }
+                catch (CriticalFieldValidationException) { throw; }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) when (attempt < maxRetryAttempts && IsTransientError(ex))
+                {
+                    retryCount = attempt + 1;
+                    var delay = ComputeRetryDelay(attempt, ex);
+                    _logger.LogDebug(
+                        "Transient error in {Operation} for TikCounter={TikCounter} (attempt {Attempt}/{MaxAttempts}). Retrying in {DelayMs}ms. Error: {Error}",
+                        operationName, tikCounter, attempt + 1, maxRetryAttempts, delay.TotalMilliseconds, ex.Message);
+                    await Task.Delay(delay, ct);
+                }
+            }
+
+            // Final attempt — let exceptions propagate with a Warning
+            try
+            {
+                var finalResult = await operation();
+                return (finalResult, retryCount);
+            }
+            catch (Exception ex) when (ex is not CriticalFieldValidationException && ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(
+                    "Final retry attempt failed for {Operation}, TikCounter={TikCounter} after {RetryCount} retries. Error: {Error}",
+                    operationName, tikCounter, retryCount, ex.Message);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Computes retry delay with exponential backoff + random jitter.
+        /// Respects Retry-After header from Monday API (HTTP 429) if available.
+        /// </summary>
+        internal static TimeSpan ComputeRetryDelay(int attempt, Exception? ex)
+        {
+            // Check for Retry-After hint in Monday API exceptions
+            var retryAfterSeconds = ExtractRetryAfterSeconds(ex);
+            if (retryAfterSeconds.HasValue && retryAfterSeconds.Value > 0)
+            {
+                // Use at least the server-requested delay, capped at 60s
+                var serverDelay = Math.Min(retryAfterSeconds.Value, 60);
+                return TimeSpan.FromSeconds(serverDelay);
+            }
+
+            // Exponential backoff: 1s, 4s, 12s base delays
+            var baseDelays = new[] { 1.0, 4.0, 12.0 };
+            var baseSeconds = baseDelays[Math.Min(attempt, baseDelays.Length - 1)];
+
+            // Add random jitter: ±25% of base delay
+            var jitterFactor = 1.0 + (Random.Shared.NextDouble() - 0.5) * 0.5; // 0.75 to 1.25
+            var delaySeconds = baseSeconds * jitterFactor;
+
+            return TimeSpan.FromSeconds(Math.Max(delaySeconds, 0.5));
+        }
+
+        /// <summary>
+        /// Attempts to extract a Retry-After value (in seconds) from an exception.
+        /// Monday API returns Retry-After header on 429 responses.
+        /// </summary>
+        private static int? ExtractRetryAfterSeconds(Exception? ex)
+        {
+            if (ex is HttpRequestException httpEx && httpEx.InnerException is System.Net.Http.HttpRequestException)
+                return null;
+
+            // Check if the MondayApiException message or raw JSON contains a retry-after hint
+            if (ex is Monday.MondayApiException mondayEx)
+            {
+                var raw = mondayEx.RawErrorJson ?? mondayEx.Message ?? "";
+                // Monday rate-limit responses sometimes include a retry-after value in the error
+                var match = System.Text.RegularExpressions.Regex.Match(raw, @"[Rr]etry[- ][Aa]fter["":\s]+(\d+)");
+                if (match.Success && int.TryParse(match.Groups[1].Value, out var seconds))
+                    return seconds;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Increments the consecutive Monday failure counter and trips the circuit breaker if threshold exceeded.
+        /// </summary>
+        private void IncrementCircuitBreaker(int threshold)
+        {
+            _consecutiveMondayFailures++;
+            if (threshold > 0 && _consecutiveMondayFailures >= threshold && !_circuitBreakerTripped)
+            {
+                _circuitBreakerTripped = true;
+                _logger.LogError(
+                    "CIRCUIT BREAKER TRIPPED – {ConsecutiveFailures} consecutive Monday API failures reached threshold {Threshold}",
+                    _consecutiveMondayFailures, threshold);
+            }
+        }
+
+        /// <summary>
+        /// Determines whether an exception represents a transient failure worth retrying.
+        /// Transient: network errors, HTTP 429/5xx, SQL deadlocks/timeouts.
+        /// </summary>
+        internal static bool IsTransientError(Exception ex)
+        {
+            if (ex is HttpRequestException) return true;
+            if (ex is TaskCanceledException tce && tce.InnerException is TimeoutException) return true;
+
+            // Monday API: rate limit, server errors, complexity budget
+            if (ex is Monday.MondayApiException mondayEx)
+            {
+                // Inactive-item errors are NOT transient — do not retry
+                if (mondayEx.IsInactiveItemError())
+                    return false;
+
+                var msg = mondayEx.Message ?? "";
+                var raw = mondayEx.RawErrorJson ?? "";
+                if (msg.Contains("429", StringComparison.OrdinalIgnoreCase)
+                    || msg.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+                    || raw.Contains("RATE_LIMIT", StringComparison.OrdinalIgnoreCase)
+                    || raw.Contains("COMPLEXITY_BUDGET_EXHAUSTED", StringComparison.OrdinalIgnoreCase)
+                    || mondayEx.InnerException is HttpRequestException)
+                    return true;
+            }
+
+            // SQL Server transient errors: deadlock (1205), timeout (-2)
+            if (ex is Microsoft.Data.SqlClient.SqlException sqlEx)
+            {
+                return sqlEx.Number == 1205 || sqlEx.Number == -2;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Persists a failed case to the SyncFailures table for later inspection and reprocessing.
+        /// </summary>
+        private async Task PersistSyncFailureAsync(
+            string runId, int tikCounter, string? tikNumber, long boardId,
+            string operation, Exception ex, int retryAttempts, CancellationToken ct)
+        {
+            try
+            {
+                _integrationDb.SyncFailures.Add(new SyncFailure
+                {
+                    RunId = runId,
+                    TikCounter = tikCounter,
+                    TikNumber = tikNumber,
+                    BoardId = boardId,
+                    Operation = operation,
+                    ErrorType = ex.GetType().Name,
+                    ErrorMessage = Truncate(ex.Message, 2000) ?? string.Empty,
+                    StackTrace = Truncate(ex.StackTrace, 4000),
+                    OccurredAtUtc = DateTime.UtcNow,
+                    RetryAttempts = retryAttempts,
+                    Resolved = false
+                });
+                await _integrationDb.SaveChangesAsync(ct);
+            }
+            catch (Exception persistEx)
+            {
+                _logger.LogWarning(persistEx,
+                    "Failed to persist SyncFailure for TikCounter={TikCounter}: {Error}",
+                    tikCounter, persistEx.Message);
+            }
+        }
+
+        private static string? Truncate(string? value, int maxLength)
+        {
+            if (value == null) return null;
+            return value.Length <= maxLength ? value : value[..maxLength];
+        }
+
+        // ── Run-lock ──
+
+        /// <summary>
+        /// Attempts to acquire a DB-based run lock. Returns true if lock was acquired.
+        /// Expired locks (from crashed runs) are automatically reclaimed.
+        /// </summary>
+        private async Task<bool> TryAcquireRunLockAsync(string runId, CancellationToken ct)
+        {
+            try
+            {
+                var lockRow = await _integrationDb.SyncRunLocks.FirstOrDefaultAsync(x => x.Id == 1, ct);
+                if (lockRow == null)
+                {
+                    lockRow = new SyncRunLock { Id = 1 };
+                    _integrationDb.SyncRunLocks.Add(lockRow);
+                }
+
+                // If locked and not expired, another run is active
+                if (lockRow.LockedByRunId != null && lockRow.ExpiresAtUtc.HasValue && lockRow.ExpiresAtUtc.Value > DateTime.UtcNow)
+                {
+                    _logger.LogWarning(
+                        "Run-lock held by RunId={HeldByRunId}, expires at {ExpiresAtUtc}. Current RunId={CurrentRunId}",
+                        lockRow.LockedByRunId, lockRow.ExpiresAtUtc, runId);
+                    return false;
+                }
+
+                // Acquire (or reclaim expired lock)
+                if (lockRow.LockedByRunId != null && lockRow.ExpiresAtUtc.HasValue && lockRow.ExpiresAtUtc.Value <= DateTime.UtcNow)
+                {
+                    _logger.LogWarning("Reclaiming expired run-lock from RunId={OldRunId}", lockRow.LockedByRunId);
+                }
+
+                lockRow.LockedByRunId = runId;
+                lockRow.LockedAtUtc = DateTime.UtcNow;
+                lockRow.ExpiresAtUtc = DateTime.UtcNow.Add(RunLockDuration);
+                await _integrationDb.SaveChangesAsync(ct);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to acquire run-lock, proceeding without lock. RunId={RunId}", runId);
+                return true; // Fail-open: don't block the run if lock table is unavailable
+            }
+        }
+
+        /// <summary>
+        /// Releases the run lock after a sync run completes.
+        /// Uses a short internal timeout (10s) instead of the host token,
+        /// ensuring the lock is released even during Ctrl+C shutdown.
+        /// </summary>
+        private async Task ReleaseRunLockAsync(string runId, CancellationToken ct)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                var token = cts.Token;
+
+                var lockRow = await _integrationDb.SyncRunLocks.FirstOrDefaultAsync(x => x.Id == 1, token);
+                if (lockRow != null && lockRow.LockedByRunId == runId)
+                {
+                    lockRow.LockedByRunId = null;
+                    lockRow.LockedAtUtc = null;
+                    lockRow.ExpiresAtUtc = null;
+                    await _integrationDb.SaveChangesAsync(token);
+                    _logger.LogInformation("Run-lock released successfully for RunId={RunId}", runId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to release run-lock for RunId={RunId}. Lock will auto-expire.", runId);
+            }
         }
     }
 }

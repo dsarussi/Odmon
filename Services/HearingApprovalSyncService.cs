@@ -210,7 +210,7 @@ namespace Odmon.Worker.Services
                 if (c.HearingDate.HasValue)
                 {
                     var dtLocal = c.HearingDate.Value.Date + (c.HearingTime ?? TimeSpan.Zero);
-                    info += $" | דיון: {dtLocal:yyyy-MM-dd HH\\:mm}";
+                    info += $" | דיון: {dtLocal:dd/MM/yyyy HH\\:mm}";
                 }
 
                 if (!enableWrites || dryRun)

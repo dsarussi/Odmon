@@ -20,6 +20,14 @@ namespace Odmon.Worker.Models
         /// </summary>
         public string? HearingChecksum { get; set; }
         public bool IsTest { get; set; }
+
+        /// <summary>
+        /// UTC timestamp when this mapping was first created in IntegrationDb.
+        /// Used by listener-mode filtering: hearing services only process
+        /// mappings with CreatedAtUtc >= ListenerState.StartedAtUtc.
+        /// Pre-existing rows are backfilled with 2000-01-01 so they are excluded.
+        /// </summary>
+        public DateTime CreatedAtUtc { get; set; }
     }
 }
 

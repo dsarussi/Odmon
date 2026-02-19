@@ -11,6 +11,11 @@ namespace Odmon.Worker.Monday
         public string? ClientEmailColumnId { get; set; } = "email_mkwefwgy";
         public string? CaseNumberColumnId { get; set; } = "text_mkwe19hn";
         public string? ClientNumberColumnId { get; set; } = "dropdown_mkxjrssr";
+        /// <summary>
+        /// Optional fallback text column for ClientNumber when the dropdown label does not exist.
+        /// If configured, the raw ClientVisualID is written to this text column instead.
+        /// </summary>
+        public string? ClientNumberTextColumnId { get; set; }
         public string? ClaimNumberColumnId { get; set; } = "text_mkwjy5pg";
         public string? CaseOpenDateColumnId { get; set; } = "date4";
         public string? EventDateColumnId { get; set; } = "date_mkwj3780";
@@ -76,6 +81,12 @@ namespace Odmon.Worker.Monday
         public string? TaskTypeStatusColumnId { get; set; } = "color_mkwyq310";
         public string? ResponsibleTextColumnId { get; set; } = "text_mkxz6j9y";
         public string? DocumentTypeStatusColumnId { get; set; } = "color_mkxhq546";
+
+        /// <summary>
+        /// If true, inactive Monday items may be revived (new item created, mapping updated).
+        /// Default false: inactive items are skipped with a warning, no revive.
+        /// </summary>
+        public bool ReviveInactiveItems { get; set; } = false;
     }
 }
 

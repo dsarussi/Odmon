@@ -26,6 +26,9 @@ namespace Odmon.Worker.OdcanitAccess
 
         public Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(IEnumerable<string> tikNumbers, CancellationToken ct)
             => throw NewException();
+
+        public Task<List<int>> GetTikCountersSinceCutoffAsync(DateTime cutoffDate, CancellationToken ct)
+            => throw NewException();
     }
 }
 

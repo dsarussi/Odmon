@@ -15,6 +15,11 @@ namespace Odmon.Worker.Data
         public DbSet<NispahAuditLog> NispahAuditLogs => Set<NispahAuditLog>();
         public DbSet<NispahDeduplication> NispahDeduplications => Set<NispahDeduplication>();
         public DbSet<HearingNearestSnapshot> HearingNearestSnapshots => Set<HearingNearestSnapshot>();
+        public DbSet<SyncFailure> SyncFailures => Set<SyncFailure>();
+        public DbSet<SyncRunLock> SyncRunLocks => Set<SyncRunLock>();
+        public DbSet<ListenerState> ListenerStates => Set<ListenerState>();
+        public DbSet<EmailAlertDedup> EmailAlertDedups => Set<EmailAlertDedup>();
+        public DbSet<SyncRunMetric> SyncRunMetrics => Set<SyncRunMetric>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -30,6 +35,16 @@ namespace Odmon.Worker.Data
             modelBuilder.Entity<MondayItemMapping>()
                 .Property(m => m.HearingChecksum)
                 .HasMaxLength(128);
+            modelBuilder.Entity<MondayItemMapping>()
+                .Property(m => m.CreatedAtUtc)
+                .HasDefaultValueSql("SYSUTCDATETIME()");
+
+            modelBuilder.Entity<ListenerState>(b =>
+            {
+                b.ToTable("ListenerState");
+                b.HasKey(x => x.Id);
+                b.Property(x => x.Id).ValueGeneratedNever();
+            });
 
             modelBuilder.Entity<SyncLog>()
                 .HasKey(l => l.Id);
@@ -73,6 +88,50 @@ namespace Odmon.Worker.Data
                 b.HasKey(x => x.Id);
                 b.HasIndex(x => new { x.TikCounter, x.BoardId }).IsUnique();
                 b.HasIndex(x => x.MondayItemId);
+            });
+
+            modelBuilder.Entity<SyncFailure>(b =>
+            {
+                b.ToTable("SyncFailures");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.TikCounter, x.OccurredAtUtc });
+                b.HasIndex(x => x.Resolved);
+                b.HasIndex(x => x.RunId);
+                b.Property(x => x.ErrorMessage).HasMaxLength(2000);
+                b.Property(x => x.ErrorType).HasMaxLength(256);
+                b.Property(x => x.Operation).HasMaxLength(128);
+                b.Property(x => x.RunId).HasMaxLength(64);
+                b.Property(x => x.StackTrace).HasMaxLength(4000);
+            });
+
+            modelBuilder.Entity<SyncRunLock>(b =>
+            {
+                b.ToTable("SyncRunLocks");
+                b.HasKey(x => x.Id);
+                b.Property(x => x.Id).ValueGeneratedNever();
+                b.Property(x => x.LockedByRunId).HasMaxLength(64);
+            });
+
+            modelBuilder.Entity<EmailAlertDedup>(b =>
+            {
+                b.ToTable("EmailAlertDedups");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => x.Fingerprint).IsUnique();
+                b.HasIndex(x => x.LastSeenUtc);
+                b.Property(x => x.Fingerprint).HasMaxLength(128).IsRequired();
+                b.Property(x => x.ExceptionType).HasMaxLength(256);
+                b.Property(x => x.Source).HasMaxLength(256);
+                b.Property(x => x.Subject).HasMaxLength(512);
+            });
+
+            modelBuilder.Entity<SyncRunMetric>(b =>
+            {
+                b.ToTable("SyncRunMetrics");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => x.StartedAtUtc);
+                b.HasIndex(x => x.RunId).IsUnique();
+                b.Property(x => x.RunId).HasMaxLength(64).IsRequired();
+                b.Property(x => x.DataSource).HasMaxLength(128);
             });
 
             modelBuilder.Entity<OdcanitCase>(b =>

@@ -17,11 +17,21 @@ using Odmon.Worker.OdcanitAccess;
 using Odmon.Worker.Security;
 using Odmon.Worker.Services;
 using Odmon.Worker.Workers;
+using Serilog;
 
-var hostBuilder = Host.CreateDefaultBuilder(args);
+var hostBuilder = Host.CreateDefaultBuilder(args)
+    .UseWindowsService()
+    .UseContentRoot(AppContext.BaseDirectory);
+
+hostBuilder.UseSerilog((context, loggerConfiguration) =>
+{
+    loggerConfiguration.ReadFrom.Configuration(context.Configuration);
+});
 
 hostBuilder.ConfigureAppConfiguration((context, configBuilder) =>
 {
+    configBuilder.SetBasePath(AppContext.BaseDirectory);
+
     var builtConfig = configBuilder.Build();
     if (IsKeyVaultEnabled(builtConfig))
     {
@@ -123,13 +133,11 @@ hostBuilder.ConfigureServices((context, services) =>
         return sp.GetRequiredService<OdcanitCaseSource>();
     });
 
-    if (!env.IsDevelopment())
-    {
-        services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
-    }
+    services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
 
     services.AddScoped<IOdcanitWriter, SqlOdcanitWriter>();
     services.AddScoped<ISkipLogger, SkipLogger>();
+    services.AddSingleton<IErrorNotifier, LogOnlyErrorNotifier>();
     services.AddScoped<HearingApprovalSyncService>();
     services.AddScoped<HearingNearestSyncService>();
     services.AddScoped<TokenResolverService>();
@@ -148,6 +156,11 @@ hostBuilder.ConfigureServices((context, services) =>
     {
         client.BaseAddress = new Uri("https://api.monday.com/v2/");
     });
+
+    // Email monitoring
+    services.AddSingleton<EmailNotifier>();
+    services.AddSingleton<IEmailNotifier>(sp => sp.GetRequiredService<EmailNotifier>());
+    services.AddHostedService<EmailBackgroundService>();
 
     services.AddScoped<SyncService>();
     services.AddHostedService<SyncWorker>();
@@ -297,38 +310,72 @@ static async Task VerifyIntegrationDbConnectionAsync(IServiceProvider services)
         }
 
         // Execute raw SQL to get actual server and database names
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT @@SERVERNAME AS ServerName, DB_NAME() AS DbName";
-
-        using var reader = await command.ExecuteReaderAsync();
-        if (await reader.ReadAsync())
+        // Use explicit block scope so the DataReader is closed before table checks
         {
-            var serverName = reader["ServerName"]?.ToString() ?? "<unknown>";
-            var dbName = reader["DbName"]?.ToString() ?? "<unknown>";
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT @@SERVERNAME AS ServerName, DB_NAME() AS DbName";
 
-            logger.LogInformation(
-                "IntegrationDb Runtime Verification: @@SERVERNAME={ServerName}, DB_NAME()={DbName}",
-                serverName,
-                dbName);
-
-            // Also log as warning if values don't match connection properties
-            if (database != "<unknown>" && !string.Equals(database, dbName, StringComparison.OrdinalIgnoreCase))
+            using var reader = await command.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
             {
-                logger.LogWarning(
-                    "IntegrationDb database name mismatch: Connection.Database={ConnectionDatabase}, DB_NAME()={ActualDbName}",
-                    database,
+                var serverName = reader["ServerName"]?.ToString() ?? "<unknown>";
+                var dbName = reader["DbName"]?.ToString() ?? "<unknown>";
+
+                logger.LogInformation(
+                    "IntegrationDb Runtime Verification: @@SERVERNAME={ServerName}, DB_NAME()={DbName}",
+                    serverName,
                     dbName);
+
+                if (database != "<unknown>" && !string.Equals(database, dbName, StringComparison.OrdinalIgnoreCase))
+                {
+                    logger.LogWarning(
+                        "IntegrationDb database name mismatch: Connection.Database={ConnectionDatabase}, DB_NAME()={ActualDbName}",
+                        database,
+                        dbName);
+                }
             }
-        }
-        else
-        {
-            logger.LogWarning("IntegrationDb verification query returned no results.");
-        }
+            else
+            {
+                logger.LogWarning("IntegrationDb verification query returned no results.");
+            }
+        } // DataReader + command disposed here
+
+        // ── Check critical table existence (sequential, no open readers) ──
+        await VerifyTableExistsAsync(connection, "HearingNearestSnapshots", logger);
+        await VerifyTableExistsAsync(connection, "SyncRunLocks", logger);
+        await VerifyTableExistsAsync(connection, "SyncFailures", logger);
     }
     catch (Exception ex)
     {
         var logger2 = services.GetRequiredService<ILoggerFactory>().CreateLogger("IntegrationDbVerification");
         logger2.LogError(ex, "Failed to verify IntegrationDb connection. This may indicate a configuration or connectivity issue.");
         throw;
+    }
+}
+
+static async Task VerifyTableExistsAsync(System.Data.Common.DbConnection connection, string tableName, Microsoft.Extensions.Logging.ILogger logger)
+{
+    try
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT CASE WHEN OBJECT_ID(N'[dbo].[{tableName}]', 'U') IS NULL THEN 0 ELSE 1 END";
+        var result = await cmd.ExecuteScalarAsync();
+        var exists = result is int i ? i == 1 : false;
+        if (!exists)
+        {
+            logger.LogWarning(
+                "IntegrationDb TABLE CHECK: dbo.{TableName} does NOT exist. The corrective migration may not have been applied yet.",
+                tableName);
+        }
+        else
+        {
+            logger.LogInformation(
+                "IntegrationDb TABLE CHECK: dbo.{TableName} exists.",
+                tableName);
+        }
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "IntegrationDb TABLE CHECK: Failed to verify existence of dbo.{TableName}", tableName);
     }
 }
