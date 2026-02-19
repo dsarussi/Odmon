@@ -19,7 +19,8 @@ using Odmon.Worker.Services;
 using Odmon.Worker.Workers;
 using Serilog;
 
-var hostBuilder = Host.CreateDefaultBuilder(args);
+var hostBuilder = Host.CreateDefaultBuilder(args)
+    .UseWindowsService();
 
 hostBuilder.UseSerilog((context, loggerConfiguration) =>
 {
