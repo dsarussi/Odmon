@@ -209,6 +209,57 @@ namespace Odmon.Worker.Services
             return null;
         }
 
+        // ───────── Get multiple column values from a single item ─────────
+
+        public async Task<Dictionary<string, string>> GetItemColumnValuesAsync(
+            long itemId, string[] columnIds, CancellationToken ct)
+        {
+            var query = @"query ($itemIds: [ID!], $columnIds: [String!]) {
+                items(ids: $itemIds) {
+                    id
+                    column_values(ids: $columnIds) {
+                        id
+                        text
+                    }
+                }
+            }";
+
+            var variables = new Dictionary<string, object>
+            {
+                ["itemIds"] = new[] { itemId.ToString() },
+                ["columnIds"] = columnIds
+            };
+
+            using var doc = await ExecuteGraphQLAsync(query, variables, ct);
+            var root = doc.RootElement;
+
+            var result = new Dictionary<string, string>(StringComparer.Ordinal);
+
+            if (!root.TryGetProperty("data", out var data) ||
+                !data.TryGetProperty("items", out var items) ||
+                items.ValueKind != JsonValueKind.Array || items.GetArrayLength() == 0)
+                return result;
+
+            var item = items[0];
+            if (!item.TryGetProperty("column_values", out var cols) ||
+                cols.ValueKind != JsonValueKind.Array)
+                return result;
+
+            foreach (var col in cols.EnumerateArray())
+            {
+                var colId = col.TryGetProperty("id", out var cidEl) ? cidEl.GetString() : null;
+                if (colId == null) continue;
+
+                var text = col.TryGetProperty("text", out var textEl) && textEl.ValueKind == JsonValueKind.String
+                    ? textEl.GetString()?.Trim() ?? ""
+                    : "";
+
+                result[colId] = text;
+            }
+
+            return result;
+        }
+
         // ───────── Get asset download info ─────────
 
         public async Task<AssetDownloadInfo?> GetAssetDownloadInfoAsync(long assetId, CancellationToken ct)

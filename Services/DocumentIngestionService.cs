@@ -91,15 +91,18 @@ namespace Odmon.Worker.Services
         private async Task ProcessQuestionnaireItemAsync(
             DocumentIngestionMondayService.QuestionnaireItem item, CancellationToken ct)
         {
-            if (item.FileColumns.Count == 0)
+            var hasFiles = item.FileColumns.Count > 0;
+            var accidentStoryEnabled = _settings.IsAccidentStoryEnabled;
+
+            if (!hasFiles && !accidentStoryEnabled)
             {
-                _logger.LogDebug("DOCINGESTION item {ItemId} has no file columns with assets, skipping", item.ItemId);
+                _logger.LogDebug("DOCINGESTION item {ItemId} has no file columns and accident story disabled, skipping", item.ItemId);
                 return;
             }
 
             if (item.LinkedCaseItemIds.Count == 0)
             {
-                _logger.LogWarning("DOCINGESTION item {ItemId} ('{Name}') has no linked case item, skipping all files",
+                _logger.LogWarning("DOCINGESTION item {ItemId} ('{Name}') has no linked case item, skipping",
                     item.ItemId, item.Name);
                 _totalSkipped += item.FileColumns.Values.Sum(f => f.Count);
                 return;
@@ -164,21 +167,24 @@ namespace Odmon.Worker.Services
                 "DOCINGESTION resolved TikVisualID={TikVisualID} → TikCounter={TikCounter} for item {ItemId}",
                 tikVisualID, tikCounter.Value, item.ItemId);
 
-            foreach (var (columnId, assets) in item.FileColumns)
+            if (hasFiles)
             {
-                foreach (var asset in assets)
+                foreach (var (columnId, assets) in item.FileColumns)
                 {
-                    if (ct.IsCancellationRequested) return;
-                    await ProcessSingleAssetAsync(
-                        item.ItemId, linkedCaseItemId, columnId, asset,
-                        tikVisualID, tikCounter.Value, ct);
+                    foreach (var asset in assets)
+                    {
+                        if (ct.IsCancellationRequested) return;
+                        await ProcessSingleAssetAsync(
+                            item.ItemId, linkedCaseItemId, columnId, asset,
+                            tikVisualID, tikCounter.Value, ct);
+                    }
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(_settings.AccidentStoryColumnId))
+            if (accidentStoryEnabled)
             {
                 await ProcessAccidentStoryAsync(
-                    item.ItemId, tikVisualID, tikCounter.Value, ct);
+                    item.ItemId, linkedCaseItemId, tikVisualID, tikCounter.Value, ct);
             }
         }
 
@@ -602,74 +608,130 @@ namespace Odmon.Worker.Services
                 "DocumentIngestionService");
         }
 
-        // ───────── Accident Story → Odcanit Nispah ─────────
+        // ───────── Accident Story → Odcanit Nispah (multi-column) ─────────
 
         private async Task ProcessAccidentStoryAsync(
-            long questionnaireItemId, string tikVisualID, int tikCounter, CancellationToken ct)
+            long questionnaireItemId, long linkedCaseItemId,
+            string tikVisualID, int tikCounter, CancellationToken ct)
         {
-            var columnId = _settings.AccidentStoryColumnId!;
-            string? storyText;
+            var nispahType = _settings.ResolvedNispahType;
+            var columnDefs = ResolveAccidentStoryColumnDefs();
 
+            if (columnDefs.Length == 0)
+            {
+                _logger.LogDebug("ACCIDENTSTORY no columns configured, skipping item {ItemId}", questionnaireItemId);
+                return;
+            }
+
+            var columnIds = columnDefs.Select(c => c.ColumnId).ToArray();
+
+            // Step 1: Read all column values in one API call
+            Dictionary<string, string> columnValues;
             try
             {
-                storyText = await _mondayService.GetItemColumnTextAsync(questionnaireItemId, columnId, ct);
+                columnValues = await _mondayService.GetItemColumnValuesAsync(questionnaireItemId, columnIds, ct);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex,
-                    "ACCIDENTSTORY READ FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}",
-                    tikCounter, tikVisualID, questionnaireItemId, columnId);
+                    "ACCIDENTSTORY READ FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, ColumnCount={ColumnCount}",
+                    tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, columnIds.Length);
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(storyText))
+            // Step 2: Compose the text block
+            var result = AccidentStoryComposer.Compose(
+                columnDefs, columnValues, questionnaireItemId, DateTime.Now);
+
+            if (result == null)
             {
-                _logger.LogDebug(
-                    "ACCIDENTSTORY EMPTY | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}",
-                    tikCounter, tikVisualID, questionnaireItemId, columnId);
+                _logger.LogInformation(
+                    "ACCIDENTSTORY SKIP (empty) | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId} — all column values empty",
+                    tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId);
                 return;
             }
 
-            var preview = storyText.Length <= 20 ? storyText : storyText[..20] + "…";
             _logger.LogInformation(
-                "ACCIDENTSTORY READ | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, TextLength={TextLength}, Preview='{Preview}'",
-                tikCounter, tikVisualID, questionnaireItemId, columnId, storyText.Length, preview);
+                "ACCIDENTSTORY COMPOSED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, LinesIncluded={LinesIncluded}, TextLength={TextLength}, ContentHash={ContentHash}",
+                tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId,
+                result.LinesIncluded, result.Text.Length, result.ContentHash);
 
-            var nispahType = _settings.AccidentStoryNispahType;
-            var correlationId = $"docingestion-{questionnaireItemId}-{columnId}";
+            // Step 3: Permanent dedup — check if this exact content was already written
+            var alreadyWritten = await _integrationDb.NispahDeduplications
+                .AsNoTracking()
+                .AnyAsync(d =>
+                    d.TikVisualID == tikVisualID &&
+                    d.NispahTypeName == nispahType &&
+                    d.InfoHash == result.ContentHash, ct);
+
+            if (alreadyWritten)
+            {
+                _logger.LogInformation(
+                    "ACCIDENTSTORY SKIP (duplicate) | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, ContentHash={ContentHash}",
+                    tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, result.ContentHash);
+                return;
+            }
+
+            // Step 4: Write to Odcanit via NispahWriterService
+            var correlationId = $"accidentstory-{questionnaireItemId}";
 
             _logger.LogInformation(
-                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, NispahType='{NispahType}', TextLength={TextLength}",
-                tikCounter, tikVisualID, questionnaireItemId, columnId, nispahType, storyText.Length);
+                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType='{NispahType}', TextLength={TextLength}",
+                tikCounter, tikVisualID, questionnaireItemId, nispahType, result.Text.Length);
 
             try
             {
                 var success = await _nispahWriter.CreateNispahAsync(
-                    tikVisualID, storyText, nispahType, correlationId, ct);
+                    tikVisualID, result.Text, nispahType, correlationId, ct);
 
                 if (success)
                 {
                     _logger.LogInformation(
-                        "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, NispahType='{NispahType}', TextLength={TextLength}",
-                        tikCounter, tikVisualID, questionnaireItemId, columnId, nispahType, storyText.Length);
+                        "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, NispahType='{NispahType}', LinesIncluded={LinesIncluded}, TextLength={TextLength}",
+                        tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, nispahType, result.LinesIncluded, result.Text.Length);
                 }
                 else
                 {
                     _logger.LogWarning(
-                        "ACCIDENTSTORY BLOCKED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, NispahType='{NispahType}' — blocked by NispahWriter guardrails (dedup/rate-limit/validation)",
-                        tikCounter, tikVisualID, questionnaireItemId, columnId, nispahType);
+                        "ACCIDENTSTORY BLOCKED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType='{NispahType}' — blocked by NispahWriter guardrails",
+                        tikCounter, tikVisualID, questionnaireItemId, nispahType);
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex,
-                    "ACCIDENTSTORY WRITE FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, NispahType='{NispahType}', TextLength={TextLength}",
-                    tikCounter, tikVisualID, questionnaireItemId, columnId, nispahType, storyText.Length);
+                    "ACCIDENTSTORY FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, NispahType='{NispahType}', TextLength={TextLength}, Error={Error}",
+                    tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, nispahType, result.Text.Length, ex.Message);
 
                 SendAlert(
                     $"Accident story nispah write failed for TikVisualID={tikVisualID}",
                     null, ex);
             }
+        }
+
+        /// <summary>
+        /// Resolves accident story column definitions from new config, with backward compat for old single-column config.
+        /// </summary>
+        private AccidentStoryColumnDef[] ResolveAccidentStoryColumnDefs()
+        {
+            if (_settings.AccidentStory.Enabled && _settings.AccidentStory.Columns.Length > 0)
+                return _settings.AccidentStory.Columns;
+
+            if (!string.IsNullOrWhiteSpace(_settings.AccidentStoryColumnId))
+            {
+                return
+                [
+                    new AccidentStoryColumnDef
+                    {
+                        ColumnId = _settings.AccidentStoryColumnId,
+                        Title = "סיפור תאונה",
+                        Type = "long_text",
+                        IncludeIfEmpty = false
+                    }
+                ];
+            }
+
+            return [];
         }
 
         // ───────── Helpers ─────────

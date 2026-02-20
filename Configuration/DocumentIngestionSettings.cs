@@ -16,8 +16,35 @@ namespace Odmon.Worker.Configuration
         public int CommandTimeoutSeconds { get; set; } = 60;
         public int ItemsPageLimit { get; set; } = 50;
 
+        public AccidentStorySettings AccidentStory { get; set; } = new();
+
+        /// <summary>Backward compat: if set and AccidentStory.Columns is empty, treated as single-column config.</summary>
         public string? AccidentStoryColumnId { get; set; }
         public string AccidentStoryNispahType { get; set; } = "סיפור תאונה";
+
+        public bool IsAccidentStoryEnabled =>
+            AccidentStory.Enabled ||
+            !string.IsNullOrWhiteSpace(AccidentStoryColumnId);
+
+        public string ResolvedNispahType =>
+            AccidentStory.Enabled
+                ? AccidentStory.NispahType
+                : AccidentStoryNispahType;
+    }
+
+    public class AccidentStorySettings
+    {
+        public bool Enabled { get; set; } = false;
+        public string NispahType { get; set; } = "סיפור תאונה";
+        public AccidentStoryColumnDef[] Columns { get; set; } = [];
+    }
+
+    public class AccidentStoryColumnDef
+    {
+        public string ColumnId { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        public string Type { get; set; } = "text";
+        public bool IncludeIfEmpty { get; set; } = false;
     }
 
     public class OdcanitDocumentSettings
