@@ -36,6 +36,7 @@ namespace Odmon.Worker.Services
         private readonly object _rateLimitLock = new object();
 
         private static volatile bool _nispahDedupTableMissing;
+        private static volatile bool _nispahAuditTableMissing;
 
         private const string StoredProcedureName = "dbo.Klita_Interface_NispahDetails";
 
@@ -411,20 +412,48 @@ namespace Odmon.Worker.Services
             }
         }
 
-        private async Task PersistAuditLogAsync(NispahAuditLog auditLog, CancellationToken ct)
+        internal async Task PersistAuditLogAsync(NispahAuditLog auditLog, CancellationToken ct)
         {
+            if (_nispahAuditTableMissing) return;
+
             try
             {
                 _integrationDb.NispahAuditLogs.Add(auditLog);
                 await _integrationDb.SaveChangesAsync(ct);
             }
+            catch (Exception ex) when (IsMissingTableSqlException(ex))
+            {
+                if (!_nispahAuditTableMissing)
+                {
+                    _nispahAuditTableMissing = true;
+                    _logger.LogWarning(
+                        "NispahAuditLogs table does not exist (SqlException 208). Audit logging bypassed — ingestion will continue. Run EF migrations to create the table.");
+                }
+            }
             catch (Exception ex)
             {
-                // Log but don't fail the operation if audit logging fails
                 _logger.LogError(ex,
                     "Failed to persist audit log: CorrelationId={CorrelationId}, TikVisualID={TikVisualID}",
                     auditLog.CorrelationId, auditLog.TikVisualID);
             }
+        }
+
+        /// <summary>
+        /// Returns true if the exception indicates a missing SQL table (SqlException 208),
+        /// whether thrown directly or wrapped in DbUpdateException.
+        /// </summary>
+        internal static bool IsMissingTableSqlException(Exception ex)
+        {
+            if (ex is SqlException { Number: 208 }) return true;
+            if (ex is DbUpdateException { InnerException: SqlException { Number: 208 } }) return true;
+            return false;
+        }
+
+        /// <summary>Resets static flags — only for unit tests.</summary>
+        internal static void ResetTableMissingFlags()
+        {
+            _nispahDedupTableMissing = false;
+            _nispahAuditTableMissing = false;
         }
 
         private static string ComputeSha256Hash(string input)
