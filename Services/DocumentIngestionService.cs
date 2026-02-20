@@ -13,6 +13,7 @@ namespace Odmon.Worker.Services
         private readonly IntegrationDbContext _integrationDb;
         private readonly DocumentIngestionMondayService _mondayService;
         private readonly OdcanitDocumentWriter _documentWriter;
+        private readonly NispahWriterService _nispahWriter;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IEmailNotifier _emailNotifier;
         private readonly DocumentIngestionSettings _settings;
@@ -27,6 +28,7 @@ namespace Odmon.Worker.Services
             IntegrationDbContext integrationDb,
             DocumentIngestionMondayService mondayService,
             OdcanitDocumentWriter documentWriter,
+            NispahWriterService nispahWriter,
             IHttpClientFactory httpClientFactory,
             IEmailNotifier emailNotifier,
             IOptions<DocumentIngestionSettings> settings,
@@ -35,6 +37,7 @@ namespace Odmon.Worker.Services
             _integrationDb = integrationDb;
             _mondayService = mondayService;
             _documentWriter = documentWriter;
+            _nispahWriter = nispahWriter;
             _httpClientFactory = httpClientFactory;
             _emailNotifier = emailNotifier;
             _settings = settings.Value;
@@ -171,6 +174,12 @@ namespace Odmon.Worker.Services
                         tikVisualID, tikCounter.Value, ct);
                 }
             }
+
+            if (!string.IsNullOrWhiteSpace(_settings.AccidentStoryColumnId))
+            {
+                await ProcessAccidentStoryAsync(
+                    item.ItemId, tikVisualID, tikCounter.Value, ct);
+            }
         }
 
         private async Task ProcessSingleAssetAsync(
@@ -301,23 +310,27 @@ namespace Odmon.Worker.Services
             if (assetInfo == null || string.IsNullOrWhiteSpace(assetInfo.PublicUrl))
                 throw new InvalidOperationException($"Cannot obtain download URL for asset {assetId}");
 
-            var ext = Path.GetExtension(assetInfo.Name).TrimStart('.').ToLowerInvariant();
-            if (ext == "") ext = assetInfo.FileExtension.TrimStart('.').ToLowerInvariant();
+            record.OriginalFileName = assetInfo.Name;
+
+            var ext = ExtractFileExtension(assetInfo.Name, assetInfo.FileExtension);
+            if (string.IsNullOrWhiteSpace(ext))
+                throw new InvalidOperationException(
+                    $"Cannot determine file extension for asset {assetId}, OriginalFileName='{assetInfo.Name}'");
 
             var allowedSet = new HashSet<string>(_settings.AllowedExtensions, StringComparer.OrdinalIgnoreCase);
             if (!allowedSet.Contains(ext))
                 throw new InvalidOperationException(
-                    $"File extension '{ext}' not in allowlist [{string.Join(",", _settings.AllowedExtensions)}] for asset {assetId}");
+                    $"File extension '{ext}' not in allowlist [{string.Join(",", _settings.AllowedExtensions)}] for asset {assetId}, OriginalFileName='{assetInfo.Name}'");
 
             if (assetInfo.FileSize > _settings.MaxFileSizeBytes)
                 throw new InvalidOperationException(
                     $"Asset {assetId} size {assetInfo.FileSize} exceeds max {_settings.MaxFileSizeBytes} bytes");
 
-            var safeTikDir = tikVisualID.Replace("/", "_").Replace("\\", "_");
+            var safeTikDir = SanitizeTikVisualID(tikVisualID);
             var caseFolderPath = Path.Combine(_settings.InboxPath, "Cases", safeTikDir);
             Directory.CreateDirectory(caseFolderPath);
 
-            var safeFileName = SanitizeFileName($"asset_{assetId}_{assetInfo.Name}");
+            var safeFileName = GenerateSafeFileName(tikVisualID, assetId, record.ColumnId, ext);
             var targetPath = Path.Combine(caseFolderPath, safeFileName);
             var tempPath = targetPath + ".tmp";
 
@@ -337,7 +350,6 @@ namespace Odmon.Worker.Services
 
             var fileInfo = new FileInfo(targetPath);
             record.InboxFilePath = targetPath;
-            record.OriginalFileName = assetInfo.Name;
             record.FileSizeBytes = fileInfo.Length;
             record.Status = DocumentImportStatus.Downloaded;
             record.UpdatedAtUtc = DateTime.UtcNow;
@@ -345,8 +357,8 @@ namespace Odmon.Worker.Services
 
             dlSw.Stop();
             _logger.LogInformation(
-                "DOCINGESTION DOWNLOADED | AssetId={AssetId}, File={FileName}, Size={Size}, InboxPath={InboxPath}, Elapsed={ElapsedMs}ms",
-                assetId, assetInfo.Name, fileInfo.Length, targetPath, dlSw.ElapsedMilliseconds);
+                "DOCINGESTION DOWNLOADED | AssetId={AssetId}, OriginalFile={OriginalFileName}, SafeFile={SafeFileName}, Ext={Ext}, Size={Size}, InboxPath={InboxPath}, Elapsed={ElapsedMs}ms",
+                assetId, assetInfo.Name, safeFileName, ext, fileInfo.Length, targetPath, dlSw.ElapsedMilliseconds);
         }
 
         // ───────── Step 2: Create Odcanit document row ─────────
@@ -356,8 +368,9 @@ namespace Odmon.Worker.Services
         {
             var spSw = Stopwatch.StartNew();
 
+            var safeDocName = Path.GetFileName(record.InboxFilePath!);
             var result = await _documentWriter.CreateDocumentRowAsync(
-                tikCounter, record.OriginalFileName, record.InboxFilePath!, ct);
+                tikCounter, safeDocName, record.InboxFilePath!, ct);
 
             record.OdcanitDocCounter = result.DocCounter;
             record.OdcanitDestPath = result.DestPath;
@@ -589,13 +602,97 @@ namespace Odmon.Worker.Services
                 "DocumentIngestionService");
         }
 
+        // ───────── Accident Story → Odcanit Nispah ─────────
+
+        private async Task ProcessAccidentStoryAsync(
+            long questionnaireItemId, string tikVisualID, int tikCounter, CancellationToken ct)
+        {
+            var columnId = _settings.AccidentStoryColumnId!;
+            string? storyText;
+
+            try
+            {
+                storyText = await _mondayService.GetItemColumnTextAsync(questionnaireItemId, columnId, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "ACCIDENTSTORY READ FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}",
+                    tikCounter, tikVisualID, questionnaireItemId, columnId);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(storyText))
+            {
+                _logger.LogDebug(
+                    "ACCIDENTSTORY EMPTY | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}",
+                    tikCounter, tikVisualID, questionnaireItemId, columnId);
+                return;
+            }
+
+            var preview = storyText.Length <= 20 ? storyText : storyText[..20] + "…";
+            _logger.LogInformation(
+                "ACCIDENTSTORY READ | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, TextLength={TextLength}, Preview='{Preview}'",
+                tikCounter, tikVisualID, questionnaireItemId, columnId, storyText.Length, preview);
+
+            var nispahType = _settings.AccidentStoryNispahType;
+            var correlationId = $"docingestion-{questionnaireItemId}-{columnId}";
+
+            _logger.LogInformation(
+                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, NispahType='{NispahType}', TextLength={TextLength}",
+                tikCounter, tikVisualID, questionnaireItemId, columnId, nispahType, storyText.Length);
+
+            try
+            {
+                var success = await _nispahWriter.CreateNispahAsync(
+                    tikVisualID, storyText, nispahType, correlationId, ct);
+
+                if (success)
+                {
+                    _logger.LogInformation(
+                        "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, NispahType='{NispahType}', TextLength={TextLength}",
+                        tikCounter, tikVisualID, questionnaireItemId, columnId, nispahType, storyText.Length);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "ACCIDENTSTORY BLOCKED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, NispahType='{NispahType}' — blocked by NispahWriter guardrails (dedup/rate-limit/validation)",
+                        tikCounter, tikVisualID, questionnaireItemId, columnId, nispahType);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "ACCIDENTSTORY WRITE FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, ColumnId={ColumnId}, NispahType='{NispahType}', TextLength={TextLength}",
+                    tikCounter, tikVisualID, questionnaireItemId, columnId, nispahType, storyText.Length);
+
+                SendAlert(
+                    $"Accident story nispah write failed for TikVisualID={tikVisualID}",
+                    null, ex);
+            }
+        }
+
         // ───────── Helpers ─────────
 
-        private static string SanitizeFileName(string fileName)
+        internal static string ExtractFileExtension(string originalFileName, string? fallbackExtension)
         {
+            var ext = (Path.GetExtension(originalFileName) ?? "").TrimStart('.').ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(ext) && !string.IsNullOrWhiteSpace(fallbackExtension))
+                ext = fallbackExtension.TrimStart('.').ToLowerInvariant();
+            return ext;
+        }
+
+        internal static string GenerateSafeFileName(string tikVisualID, long assetId, string columnId, string extension)
+        {
+            var safeTik = SanitizeTikVisualID(tikVisualID);
             var invalid = Path.GetInvalidFileNameChars();
-            var sanitized = new string(fileName.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
-            return sanitized.Length > 200 ? sanitized[..200] : sanitized;
+            var safeCol = new string(columnId.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+            return $"{safeTik}_{assetId}_{safeCol}.{extension}";
+        }
+
+        internal static string SanitizeTikVisualID(string tikVisualID)
+        {
+            return tikVisualID.Replace("/", "_").Replace("\\", "_");
         }
     }
 }

@@ -15,6 +15,9 @@ namespace Odmon.Worker.Configuration
         public int MaxRetryCount { get; set; } = 3;
         public int CommandTimeoutSeconds { get; set; } = 60;
         public int ItemsPageLimit { get; set; } = 50;
+
+        public string? AccidentStoryColumnId { get; set; }
+        public string AccidentStoryNispahType { get; set; } = "סיפור תאונה";
     }
 
     public class OdcanitDocumentSettings

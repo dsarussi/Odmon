@@ -89,5 +89,101 @@ namespace Odmon.Worker.Tests
             Assert.Single(result);
             Assert.Equal(2732400533L, result[0]);
         }
+
+        // ── ExtractFileExtension ─────────────────────────────────────────
+
+        [Fact]
+        public void ExtractFileExtension_NormalJpg_ReturnsJpg()
+        {
+            var ext = DocumentIngestionService.ExtractFileExtension("testimg.jpg", null);
+            Assert.Equal("jpg", ext);
+        }
+
+        [Fact]
+        public void ExtractFileExtension_JwtLikeNameEndingWithPdf_ReturnsPdf()
+        {
+            var jwtName = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRwczovL2FwcC5tb25kYXkuY29tIiwic3ViIjoiMTIzNDU2Nzg5MCJ9.Ypg2yDCq7dXkv6kV.pdf";
+            var ext = DocumentIngestionService.ExtractFileExtension(jwtName, null);
+            Assert.Equal("pdf", ext);
+        }
+
+        [Fact]
+        public void ExtractFileExtension_ManyDotsEndingPng_ReturnsPng()
+        {
+            var ext = DocumentIngestionService.ExtractFileExtension("file.name.with.many.dots.png", null);
+            Assert.Equal("png", ext);
+        }
+
+        [Fact]
+        public void ExtractFileExtension_UpperCase_NormalizesToLower()
+        {
+            var ext = DocumentIngestionService.ExtractFileExtension("Photo.JPEG", null);
+            Assert.Equal("jpeg", ext);
+        }
+
+        [Fact]
+        public void ExtractFileExtension_NoExtension_UsesFallback()
+        {
+            var ext = DocumentIngestionService.ExtractFileExtension("noextension", "pdf");
+            Assert.Equal("pdf", ext);
+        }
+
+        [Fact]
+        public void ExtractFileExtension_NoExtension_FallbackWithDot()
+        {
+            var ext = DocumentIngestionService.ExtractFileExtension("noextension", ".png");
+            Assert.Equal("png", ext);
+        }
+
+        [Fact]
+        public void ExtractFileExtension_NoExtensionNoFallback_ReturnsEmpty()
+        {
+            var ext = DocumentIngestionService.ExtractFileExtension("noextension", null);
+            Assert.Equal("", ext);
+        }
+
+        [Fact]
+        public void ExtractFileExtension_EmptyFallback_ReturnsEmpty()
+        {
+            var ext = DocumentIngestionService.ExtractFileExtension("noextension", "");
+            Assert.Equal("", ext);
+        }
+
+        // ── GenerateSafeFileName ─────────────────────────────────────────
+
+        [Fact]
+        public void GenerateSafeFileName_StandardInput_ProducesExpectedFormat()
+        {
+            var name = DocumentIngestionService.GenerateSafeFileName("1/11958", 198847023, "file_mm0qwtat", "pdf");
+            Assert.Equal("1_11958_198847023_file_mm0qwtat.pdf", name);
+        }
+
+        [Fact]
+        public void GenerateSafeFileName_BackslashInTik_Sanitized()
+        {
+            var name = DocumentIngestionService.GenerateSafeFileName("1\\11958", 123, "col", "jpg");
+            Assert.Equal("1_11958_123_col.jpg", name);
+        }
+
+        [Fact]
+        public void GenerateSafeFileName_NoSlashInTik_Unchanged()
+        {
+            var name = DocumentIngestionService.GenerateSafeFileName("99", 42, "file_abc", "png");
+            Assert.Equal("99_42_file_abc.png", name);
+        }
+
+        // ── SanitizeTikVisualID ──────────────────────────────────────────
+
+        [Fact]
+        public void SanitizeTikVisualID_ForwardSlash_Replaced()
+        {
+            Assert.Equal("1_11958", DocumentIngestionService.SanitizeTikVisualID("1/11958"));
+        }
+
+        [Fact]
+        public void SanitizeTikVisualID_Backslash_Replaced()
+        {
+            Assert.Equal("1_11958", DocumentIngestionService.SanitizeTikVisualID("1\\11958"));
+        }
     }
 }
