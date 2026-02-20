@@ -40,10 +40,11 @@ namespace Odmon.Worker.Workers
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            LogSmtpConfigValidation();
+
             if (!_config.GetValue<bool>("Email:Enabled", false))
             {
                 _logger.LogInformation("Email monitoring is DISABLED (Email:Enabled=false). EmailBackgroundService will idle.");
-                // Keep alive but idle
                 try { await Task.Delay(Timeout.Infinite, stoppingToken); } catch (OperationCanceledException) { }
                 return;
             }
@@ -55,6 +56,33 @@ namespace Odmon.Worker.Workers
             var periodicTask = RunPeriodicTasksAsync(stoppingToken);
 
             await Task.WhenAll(queueTask, periodicTask);
+        }
+
+        private void LogSmtpConfigValidation()
+        {
+            var host = _config["Email:SmtpHost"];
+            var port = _config.GetValue<int>("Email:SmtpPort", 0);
+            var useTls = _config.GetValue<bool>("Email:UseTls", false);
+            var username = _config["Email:Username"];
+            var hasPassword = !string.IsNullOrWhiteSpace(_config["Email:Password"]);
+            var recipients = _config.GetSection("Email:Recipients").Get<string[]>() ?? Array.Empty<string>();
+            var enabled = _config.GetValue<bool>("Email:Enabled", false);
+
+            _logger.LogInformation(
+                "EMAIL CONFIG | Enabled={Enabled}, Host={Host}, Port={Port}, UseTls={UseTls}, Username={Username}, HasPassword={HasPassword}, RecipientCount={RecipientCount}",
+                enabled, host ?? "<not set>", port, useTls,
+                string.IsNullOrWhiteSpace(username) ? "<not set>" : username,
+                hasPassword, recipients.Length);
+
+            if (enabled)
+            {
+                if (string.IsNullOrWhiteSpace(host))
+                    _logger.LogWarning("EMAIL CONFIG WARN | SmtpHost is not configured");
+                if (string.IsNullOrWhiteSpace(username) || !hasPassword)
+                    _logger.LogWarning("EMAIL CONFIG WARN | SMTP credentials incomplete — emails will fail with auth error");
+                if (recipients.Length == 0)
+                    _logger.LogWarning("EMAIL CONFIG WARN | No recipients configured — emails will be skipped");
+            }
         }
 
         // ================================================================

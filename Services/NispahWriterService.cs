@@ -35,6 +35,8 @@ namespace Odmon.Worker.Services
         private readonly List<DateTime> _createsInLastMinute = new List<DateTime>();
         private readonly object _rateLimitLock = new object();
 
+        private static volatile bool _nispahDedupTableMissing;
+
         private const string StoredProcedureName = "dbo.Klita_Interface_NispahDetails";
 
         public NispahWriterService(
@@ -239,17 +241,32 @@ namespace Odmon.Worker.Services
 
         private async Task<bool> IsDuplicateAsync(string tikVisualID, string nispahTypeName, string infoHash, CancellationToken ct)
         {
-            var windowStart = DateTime.UtcNow.AddMinutes(-_settings.DeduplicationWindowMinutes);
+            if (_nispahDedupTableMissing) return false;
 
-            var existing = await _integrationDb.NispahDeduplications
-                .AsNoTracking()
-                .Where(d => d.TikVisualID == tikVisualID
-                         && d.NispahTypeName == nispahTypeName
-                         && d.InfoHash == infoHash
-                         && d.CreatedAtUtc >= windowStart)
-                .FirstOrDefaultAsync(ct);
+            try
+            {
+                var windowStart = DateTime.UtcNow.AddMinutes(-_settings.DeduplicationWindowMinutes);
 
-            return existing != null;
+                var existing = await _integrationDb.NispahDeduplications
+                    .AsNoTracking()
+                    .Where(d => d.TikVisualID == tikVisualID
+                             && d.NispahTypeName == nispahTypeName
+                             && d.InfoHash == infoHash
+                             && d.CreatedAtUtc >= windowStart)
+                    .FirstOrDefaultAsync(ct);
+
+                return existing != null;
+            }
+            catch (SqlException sqlEx) when (sqlEx.Number == 208)
+            {
+                if (!_nispahDedupTableMissing)
+                {
+                    _nispahDedupTableMissing = true;
+                    _logger.LogWarning(
+                        "NispahDeduplications table does not exist (SqlException 208). Dedup check bypassed — ingestion will continue without dedup. Run EF migrations to create the table.");
+                }
+                return false;
+            }
         }
 
         private bool CheckRateLimits(NispahAuditLog auditLog)
@@ -362,6 +379,8 @@ namespace Odmon.Worker.Services
             DateTime createdAtUtc,
             CancellationToken ct)
         {
+            if (_nispahDedupTableMissing) return;
+
             try
             {
                 var dedup = new NispahDeduplication
@@ -377,11 +396,18 @@ namespace Odmon.Worker.Services
             }
             catch (DbUpdateException ex) when (ex.InnerException is SqlException sqlEx && sqlEx.Number == 2627)
             {
-                // Unique constraint violation - another process may have inserted it
-                // This is acceptable, just log it
                 _logger.LogInformation(
                     "Deduplication record already exists (race condition): TikVisualID={TikVisualID}, NispahTypeName={NispahTypeName}, InfoHash={InfoHash}",
                     tikVisualID, nispahTypeName, infoHash);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is SqlException sqlEx && sqlEx.Number == 208)
+            {
+                if (!_nispahDedupTableMissing)
+                {
+                    _nispahDedupTableMissing = true;
+                    _logger.LogWarning(
+                        "NispahDeduplications table does not exist (SqlException 208). Dedup recording skipped. Run EF migrations to create the table.");
+                }
             }
         }
 

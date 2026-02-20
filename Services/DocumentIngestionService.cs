@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -23,6 +24,8 @@ namespace Odmon.Worker.Services
         private int _totalSucceeded;
         private int _totalFailed;
         private int _totalSkipped;
+
+        private static volatile bool _nispahDedupTableMissing;
 
         public DocumentIngestionService(
             IntegrationDbContext integrationDb,
@@ -318,19 +321,39 @@ namespace Odmon.Worker.Services
 
             record.OriginalFileName = assetInfo.Name;
 
-            var ext = ExtractFileExtension(assetInfo.Name, assetInfo.FileExtension);
+            if (assetInfo.FileSize > _settings.MaxFileSizeBytes)
+                throw new InvalidOperationException(
+                    $"Asset {assetId} size {assetInfo.FileSize} exceeds max {_settings.MaxFileSizeBytes} bytes");
+
+            // Resolve extension from Monday metadata first
+            var ext = ResolveFileExtension(assetInfo.Name, assetInfo.FileExtension, contentType: null);
+
+            // Begin download (headers read first); use Content-Type as MIME fallback if needed
+            using var downloadClient = _httpClientFactory.CreateClient("MondayFileDownload");
+            using var response = await downloadClient.GetAsync(assetInfo.PublicUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+            response.EnsureSuccessStatusCode();
+
+            if (string.IsNullOrWhiteSpace(ext))
+            {
+                var contentType = response.Content.Headers.ContentType?.MediaType;
+                ext = ResolveFileExtension(null, null, contentType);
+
+                if (!string.IsNullOrWhiteSpace(ext))
+                {
+                    _logger.LogInformation(
+                        "DOCINGESTION EXT RESOLVED VIA MIME | AssetId={AssetId}, ContentType={ContentType}, Ext={Ext}, OriginalFileName='{OriginalFileName}'",
+                        assetId, contentType, ext, assetInfo.Name);
+                }
+            }
+
             if (string.IsNullOrWhiteSpace(ext))
                 throw new InvalidOperationException(
-                    $"Cannot determine file extension for asset {assetId}, OriginalFileName='{assetInfo.Name}'");
+                    $"Cannot determine file extension for asset {assetId}, OriginalFileName='{assetInfo.Name}', FileExtension='{assetInfo.FileExtension}', ContentType='{response.Content.Headers.ContentType?.MediaType}'");
 
             var allowedSet = new HashSet<string>(_settings.AllowedExtensions, StringComparer.OrdinalIgnoreCase);
             if (!allowedSet.Contains(ext))
                 throw new InvalidOperationException(
                     $"File extension '{ext}' not in allowlist [{string.Join(",", _settings.AllowedExtensions)}] for asset {assetId}, OriginalFileName='{assetInfo.Name}'");
-
-            if (assetInfo.FileSize > _settings.MaxFileSizeBytes)
-                throw new InvalidOperationException(
-                    $"Asset {assetId} size {assetInfo.FileSize} exceeds max {_settings.MaxFileSizeBytes} bytes");
 
             var safeTikDir = SanitizeTikVisualID(tikVisualID);
             var caseFolderPath = Path.Combine(_settings.InboxPath, "Cases", safeTikDir);
@@ -339,10 +362,6 @@ namespace Odmon.Worker.Services
             var safeFileName = GenerateSafeFileName(tikVisualID, assetId, record.ColumnId, ext);
             var targetPath = Path.Combine(caseFolderPath, safeFileName);
             var tempPath = targetPath + ".tmp";
-
-            using var downloadClient = _httpClientFactory.CreateClient("MondayFileDownload");
-            using var response = await downloadClient.GetAsync(assetInfo.PublicUrl, HttpCompletionOption.ResponseHeadersRead, ct);
-            response.EnsureSuccessStatusCode();
 
             await using (var contentStream = await response.Content.ReadAsStreamAsync(ct))
             await using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920))
@@ -657,12 +676,28 @@ namespace Odmon.Worker.Services
                 result.LinesIncluded, result.Text.Length, result.ContentHash);
 
             // Step 3: Permanent dedup — check if this exact content was already written
-            var alreadyWritten = await _integrationDb.NispahDeduplications
-                .AsNoTracking()
-                .AnyAsync(d =>
-                    d.TikVisualID == tikVisualID &&
-                    d.NispahTypeName == nispahType &&
-                    d.InfoHash == result.ContentHash, ct);
+            bool alreadyWritten = false;
+            if (!_nispahDedupTableMissing)
+            {
+                try
+                {
+                    alreadyWritten = await _integrationDb.NispahDeduplications
+                        .AsNoTracking()
+                        .AnyAsync(d =>
+                            d.TikVisualID == tikVisualID &&
+                            d.NispahTypeName == nispahType &&
+                            d.InfoHash == result.ContentHash, ct);
+                }
+                catch (SqlException sqlEx) when (sqlEx.Number == 208)
+                {
+                    if (!_nispahDedupTableMissing)
+                    {
+                        _nispahDedupTableMissing = true;
+                        _logger.LogWarning(
+                            "NispahDeduplications table does not exist (SqlException 208). Dedup bypassed for accident story — ingestion will continue. Run EF migrations to create the table.");
+                    }
+                }
+            }
 
             if (alreadyWritten)
             {
@@ -736,13 +771,47 @@ namespace Odmon.Worker.Services
 
         // ───────── Helpers ─────────
 
-        internal static string ExtractFileExtension(string originalFileName, string? fallbackExtension)
+        private static readonly Dictionary<string, string> MimeToExtension = new(StringComparer.OrdinalIgnoreCase)
         {
-            var ext = (Path.GetExtension(originalFileName) ?? "").TrimStart('.').ToLowerInvariant();
-            if (string.IsNullOrWhiteSpace(ext) && !string.IsNullOrWhiteSpace(fallbackExtension))
-                ext = fallbackExtension.TrimStart('.').ToLowerInvariant();
-            return ext;
+            ["application/pdf"] = "pdf",
+            ["image/jpeg"] = "jpg",
+            ["image/jpg"] = "jpg",
+            ["image/png"] = "png",
+            ["image/gif"] = "gif",
+            ["image/webp"] = "webp"
+        };
+
+        /// <summary>
+        /// Deterministic file extension resolution:
+        /// a) assetName if it contains '.' → Path.GetExtension (last segment)
+        /// b) assetFileExtension field from Monday API
+        /// c) MIME type mapping from Content-Type header
+        /// </summary>
+        internal static string ResolveFileExtension(string? assetName, string? assetFileExtension, string? contentType)
+        {
+            if (!string.IsNullOrWhiteSpace(assetName) && assetName.Contains('.'))
+            {
+                var ext = (Path.GetExtension(assetName) ?? "").TrimStart('.').ToLowerInvariant();
+                if (!string.IsNullOrWhiteSpace(ext))
+                    return ext;
+            }
+
+            if (!string.IsNullOrWhiteSpace(assetFileExtension))
+            {
+                var ext = assetFileExtension.TrimStart('.').ToLowerInvariant();
+                if (!string.IsNullOrWhiteSpace(ext))
+                    return ext;
+            }
+
+            if (!string.IsNullOrWhiteSpace(contentType) && MimeToExtension.TryGetValue(contentType, out var mapped))
+                return mapped;
+
+            return "";
         }
+
+        [Obsolete("Use ResolveFileExtension instead")]
+        internal static string ExtractFileExtension(string originalFileName, string? fallbackExtension)
+            => ResolveFileExtension(originalFileName, fallbackExtension, contentType: null);
 
         internal static string GenerateSafeFileName(string tikVisualID, long assetId, string columnId, string extension)
         {

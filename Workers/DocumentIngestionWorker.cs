@@ -1,7 +1,10 @@
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Odmon.Worker.Data;
 using Odmon.Worker.Services;
 
 namespace Odmon.Worker.Workers
@@ -47,6 +50,8 @@ namespace Odmon.Worker.Workers
             _logger.LogInformation(
                 "DocumentIngestionWorker STARTED | Board={BoardId}, Interval={IntervalSeconds}s",
                 boardId, intervalSeconds);
+
+            await CheckNispahDedupTableAsync(stoppingToken);
 
             var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
             bool firstRun = true;
@@ -100,6 +105,26 @@ namespace Odmon.Worker.Workers
                 "DocumentIngestionWorker STOPPED | Uptime={UptimeMin:F1} min, Runs={Runs}, Failures={Failures}",
                 (DateTime.UtcNow - _workerStartedAtUtc).TotalMinutes,
                 _totalRunsCompleted, _totalFailures);
+        }
+
+        private async Task CheckNispahDedupTableAsync(CancellationToken ct)
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<IntegrationDbContext>();
+                await db.NispahDeduplications.AsNoTracking().Take(0).CountAsync(ct);
+                _logger.LogInformation("HEALTHCHECK | NispahDeduplications table exists in IntegrationDb — dedup is active.");
+            }
+            catch (SqlException sqlEx) when (sqlEx.Number == 208)
+            {
+                _logger.LogWarning(
+                    "HEALTHCHECK | NispahDeduplications table NOT FOUND in IntegrationDb (SqlException 208). Dedup will be bypassed at runtime. Run EF migrations to create the table.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "HEALTHCHECK | Could not verify NispahDeduplications table. Dedup status unknown.");
+            }
         }
     }
 }

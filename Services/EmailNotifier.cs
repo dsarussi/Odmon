@@ -144,75 +144,110 @@ namespace Odmon.Worker.Services
         // ================================================================
 
         /// <summary>
-        /// Sends an email via SMTP. Non-throwing: logs errors and returns false on failure.
+        /// Sends an email via SMTP with retry and structured SmtpException handling.
+        /// Non-throwing: logs errors and returns false on failure.
         /// </summary>
         public async Task<bool> SendEmailAsync(EmailMessage message, CancellationToken ct)
         {
-            try
+            var host = _config["Email:SmtpHost"] ?? "smtp.gmail.com";
+            var port = _config.GetValue<int>("Email:SmtpPort", 587);
+            var useTls = _config.GetValue<bool>("Email:UseTls", true);
+            var username = _config["Email:Username"] ?? string.Empty;
+            var password = _config["Email:Password"] ?? string.Empty;
+            var recipients = _config.GetSection("Email:Recipients").Get<string[]>() ?? Array.Empty<string>();
+
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
             {
-                var host = _config["Email:SmtpHost"] ?? "smtp.gmail.com";
-                var port = _config.GetValue<int>("Email:SmtpPort", 587);
-                var useTls = _config.GetValue<bool>("Email:UseTls", true);
-                var username = _config["Email:Username"] ?? string.Empty;
-                var password = _config["Email:Password"] ?? string.Empty;
-                var recipients = _config.GetSection("Email:Recipients").Get<string[]>() ?? Array.Empty<string>();
-
-                if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
-                {
-                    _logger.LogWarning("SMTP FAILURE | Email credentials not configured. Skipping email: {Subject}", message.Subject);
-                    return false;
-                }
-
-                if (recipients.Length == 0)
-                {
-                    _logger.LogWarning("SMTP FAILURE | No recipients configured. Skipping email: {Subject}", message.Subject);
-                    return false;
-                }
-
-#pragma warning disable SYSLIB0014 // SmtpClient is obsolete but functional in .NET 8
-                using var smtp = new SmtpClient(host, port)
-                {
-                    EnableSsl = useTls,
-                    Credentials = new NetworkCredential(username, password),
-                    Timeout = 30_000
-                };
-
-                using var mail = new MailMessage
-                {
-                    From = new MailAddress(username, "ODMON Monitor"),
-                    Subject = message.Subject,
-                    Body = message.Body,
-                    IsBodyHtml = message.IsHtml
-                };
-
-                foreach (var r in recipients)
-                {
-                    if (!string.IsNullOrWhiteSpace(r))
-                        mail.To.Add(r.Trim());
-                }
-
-                await smtp.SendMailAsync(mail, ct);
-#pragma warning restore SYSLIB0014
-
-                _logger.LogInformation(
-                    "EMAIL SENT | Type={Type}, Subject={Subject}, Recipients={Recipients}",
-                    message.Type, message.Subject, string.Join(";", recipients));
-
-                // Record in rate limiter
-                lock (_rateLock)
-                {
-                    _sentTimestamps.Add(DateTime.UtcNow);
-                }
-
-                return true;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(ex,
-                    "SMTP FAILURE | Failed to send email. Subject={Subject}, Error={Error}",
-                    message.Subject, ex.Message);
+                _logger.LogWarning("SMTP FAILURE | Email credentials not configured. Skipping email: {Subject}", message.Subject);
                 return false;
             }
+
+            if (recipients.Length == 0)
+            {
+                _logger.LogWarning("SMTP FAILURE | No recipients configured. Skipping email: {Subject}", message.Subject);
+                return false;
+            }
+
+            const int maxRetries = 3;
+
+            for (int attempt = 0; attempt < maxRetries; attempt++)
+            {
+                try
+                {
+#pragma warning disable SYSLIB0014
+                    using var smtp = new SmtpClient(host, port)
+                    {
+                        EnableSsl = useTls,
+                        Credentials = new NetworkCredential(username, password),
+                        Timeout = 30_000
+                    };
+
+                    using var mail = new MailMessage
+                    {
+                        From = new MailAddress(username, "ODMON Monitor"),
+                        Subject = message.Subject,
+                        Body = message.Body,
+                        IsBodyHtml = message.IsHtml
+                    };
+
+                    foreach (var r in recipients)
+                    {
+                        if (!string.IsNullOrWhiteSpace(r))
+                            mail.To.Add(r.Trim());
+                    }
+
+                    await smtp.SendMailAsync(mail, ct);
+#pragma warning restore SYSLIB0014
+
+                    _logger.LogInformation(
+                        "EMAIL SENT | Type={Type}, Subject={Subject}, Recipients={Recipients}",
+                        message.Type, message.Subject, string.Join(";", recipients));
+
+                    lock (_rateLock)
+                    {
+                        _sentTimestamps.Add(DateTime.UtcNow);
+                    }
+
+                    return true;
+                }
+                catch (SmtpException smtpEx)
+                {
+                    var isAuth = IsSmtpAuthFailure(smtpEx);
+                    _logger.LogWarning(
+                        "SMTP FAILURE | Subject={Subject}, StatusCode={StatusCode}, Response={Response}, IsAuthFailure={IsAuth}, Attempt={Attempt}/{MaxRetries}",
+                        message.Subject, (int)smtpEx.StatusCode, smtpEx.Message, isAuth, attempt + 1, maxRetries);
+
+                    if (isAuth)
+                        return false;
+
+                    if (attempt < maxRetries - 1)
+                    {
+                        var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt + 1));
+                        try { await Task.Delay(delay, ct); }
+                        catch (OperationCanceledException) { return false; }
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex,
+                        "SMTP FAILURE | Subject={Subject}, Error={Error}, Attempt={Attempt}/{MaxRetries}",
+                        message.Subject, ex.Message, attempt + 1, maxRetries);
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        internal static bool IsSmtpAuthFailure(SmtpException ex)
+        {
+            var code = (int)ex.StatusCode;
+            if (code == 530 || code == 535) return true;
+            var msg = ex.Message ?? "";
+            return msg.Contains("5.7.0", StringComparison.Ordinal)
+                || msg.Contains("5.7.8", StringComparison.Ordinal)
+                || msg.Contains("Authentication Required", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Username and Password not accepted", StringComparison.OrdinalIgnoreCase);
         }
 
         // ================================================================
