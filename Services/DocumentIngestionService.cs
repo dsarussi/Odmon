@@ -352,8 +352,6 @@ namespace Odmon.Worker.Services
                 throw new InvalidOperationException(
                     $"Asset {assetId} size {assetInfo.FileSize} exceeds max {_settings.MaxFileSizeBytes} bytes");
 
-            var ext = ResolveFileExtension(assetInfo.Name, assetInfo.FileExtension, contentType: null);
-
             using var downloadClient = _httpClientFactory.CreateClient("MondayFileDownload");
             HttpResponseMessage? response = null;
             try
@@ -370,30 +368,31 @@ namespace Odmon.Worker.Services
                 throw;
             }
 
-            if (string.IsNullOrWhiteSpace(ext))
+            var contentType = response!.Content.Headers.ContentType?.MediaType;
+            var ext = GetAllowedExtension(
+                assetInfo.Name,
+                assetInfo.FileExtension,
+                assetInfo.PublicUrl,
+                contentType,
+                _settings.AllowedExtensions);
+
+            if (string.IsNullOrEmpty(ext))
             {
-                var contentType = response!.Content.Headers.ContentType?.MediaType;
-                ext = ResolveFileExtension(null, null, contentType);
-                if (!string.IsNullOrWhiteSpace(ext))
-                    _logger.LogInformation(
-                        "DOCINGESTION EXT RESOLVED VIA MIME | AssetId={AssetId}, ContentType={ContentType}, Ext={Ext}, OriginalFileNameLog={OriginalFileNameLog}",
-                        assetId, contentType, ext, SafeFileNameForLog(assetInfo.Name));
+                _logger.LogWarning(
+                    "DOCINGESTION SKIP no valid extension | AssetId={AssetId}, ItemId={ItemId}, OriginalFileNameLog={OriginalFileNameLog}, Url={Url}, Allowlist=[{Allowlist}]",
+                    assetId, record.MondayQuestionnaireItemId, SafeFileNameForLog(assetInfo.Name), assetInfo.PublicUrl, string.Join(",", _settings.AllowedExtensions));
+                throw new InvalidOperationException(
+                    $"No allowed extension for asset {assetId} (OriginalFileName/Url/ContentType did not yield pdf,jpg,jpeg,png). Skip.");
             }
 
-            if (string.IsNullOrWhiteSpace(ext))
-                throw new InvalidOperationException(
-                    $"Cannot determine file extension for asset {assetId}, FileExtension='{assetInfo.FileExtension}', ContentType='{response.Content.Headers.ContentType?.MediaType}'");
-
-            var allowedSet = new HashSet<string>(_settings.AllowedExtensions, StringComparer.OrdinalIgnoreCase);
-            if (!allowedSet.Contains(ext))
-                throw new InvalidOperationException(
-                    $"File extension '{ext}' not in allowlist [{string.Join(",", _settings.AllowedExtensions)}] for asset {assetId}");
+            var safeFileName = SafeFileName(record.ColumnId, tikVisualID, assetId, ext);
+            _logger.LogInformation(
+                "DOCINGESTION SafeFileName (accepted) | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, SafeFileName={SafeFileName}, Ext={Ext}",
+                assetId, record.MondayQuestionnaireItemId, tikCounter, safeFileName, ext);
 
             var safeTikDir = SanitizeTikVisualID(tikVisualID);
             var caseFolderPath = Path.Combine(_settings.InboxPath, "Cases", safeTikDir);
             Directory.CreateDirectory(caseFolderPath);
-
-            var safeFileName = DeriveSafeFilename(assetInfo.Name, tikVisualID, tikCounter, assetId, ext);
             var targetPath = Path.Combine(caseFolderPath, safeFileName);
             var tempPath = targetPath + ".tmp";
 
@@ -902,24 +901,98 @@ namespace Odmon.Worker.Services
         };
 
         /// <summary>
-        /// Deterministic file extension resolution:
-        /// a) assetName if it contains '.' → Path.GetExtension (last segment)
-        /// b) assetFileExtension field from Monday API
-        /// c) MIME type mapping from Content-Type header
+        /// Returns an extension only if it is in the allowlist and length &lt;= 5.
+        /// Tries: Path.GetExtension(originalFileName), then URL path, then assetFileExtension, then MIME.
+        /// </summary>
+        internal static string? GetAllowedExtension(
+            string? originalFileName,
+            string? assetFileExtension,
+            string? assetUrl,
+            string? contentType,
+            IReadOnlyList<string> allowlist)
+        {
+            if (allowlist == null || allowlist.Count == 0) return null;
+            var set = new HashSet<string>(allowlist, StringComparer.OrdinalIgnoreCase);
+
+            static string? Normalize(string? raw)
+            {
+                if (string.IsNullOrWhiteSpace(raw)) return null;
+                var s = raw.Trim().TrimStart('.').ToLowerInvariant();
+                return string.IsNullOrEmpty(s) ? null : s;
+            }
+
+            static bool IsAllowed(string? ext, HashSet<string> allowed, int maxLen = 5)
+            {
+                if (string.IsNullOrEmpty(ext) || ext.Length > maxLen) return false;
+                return allowed.Contains(ext);
+            }
+
+            // a) Prefer OriginalFileName: Path.GetExtension, then allowlist check
+            if (!string.IsNullOrWhiteSpace(originalFileName))
+            {
+                var ext = Normalize(Path.GetExtension(originalFileName));
+                if (IsAllowed(ext, set)) return ext;
+            }
+
+            // b) URL path (not query string)
+            if (!string.IsNullOrWhiteSpace(assetUrl) && Uri.TryCreate(assetUrl, UriKind.Absolute, out var uri))
+            {
+                var path = uri.AbsolutePath;
+                if (!string.IsNullOrEmpty(path))
+                {
+                    var ext = Normalize(Path.GetExtension(path));
+                    if (IsAllowed(ext, set)) return ext;
+                }
+            }
+
+            // c) assetFileExtension only if in allowlist and short
+            var apiExt = Normalize(assetFileExtension);
+            if (IsAllowed(apiExt, set)) return apiExt;
+
+            // d) MIME
+            if (!string.IsNullOrWhiteSpace(contentType) && MimeToExtension.TryGetValue(contentType, out var mapped))
+            {
+                var mimeExt = Normalize(mapped);
+                if (IsAllowed(mimeExt, set)) return mimeExt;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Deterministic safe filename: columnSlug_tikSlug_assetId.ext.
+        /// Slugify column (whitespace→_, remove invalid chars); TikVisualId: / → -.
+        /// </summary>
+        internal static string SafeFileName(string columnName, string tikVisualId, long assetId, string extension)
+        {
+            var invalid = Path.GetInvalidFileNameChars();
+            var columnSlug = string.IsNullOrWhiteSpace(columnName)
+                ? "col"
+                : new string(columnName.Trim().Select(c => char.IsWhiteSpace(c) ? '_' : (invalid.Contains(c) ? '_' : c)).ToArray()).Trim('_');
+            if (string.IsNullOrEmpty(columnSlug)) columnSlug = "col";
+            var tikSlug = (tikVisualId ?? "").Replace("/", "-").Replace("\\", "-").Trim();
+            if (string.IsNullOrEmpty(tikSlug)) tikSlug = "0";
+            var ext = (extension ?? "").TrimStart('.').ToLowerInvariant();
+            if (string.IsNullOrEmpty(ext)) ext = "bin";
+            return $"{columnSlug}_{tikSlug}_{assetId}.{ext}";
+        }
+
+        /// <summary>
+        /// Deterministic file extension resolution (legacy; prefer GetAllowedExtension for allowlist-safe result).
         /// </summary>
         internal static string ResolveFileExtension(string? assetName, string? assetFileExtension, string? contentType)
         {
             if (!string.IsNullOrWhiteSpace(assetName) && assetName.Contains('.'))
             {
                 var ext = (Path.GetExtension(assetName) ?? "").TrimStart('.').ToLowerInvariant();
-                if (!string.IsNullOrWhiteSpace(ext))
+                if (!string.IsNullOrWhiteSpace(ext) && ext.Length <= 5)
                     return ext;
             }
 
             if (!string.IsNullOrWhiteSpace(assetFileExtension))
             {
                 var ext = assetFileExtension.TrimStart('.').ToLowerInvariant();
-                if (!string.IsNullOrWhiteSpace(ext))
+                if (!string.IsNullOrWhiteSpace(ext) && ext.Length <= 5)
                     return ext;
             }
 
@@ -929,7 +1002,7 @@ namespace Odmon.Worker.Services
             return "";
         }
 
-        [Obsolete("Use ResolveFileExtension instead")]
+        [Obsolete("Use GetAllowedExtension or ResolveFileExtension instead")]
         internal static string ExtractFileExtension(string originalFileName, string? fallbackExtension)
             => ResolveFileExtension(originalFileName, fallbackExtension, contentType: null);
 

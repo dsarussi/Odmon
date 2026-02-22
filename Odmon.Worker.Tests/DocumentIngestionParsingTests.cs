@@ -298,6 +298,75 @@ namespace Odmon.Worker.Tests
             Assert.Contains("eyJ0eXAi...", log);
         }
 
+        // ── GetAllowedExtension ─────────────────────────────────────────
+
+        private static readonly string[] Allowlist = ["pdf", "jpg", "jpeg", "png"];
+
+        [Fact]
+        public void GetAllowedExtension_OriginalFileNameEndsWithPdf_ReturnsPdf()
+        {
+            var ext = DocumentIngestionService.GetAllowedExtension("report.pdf", null, null, null, Allowlist);
+            Assert.Equal("pdf", ext);
+        }
+
+        [Fact]
+        public void GetAllowedExtension_OriginalFileNameJwtLikeWithPdf_ReturnsPdf()
+        {
+            var ext = DocumentIngestionService.GetAllowedExtension("eyJhbGciOiJIUzI1NiJ9.eyJpc3M.pdf", null, null, null, Allowlist);
+            Assert.Equal("pdf", ext);
+        }
+
+        [Fact]
+        public void GetAllowedExtension_OriginalFileNameJwtLikeNoExtension_ReturnsNull()
+        {
+            var ext = DocumentIngestionService.GetAllowedExtension("eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRw", null, null, null, Allowlist);
+            Assert.Null(ext);
+        }
+
+        [Fact]
+        public void GetAllowedExtension_UrlEndsWithJpg_ReturnsJpg()
+        {
+            var ext = DocumentIngestionService.GetAllowedExtension(null, null, "https://example.com/files/photo.jpg", null, Allowlist);
+            Assert.Equal("jpg", ext);
+        }
+
+        [Fact]
+        public void GetAllowedExtension_UrlHasQueryString_ExtensionFromPathOnly()
+        {
+            var ext = DocumentIngestionService.GetAllowedExtension(null, null, "https://example.com/file.pdf?token=eyJzdWI", null, Allowlist);
+            Assert.Equal("pdf", ext);
+        }
+
+        [Fact]
+        public void GetAllowedExtension_NoExtension_ReturnsNull()
+        {
+            var ext = DocumentIngestionService.GetAllowedExtension(null, null, "https://example.com/noext", null, Allowlist);
+            Assert.Null(ext);
+        }
+
+        [Fact]
+        public void GetAllowedExtension_AssetFileExtensionJunk_IgnoredWhenNotInAllowlist()
+        {
+            var ext = DocumentIngestionService.GetAllowedExtension("eyJ.eyJ.eyJ.longbase64string", "eyjzdwjtaxn", null, null, Allowlist);
+            Assert.Null(ext);
+        }
+
+        // ── SafeFileName (columnSlug_tikSlug_assetId.ext) ─────────────────
+
+        [Fact]
+        public void SafeFileName_StandardInput_ProducesExpectedFormat()
+        {
+            var name = DocumentIngestionService.SafeFileName("file_mm0qwtat", "1/11958", 198847023, "pdf");
+            Assert.Equal("file_mm0qwtat_1-11958_198847023.pdf", name);
+        }
+
+        [Fact]
+        public void SafeFileName_ColumnWithSpaces_Slugified()
+        {
+            var name = DocumentIngestionService.SafeFileName("file column", "1/11958", 123, "jpg");
+            Assert.Equal("file_column_1-11958_123.jpg", name);
+        }
+
         // ── IsSmtpAuthFailure ────────────────────────────────────────────
 
         [Fact]
