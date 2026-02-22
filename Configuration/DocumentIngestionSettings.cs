@@ -35,6 +35,8 @@ namespace Odmon.Worker.Configuration
     public class AccidentStorySettings
     {
         public bool Enabled { get; set; } = false;
+        /// <summary>When false, Accident Story is not written to Odcanit (emergency kill switch).</summary>
+        public bool WriteEnabled { get; set; } = true;
         public string NispahType { get; set; } = "סיפור תאונה";
         public AccidentStoryColumnDef[] Columns { get; set; } = [];
     }

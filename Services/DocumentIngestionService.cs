@@ -707,7 +707,10 @@ namespace Odmon.Worker.Services
                 "DocumentIngestionService");
         }
 
-        // ───────── Accident Story → Odcanit Nispah (multi-column) ─────────
+        // ───────── Accident Story → Odcanit Nispah (multi-column, idempotent) ─────────
+
+        internal const string NispahSourceKindAccidentStory = "AccidentStory";
+        internal const string NispahSourceKindPdfAsset = "PdfAsset";
 
         private async Task ProcessAccidentStoryAsync(
             long questionnaireItemId, long linkedCaseItemId,
@@ -722,9 +725,16 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            if (!_settings.AccidentStory.WriteEnabled)
+            {
+                _logger.LogInformation(
+                    "ACCIDENTSTORY SKIP (WriteEnabled=false) | TikCounter={TikCounter}, ItemId={ItemId} — feature flag disabled",
+                    tikCounter, questionnaireItemId);
+                return;
+            }
+
             var columnIds = columnDefs.Select(c => c.ColumnId).ToArray();
 
-            // Step 1: Read all column values in one API call
             Dictionary<string, string> columnValues;
             try
             {
@@ -738,7 +748,6 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            // Step 2: Compose the text block
             var result = AccidentStoryComposer.Compose(
                 columnDefs, columnValues, questionnaireItemId, DateTime.Now);
 
@@ -755,44 +764,45 @@ namespace Odmon.Worker.Services
                 tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId,
                 result.LinesIncluded, result.Text.Length, result.ContentHash);
 
-            // Step 3: Permanent dedup — check if this exact content was already written
-            bool alreadyWritten = false;
-            if (!_nispahDedupTableMissing)
+            // Idempotency: insert into NispahWriteLog first. Unique (TikCounter, NispahType, SourceItemId, InfoHash) prevents duplicates across runs and concurrent processes.
+            var logEntry = new NispahWriteLog
             {
-                try
-                {
-                    alreadyWritten = await _integrationDb.NispahDeduplications
-                        .AsNoTracking()
-                        .AnyAsync(d =>
-                            d.TikVisualID == tikVisualID &&
-                            d.NispahTypeName == nispahType &&
-                            d.InfoHash == result.ContentHash, ct);
-                }
-                catch (SqlException sqlEx) when (sqlEx.Number == 208)
-                {
-                    if (!_nispahDedupTableMissing)
-                    {
-                        _nispahDedupTableMissing = true;
-                        _logger.LogWarning(
-                            "NispahDeduplications table does not exist (SqlException 208). Dedup bypassed for accident story — ingestion will continue. Run EF migrations to create the table.");
-                    }
-                }
-            }
+                TikCounter = tikCounter,
+                TikVisualId = tikVisualID,
+                NispahType = nispahType,
+                SourceKind = NispahSourceKindAccidentStory,
+                SourceItemId = questionnaireItemId,
+                SourceAssetId = null,
+                InfoHash = result.ContentHash,
+                CreatedAtUtc = DateTime.UtcNow,
+                Failed = false
+            };
 
-            if (alreadyWritten)
+            try
+            {
+                _integrationDb.NispahWriteLogs.Add(logEntry);
+                await _integrationDb.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
             {
                 _logger.LogInformation(
-                    "ACCIDENTSTORY SKIP (duplicate) | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, ContentHash={ContentHash}",
-                    tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, result.ContentHash);
+                    "ACCIDENTSTORY IDEMPOTENT SKIP | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType={NispahType}, InfoHash={InfoHash}, CorrelationKeys=TikCounter,SourceItemId,InfoHash",
+                    tikCounter, tikVisualID, questionnaireItemId, nispahType, result.ContentHash);
+                return;
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is SqlException sqlEx && sqlEx.Number == 208)
+            {
+                _logger.LogWarning(
+                    "ACCIDENTSTORY SKIP (NispahWriteLogs table missing, SqlException 208) | TikCounter={TikCounter}, ItemId={ItemId} — run EF migration AddNispahWriteLog",
+                    tikCounter, questionnaireItemId);
                 return;
             }
 
-            // Step 4: Write to Odcanit via NispahWriterService
             var correlationId = $"accidentstory-{questionnaireItemId}";
 
             _logger.LogInformation(
-                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType='{NispahType}', TextLength={TextLength}",
-                tikCounter, tikVisualID, questionnaireItemId, nispahType, result.Text.Length);
+                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType='{NispahType}', TextLength={TextLength}, LogId={LogId}",
+                tikCounter, tikVisualID, questionnaireItemId, nispahType, result.Text.Length, logEntry.Id);
 
             try
             {
@@ -802,25 +812,44 @@ namespace Odmon.Worker.Services
                 if (success)
                 {
                     _logger.LogInformation(
-                        "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, NispahType='{NispahType}', LinesIncluded={LinesIncluded}, TextLength={TextLength}",
-                        tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, nispahType, result.LinesIncluded, result.Text.Length);
+                        "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, NispahType='{NispahType}', LinesIncluded={LinesIncluded}, TextLength={TextLength}, LogId={LogId}",
+                        tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, nispahType, result.LinesIncluded, result.Text.Length, logEntry.Id);
                 }
                 else
                 {
+                    await MarkNispahWriteLogFailedAsync(logEntry.Id, "Blocked by NispahWriter guardrails", ct);
                     _logger.LogWarning(
-                        "ACCIDENTSTORY BLOCKED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType='{NispahType}' — blocked by NispahWriter guardrails",
-                        tikCounter, tikVisualID, questionnaireItemId, nispahType);
+                        "ACCIDENTSTORY BLOCKED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType='{NispahType}', LogId={LogId} — blocked by NispahWriter guardrails",
+                        tikCounter, tikVisualID, questionnaireItemId, nispahType, logEntry.Id);
                 }
             }
             catch (Exception ex)
             {
+                await MarkNispahWriteLogFailedAsync(logEntry.Id, ex.Message.Length > 2000 ? ex.Message[..2000] : ex.Message, ct);
                 _logger.LogError(ex,
-                    "ACCIDENTSTORY FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, NispahType='{NispahType}', TextLength={TextLength}, Error={Error}",
-                    tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, nispahType, result.Text.Length, ex.Message);
+                    "ACCIDENTSTORY FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, NispahType='{NispahType}', TextLength={TextLength}, LogId={LogId}, Error={Error}",
+                    tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, nispahType, result.Text.Length, logEntry.Id, ex.Message);
 
                 SendAlert(
                     $"Accident story nispah write failed for TikVisualID={tikVisualID}",
                     null, ex);
+            }
+        }
+
+        /// <summary>True when the exception is a SQL unique constraint violation (2627).</summary>
+        internal static bool IsUniqueConstraintViolation(DbUpdateException ex)
+        {
+            return ex.InnerException is SqlException sqlEx && sqlEx.Number == 2627;
+        }
+
+        private async Task MarkNispahWriteLogFailedAsync(long logId, string errorMessage, CancellationToken ct)
+        {
+            var log = await _integrationDb.NispahWriteLogs.FindAsync([logId], ct);
+            if (log != null)
+            {
+                log.Failed = true;
+                log.ErrorMessage = errorMessage;
+                await _integrationDb.SaveChangesAsync(ct);
             }
         }
 

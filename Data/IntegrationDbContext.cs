@@ -21,6 +21,7 @@ namespace Odmon.Worker.Data
         public DbSet<EmailAlertDedup> EmailAlertDedups => Set<EmailAlertDedup>();
         public DbSet<SyncRunMetric> SyncRunMetrics => Set<SyncRunMetric>();
         public DbSet<MondayDocumentImport> MondayDocumentImports => Set<MondayDocumentImport>();
+        public DbSet<NispahWriteLog> NispahWriteLogs => Set<NispahWriteLog>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -81,6 +82,19 @@ namespace Odmon.Worker.Data
                 b.HasKey(x => x.Id);
                 b.HasIndex(x => new { x.TikVisualID, x.NispahTypeName, x.InfoHash }).IsUnique();
                 b.HasIndex(x => x.CreatedAtUtc);
+            });
+
+            modelBuilder.Entity<NispahWriteLog>(b =>
+            {
+                b.ToTable("NispahWriteLogs");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.TikCounter, x.NispahType, x.SourceItemId, x.InfoHash }).IsUnique();
+                b.HasIndex(x => x.CreatedAtUtc);
+                b.Property(x => x.NispahType).HasMaxLength(128).IsRequired();
+                b.Property(x => x.SourceKind).HasMaxLength(32).IsRequired();
+                b.Property(x => x.InfoHash).HasMaxLength(64).IsRequired();
+                b.Property(x => x.TikVisualId).HasMaxLength(64);
+                b.Property(x => x.ErrorMessage).HasMaxLength(2000);
             });
 
             modelBuilder.Entity<HearingNearestSnapshot>(b =>
