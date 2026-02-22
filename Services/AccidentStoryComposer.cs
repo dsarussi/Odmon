@@ -9,12 +9,14 @@ namespace Odmon.Worker.Services
         /// <summary>
         /// Composes a deterministic text block from multiple questionnaire column values.
         /// Returns null when all column values are empty (and none have IncludeIfEmpty).
+        /// When includeHeader is false, Text contains ONLY the Q/A bullet lines (no ItemId, timestamp, or source header).
         /// </summary>
         internal static AccidentStoryComposeResult? Compose(
             AccidentStoryColumnDef[] columnDefs,
             Dictionary<string, string> columnValues,
             long questionnaireItemId,
-            DateTime timestamp)
+            DateTime timestamp,
+            bool includeHeader = true)
         {
             var lines = new List<string>();
 
@@ -33,8 +35,16 @@ namespace Odmon.Worker.Services
             if (lines.Count == 0)
                 return null;
 
-            var header = $"סיפור תאונה (מקור: שאלון Monday, ItemId={questionnaireItemId}, תאריך={timestamp:dd/MM/yyyy HH:mm})";
-            var fullText = header + "\n" + string.Join("\n", lines);
+            string fullText;
+            if (includeHeader)
+            {
+                var header = $"סיפור תאונה (מקור: שאלון Monday, ItemId={questionnaireItemId}, תאריך={timestamp:dd/MM/yyyy HH:mm})";
+                fullText = header + "\n" + string.Join("\n", lines);
+            }
+            else
+            {
+                fullText = string.Join("\n", lines);
+            }
 
             return new AccidentStoryComposeResult
             {

@@ -173,6 +173,7 @@ hostBuilder.ConfigureServices((context, services) =>
         client.BaseAddress = new Uri("https://api.monday.com/v2/");
     });
     services.AddHttpClient("MondayFileDownload");
+    services.AddScoped<ICaseAnnexWriteStateRepository, CaseAnnexWriteStateRepository>();
     services.AddScoped<OdcanitDocumentWriter>();
     services.AddScoped<DocumentIngestionService>();
     services.AddHostedService<DocumentIngestionWorker>();

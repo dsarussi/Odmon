@@ -22,6 +22,7 @@ namespace Odmon.Worker.Data
         public DbSet<SyncRunMetric> SyncRunMetrics => Set<SyncRunMetric>();
         public DbSet<MondayDocumentImport> MondayDocumentImports => Set<MondayDocumentImport>();
         public DbSet<NispahWriteLog> NispahWriteLogs => Set<NispahWriteLog>();
+        public DbSet<CaseAnnexWriteState> CaseAnnexWriteStates => Set<CaseAnnexWriteState>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -147,6 +148,14 @@ namespace Odmon.Worker.Data
                 b.HasIndex(x => x.RunId).IsUnique();
                 b.Property(x => x.RunId).HasMaxLength(64).IsRequired();
                 b.Property(x => x.DataSource).HasMaxLength(128);
+            });
+
+            modelBuilder.Entity<CaseAnnexWriteState>(b =>
+            {
+                b.ToTable("CaseAnnexWriteState");
+                b.HasKey(x => x.TikCounter);
+                b.Property(x => x.TikCounter).ValueGeneratedNever();
+                b.Property(x => x.AccidentStoryAnnexWrittenRunId).HasMaxLength(64);
             });
 
             modelBuilder.Entity<MondayDocumentImport>(b =>

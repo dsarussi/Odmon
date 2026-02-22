@@ -2132,6 +2132,9 @@ namespace Odmon.Worker.Services
                         trimmedClientNumber,
                         columnId,
                         "label not found in Monday dropdown options");
+                    _logger.LogWarning(
+                        "SKIPPED COLUMN VALUE | ColumnId={ColumnId}, BoardId={BoardId}, TikCounter={TikCounter}, TikNumber={TikNumber}, Reason=InvalidMondayDropdownLabel",
+                        columnId, boardId, tikCounter, tikNumber ?? "<null>");
 
                     await _skipLogger.LogSkipAsync(
                         tikCounter,
@@ -2184,6 +2187,9 @@ namespace Odmon.Worker.Services
                     tikCounter,
                     tikNumber ?? "<null>",
                     ex.Message);
+                _logger.LogWarning(
+                    "SKIPPED COLUMN VALUE | ColumnId={ColumnId}, BoardId={BoardId}, TikCounter={TikCounter}, TikNumber={TikNumber}, Reason=MetadataFetchOrValidationFailure",
+                    columnId, boardId, tikCounter, tikNumber ?? "<null>");
             }
         }
 

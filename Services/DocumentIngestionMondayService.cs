@@ -291,6 +291,7 @@ namespace Odmon.Worker.Services
             }
 
             var asset = assets[0];
+            // Return URL exactly as returned by Monday; do not modify (pre-signed URLs invalidate on any change).
             var publicUrl = asset.TryGetProperty("public_url", out var urlEl) ? urlEl.GetString() : null;
             if (string.IsNullOrWhiteSpace(publicUrl))
             {

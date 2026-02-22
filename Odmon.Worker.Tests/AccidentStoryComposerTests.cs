@@ -43,6 +43,23 @@ namespace Odmon.Worker.Tests
             Assert.Contains("- האם נפתח תיק משטרה?: לא", result.Text);
         }
 
+        [Fact]
+        public void Compose_IncludeHeaderFalse_ContainsOnlyBulletLines()
+        {
+            var values = new Dictionary<string, string>
+            {
+                ["long_text_mkyes1qb"] = "נסעתי בכביש 4",
+                ["color_mkyemecs"] = "כן"
+            };
+            var result = AccidentStoryComposer.Compose(StandardColumns, values, 12345, FixedTimestamp, includeHeader: false);
+            Assert.NotNull(result);
+            Assert.DoesNotContain("ItemId=", result.Text);
+            Assert.DoesNotContain("תאריך=", result.Text);
+            Assert.DoesNotContain("מקור: שאלון Monday", result.Text);
+            Assert.Contains("- אנא פרט בדיוק מה קרה בתאונה: נסעתי בכביש 4", result.Text);
+            Assert.Contains("- האם היית לבד ברכב?: כן", result.Text);
+        }
+
         // ── Skip empty values by default ─────────────────────────────────
 
         [Fact]

@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -15,6 +17,7 @@ namespace Odmon.Worker.Services
         private readonly DocumentIngestionMondayService _mondayService;
         private readonly OdcanitDocumentWriter _documentWriter;
         private readonly NispahWriterService _nispahWriter;
+        private readonly ICaseAnnexWriteStateRepository _caseAnnexStateRepo;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IEmailNotifier _emailNotifier;
         private readonly DocumentIngestionSettings _settings;
@@ -25,13 +28,12 @@ namespace Odmon.Worker.Services
         private int _totalFailed;
         private int _totalSkipped;
 
-        private static volatile bool _nispahDedupTableMissing;
-
         public DocumentIngestionService(
             IntegrationDbContext integrationDb,
             DocumentIngestionMondayService mondayService,
             OdcanitDocumentWriter documentWriter,
             NispahWriterService nispahWriter,
+            ICaseAnnexWriteStateRepository caseAnnexStateRepo,
             IHttpClientFactory httpClientFactory,
             IEmailNotifier emailNotifier,
             IOptions<DocumentIngestionSettings> settings,
@@ -41,13 +43,14 @@ namespace Odmon.Worker.Services
             _mondayService = mondayService;
             _documentWriter = documentWriter;
             _nispahWriter = nispahWriter;
+            _caseAnnexStateRepo = caseAnnexStateRepo;
             _httpClientFactory = httpClientFactory;
             _emailNotifier = emailNotifier;
             _settings = settings.Value;
             _logger = logger;
         }
 
-        public async Task RunIngestionAsync(CancellationToken ct)
+        public async Task RunIngestionAsync(CancellationToken ct, string? runId = null)
         {
             _totalProcessed = 0;
             _totalSucceeded = 0;
@@ -77,7 +80,7 @@ namespace Odmon.Worker.Services
 
                 try
                 {
-                    await ProcessQuestionnaireItemAsync(item, ct);
+                    await ProcessQuestionnaireItemAsync(item, ct, runId);
                 }
                 catch (Exception ex)
                 {
@@ -92,7 +95,7 @@ namespace Odmon.Worker.Services
         }
 
         private async Task ProcessQuestionnaireItemAsync(
-            DocumentIngestionMondayService.QuestionnaireItem item, CancellationToken ct)
+            DocumentIngestionMondayService.QuestionnaireItem item, CancellationToken ct, string? runId = null)
         {
             var hasFiles = item.FileColumns.Count > 0;
             var accidentStoryEnabled = _settings.IsAccidentStoryEnabled;
@@ -187,7 +190,7 @@ namespace Odmon.Worker.Services
             if (accidentStoryEnabled)
             {
                 await ProcessAccidentStoryAsync(
-                    item.ItemId, linkedCaseItemId, tikVisualID, tikCounter.Value, ct);
+                    item.ItemId, linkedCaseItemId, tikVisualID, tikCounter.Value, ct, runId);
             }
         }
 
@@ -385,6 +388,10 @@ namespace Odmon.Worker.Services
         }
 
         // ───────── Step 1: Download ─────────
+        // Pre-signed URLs (e.g. S3 with X-Amz-Signature) are invalidated by any change. Use the exact URL
+        // from Monday; do not add query params (e.g. response-content-disposition) or parse/rebuild the URL.
+        // Manual test: Re-run worker for AssetId=198847023, ItemId=2728213714; expect HTTP 200 and file saved.
+        // If 403: check UrlWasModified=false and UrlHashPrefix change between attempts (fresh URL per retry).
 
         private async Task DownloadAssetToInboxAsync(
             MondayDocumentImport record, long assetId, string tikVisualID, int tikCounter, CancellationToken ct,
@@ -407,6 +414,14 @@ namespace Odmon.Worker.Services
                 throw new InvalidOperationException(
                     $"Asset {assetId} size {assetInfo.FileSize} exceeds max {_settings.MaxFileSizeBytes} bytes");
 
+            // Use the exact URL from Monday as an opaque string; never add/remove/normalize query params.
+            var downloadUrl = assetInfo.PublicUrl;
+            var (urlHashPrefix, urlLength, hasAmzSignature) = GetDownloadUrlDiagnostics(downloadUrl);
+            const bool urlWasModified = false;
+            _logger.LogInformation(
+                "DOCINGESTION DOWNLOAD URL (opaque) | AssetId={AssetId}, UrlHashPrefix={UrlHashPrefix}, UrlLength={UrlLength}, HasAmzSignature={HasAmzSignature}, UrlWasModified={UrlWasModified}",
+                assetId, urlHashPrefix, urlLength, hasAmzSignature, urlWasModified);
+
             var allowlist = _settings.AllowedExtensions;
             ExtensionDetectionResult? detection = TryDetectExtensionFromMetadata(assetInfo.Name, assetInfo.FileExtension, allowlist);
 
@@ -414,15 +429,19 @@ namespace Odmon.Worker.Services
             HttpResponseMessage? response = null;
             try
             {
-                response = await downloadClient.GetAsync(assetInfo.PublicUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+                response = await downloadClient.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, ct);
                 response.EnsureSuccessStatusCode();
             }
             catch (HttpRequestException ex)
             {
                 var statusCode = response?.StatusCode;
+                var statusCodeInt = statusCode.HasValue ? (int)statusCode.Value : 0;
                 _logger.LogWarning(ex,
-                    "DOCINGESTION STAGE=DOWNLOAD FAILED | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, {Attempt}, StatusCode={StatusCode}, Error={Error}",
-                    assetId, record.MondayQuestionnaireItemId, tikCounter, attemptLabel, (int?)statusCode ?? 0, ex.Message);
+                    "DOCINGESTION STAGE=DOWNLOAD FAILED | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, {Attempt}, StatusCode={StatusCode}, UrlHashPrefix={UrlHashPrefix}, UrlLength={UrlLength}, HasAmzSignature={HasAmzSignature}, UrlWasModified={UrlWasModified}, Error={Error}",
+                    assetId, record.MondayQuestionnaireItemId, tikCounter, attemptLabel, statusCodeInt, urlHashPrefix, urlLength, hasAmzSignature, urlWasModified, ex.Message);
+                if (statusCodeInt == 403)
+                    _logger.LogWarning(
+                        "DOCINGESTION 403: If UrlWasModified=false and URL is fresh per attempt, likely cause is permission/scope or expired pre-signed URL; otherwise check for URL tampering.");
                 throw;
             }
 
@@ -771,14 +790,14 @@ namespace Odmon.Worker.Services
                 "DocumentIngestionService");
         }
 
-        // ───────── Accident Story → Odcanit Nispah (multi-column, idempotent) ─────────
+        // ───────── Accident Story → Odcanit Nispah (idempotent via CaseAnnexWriteState per TikCounter) ─────────
 
         internal const string NispahSourceKindAccidentStory = "AccidentStory";
         internal const string NispahSourceKindPdfAsset = "PdfAsset";
 
         private async Task ProcessAccidentStoryAsync(
             long questionnaireItemId, long linkedCaseItemId,
-            string tikVisualID, int tikCounter, CancellationToken ct)
+            string tikVisualID, int tikCounter, CancellationToken ct, string? runId = null)
         {
             var nispahType = _settings.ResolvedNispahType;
             var columnDefs = ResolveAccidentStoryColumnDefs();
@@ -797,6 +816,28 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            // Idempotency: persistent per-case flag in Integration DB. No text matching; no header/marker in Odcanit note.
+            CaseAnnexWriteState state;
+            try
+            {
+                state = await _caseAnnexStateRepo.GetOrCreateStateAsync(tikCounter, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "ACCIDENTSTORY state read failed | TikCounter={TikCounter}, TikVisualID={TikVisualID}, RunId={RunId}",
+                    tikCounter, tikVisualID, runId ?? "");
+                return;
+            }
+
+            if (state.AccidentStoryAnnexWritten)
+            {
+                _logger.LogInformation(
+                    "ACCIDENT STORY SKIP | AlreadyWritten=true | TikCounter={TikCounter} TikNumber={TikNumber} RunId={RunId}",
+                    tikCounter, tikVisualID, runId ?? "");
+                return;
+            }
+
             var columnIds = columnDefs.Select(c => c.ColumnId).ToArray();
 
             Dictionary<string, string> columnValues;
@@ -812,8 +853,9 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            // Compose note text ONLY from Monday Q/A bullet lines (no ItemId, timestamp, source header, TikNumber, RunId).
             var result = AccidentStoryComposer.Compose(
-                columnDefs, columnValues, questionnaireItemId, DateTime.Now);
+                columnDefs, columnValues, questionnaireItemId, DateTime.Now, includeHeader: false);
 
             if (result == null)
             {
@@ -824,49 +866,10 @@ namespace Odmon.Worker.Services
             }
 
             _logger.LogInformation(
-                "ACCIDENTSTORY COMPOSED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, LinesIncluded={LinesIncluded}, TextLength={TextLength}, ContentHash={ContentHash}",
-                tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId,
-                result.LinesIncluded, result.Text.Length, result.ContentHash);
-
-            // Idempotency: insert into NispahWriteLog first. Unique (TikCounter, NispahType, SourceItemId, InfoHash) prevents duplicates across runs and concurrent processes.
-            var logEntry = new NispahWriteLog
-            {
-                TikCounter = tikCounter,
-                TikVisualId = tikVisualID,
-                NispahType = nispahType,
-                SourceKind = NispahSourceKindAccidentStory,
-                SourceItemId = questionnaireItemId,
-                SourceAssetId = null,
-                InfoHash = result.ContentHash,
-                CreatedAtUtc = DateTime.UtcNow,
-                Failed = false
-            };
-
-            try
-            {
-                _integrationDb.NispahWriteLogs.Add(logEntry);
-                await _integrationDb.SaveChangesAsync(ct);
-            }
-            catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
-            {
-                _logger.LogInformation(
-                    "ACCIDENTSTORY IDEMPOTENT SKIP | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType={NispahType}, InfoHash={InfoHash}, CorrelationKeys=TikCounter,SourceItemId,InfoHash",
-                    tikCounter, tikVisualID, questionnaireItemId, nispahType, result.ContentHash);
-                return;
-            }
-            catch (DbUpdateException ex) when (ex.InnerException is SqlException sqlEx && sqlEx.Number == 208)
-            {
-                _logger.LogWarning(
-                    "ACCIDENTSTORY SKIP (NispahWriteLogs table missing, SqlException 208) | TikCounter={TikCounter}, ItemId={ItemId} — run EF migration AddNispahWriteLog",
-                    tikCounter, questionnaireItemId);
-                return;
-            }
+                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, RunId={RunId}, NispahType='{NispahType}', TextLength={TextLength}",
+                tikCounter, tikVisualID, questionnaireItemId, runId ?? "", nispahType, result.Text.Length);
 
             var correlationId = $"accidentstory-{questionnaireItemId}";
-
-            _logger.LogInformation(
-                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType='{NispahType}', TextLength={TextLength}, LogId={LogId}",
-                tikCounter, tikVisualID, questionnaireItemId, nispahType, result.Text.Length, logEntry.Id);
 
             try
             {
@@ -875,24 +878,23 @@ namespace Odmon.Worker.Services
 
                 if (success)
                 {
+                    await _caseAnnexStateRepo.MarkAccidentStoryWrittenAsync(tikCounter, runId, ct);
                     _logger.LogInformation(
-                        "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, NispahType='{NispahType}', LinesIncluded={LinesIncluded}, TextLength={TextLength}, LogId={LogId}",
-                        tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, nispahType, result.LinesIncluded, result.Text.Length, logEntry.Id);
+                        "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, RunId={RunId}, NispahType='{NispahType}', LinesIncluded={LinesIncluded}",
+                        tikCounter, tikVisualID, questionnaireItemId, runId ?? "", nispahType, result.LinesIncluded);
                 }
                 else
                 {
-                    await MarkNispahWriteLogFailedAsync(logEntry.Id, "Blocked by NispahWriter guardrails", ct);
                     _logger.LogWarning(
-                        "ACCIDENTSTORY BLOCKED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, NispahType='{NispahType}', LogId={LogId} — blocked by NispahWriter guardrails",
-                        tikCounter, tikVisualID, questionnaireItemId, nispahType, logEntry.Id);
+                        "ACCIDENTSTORY BLOCKED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, RunId={RunId} — NispahWriter guardrails",
+                        tikCounter, tikVisualID, questionnaireItemId, runId ?? "");
                 }
             }
             catch (Exception ex)
             {
-                await MarkNispahWriteLogFailedAsync(logEntry.Id, ex.Message.Length > 2000 ? ex.Message[..2000] : ex.Message, ct);
                 _logger.LogError(ex,
-                    "ACCIDENTSTORY FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId}, NispahType='{NispahType}', TextLength={TextLength}, LogId={LogId}, Error={Error}",
-                    tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId, nispahType, result.Text.Length, logEntry.Id, ex.Message);
+                    "ACCIDENTSTORY FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, RunId={RunId}, Error={Error}",
+                    tikCounter, tikVisualID, questionnaireItemId, runId ?? "", ex.Message);
 
                 SendAlert(
                     $"Accident story nispah write failed for TikVisualID={tikVisualID}",
@@ -904,17 +906,6 @@ namespace Odmon.Worker.Services
         internal static bool IsUniqueConstraintViolation(DbUpdateException ex)
         {
             return ex.InnerException is SqlException sqlEx && sqlEx.Number == 2627;
-        }
-
-        private async Task MarkNispahWriteLogFailedAsync(long logId, string errorMessage, CancellationToken ct)
-        {
-            var log = await _integrationDb.NispahWriteLogs.FindAsync([logId], ct);
-            if (log != null)
-            {
-                log.Failed = true;
-                log.ErrorMessage = errorMessage;
-                await _integrationDb.SaveChangesAsync(ct);
-            }
         }
 
         /// <summary>
@@ -1006,6 +997,18 @@ namespace Odmon.Worker.Services
             var len = name.Length;
             var prefix = name.Length <= prefixLen ? name : name[..prefixLen] + "...";
             return $"len={len} prefix={prefix}";
+        }
+
+        /// <summary>Safe URL diagnostics for logging. Never log the URL or query string.</summary>
+        internal static (string UrlHashPrefix, int UrlLength, bool HasAmzSignature) GetDownloadUrlDiagnostics(string? url)
+        {
+            if (string.IsNullOrEmpty(url))
+                return ("", 0, false);
+            var bytes = Encoding.UTF8.GetBytes(url);
+            var hash = SHA256.HashData(bytes);
+            var prefix = Convert.ToHexString(hash.AsSpan(0, 4));
+            var hasAmz = url.Contains("X-Amz-Signature", StringComparison.OrdinalIgnoreCase);
+            return (prefix, url.Length, hasAmz);
         }
 
         // ───────── Helpers ─────────

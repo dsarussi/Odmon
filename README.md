@@ -96,6 +96,16 @@ Enable in `appsettings.json` or environment variables:
 
 See `docs/CONFIGURATION.md` for the full list of keys.
 
+### Manual test: Monday file download (pre-signed URLs)
+
+Download URLs from Monday may be S3 pre-signed (with `X-Amz-Signature`). Any change to the URL invalidates the signature and yields **403 Forbidden**. The worker uses the exact URL returned by Monday and does not add query parameters.
+
+To verify after a 403 fix:
+
+1. Re-run the Document Ingestion worker for the same item/asset (e.g. AssetId=198847023, ItemId=2728213714).
+2. **Expected:** HTTP 200 for the GET to the Monday/S3 URL and file saved locally; downstream ingestion proceeds.
+3. **If still 403:** Check logs for `UrlWasModified=false` and that `UrlHashPrefix` changes between retry attempts (fresh URL per attempt). If so, the cause is likely permission scope or expired pre-signed URL; otherwise check for URL tampering. Never log the full URL or query string.
+
 ## Running the Service
 
 ```bash
@@ -108,4 +118,57 @@ Or build and run:
 dotnet build
 dotnet run
 ```
+
+---
+
+## Release Checklist
+
+### Local (dev machine)
+
+1. **Source control**
+   ```bash
+   git status
+   git pull origin dev
+   # After changes: git add . && git commit -m "..." && git push origin dev
+   ```
+2. **Tests**
+   ```bash
+   dotnet test
+   ```
+3. **Release build**
+   ```bash
+   dotnet build -c Release
+   ```
+
+### Server (Windows Server deployment)
+
+1. **Stop the Windows service**
+   - Stop the ODMON Windows service (e.g. Services.msc → Odmon Worker → Stop).
+2. **Update code**
+   ```bash
+   git pull origin dev
+   ```
+3. **Apply IntegrationDb migrations**
+   ```bash
+   dotnet ef database update --context IntegrationDbContext --project Odmon.Worker
+   ```
+4. **Configuration**
+   - Update appsettings, environment variables, or secrets as needed (Monday token, SMTP/email, Serilog paths).
+   - Ensure no secrets are committed; use Key Vault or env vars.
+5. **Restart the worker**
+   - Start the ODMON Windows service (or redeploy).
+6. **Verify first run**
+   - Check logs for: EmailBackgroundService startup, SyncRunMetric writes, cooling-period behaviour (`ELIGIBLE DUE TO COOLING PERIOD END` / `COOLING FILTERED`).
+   - Confirm no 403s on Monday file download if document ingestion is enabled.
+
+### Serilog (production)
+
+- Minimum level: **Information** (default in `appsettings.json`).
+- **Microsoft.EntityFrameworkCore** overridden to **Warning**.
+- Rolling file: day + `retainedFileCountLimit` (e.g. 14); optional `fileSizeLimitBytes` + `rollOnFileSizeLimit`.
+- For UTC timestamps in logs, set server timezone to UTC or add a Serilog enricher.
+
+### Known risk (no behavior change)
+
+- **SyncService** (around line 398–400): hardcoded `TikCounter == 31490` is treated as an explicit test case for sync. Recommendation: move to config (e.g. `Safety:ExplicitTestTikCounters`) or remove for production if no longer needed.
 

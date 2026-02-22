@@ -103,6 +103,9 @@ namespace Odmon.Worker.Services
 
                     if (nowIsrael >= eligibleFrom)
                     {
+                        _logger.LogInformation(
+                            "ELIGIBLE DUE TO COOLING PERIOD END: TikCounter={TikCounter}, TikNumber={TikNumber}, EligibleFromIsraelDate={EligibleFromIsraelDate}, NowIsrael={NowIsrael}",
+                            c.TikCounter, c.TikNumber ?? "<null>", eligibleFrom, nowIsrael);
                         cooled.Add(c);
                     }
                     else

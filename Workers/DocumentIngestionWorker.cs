@@ -77,7 +77,7 @@ namespace Odmon.Worker.Workers
 
                     using var scope = _scopeFactory.CreateScope();
                     var service = scope.ServiceProvider.GetRequiredService<DocumentIngestionService>();
-                    await service.RunIngestionAsync(stoppingToken);
+                    await service.RunIngestionAsync(stoppingToken, runId);
 
                     _totalRunsCompleted++;
                     _logger.LogInformation("DocumentIngestionWorker run {RunId} completed", runId);

@@ -493,6 +493,38 @@ namespace Odmon.Worker.Tests
             Assert.Null(result);
         }
 
+        // ── GetDownloadUrlDiagnostics (safe logging; never log full URL) ───
+
+        [Fact]
+        public void GetDownloadUrlDiagnostics_Empty_ReturnsZeroLengthAndNoHash()
+        {
+            var (prefix, length, hasAmz) = DocumentIngestionService.GetDownloadUrlDiagnostics(null);
+            Assert.Equal("", prefix);
+            Assert.Equal(0, length);
+            Assert.False(hasAmz);
+        }
+
+        [Fact]
+        public void GetDownloadUrlDiagnostics_UrlWithAmzSignature_SetsHasAmzSignatureTrue()
+        {
+            var url = "https://bucket.s3.amazonaws.com/key?X-Amz-Algorithm=HMAC&X-Amz-Signature=abc123";
+            var (prefix, length, hasAmz) = DocumentIngestionService.GetDownloadUrlDiagnostics(url);
+            Assert.Equal(8, prefix.Length);
+            Assert.True(prefix.All(c => char.IsAsciiHexDigit(c)));
+            Assert.Equal(url.Length, length);
+            Assert.True(hasAmz);
+        }
+
+        [Fact]
+        public void GetDownloadUrlDiagnostics_UrlWithoutAmz_HasAmzSignatureFalse()
+        {
+            var url = "https://example.com/file.pdf";
+            var (prefix, length, hasAmz) = DocumentIngestionService.GetDownloadUrlDiagnostics(url);
+            Assert.Equal(8, prefix.Length);
+            Assert.Equal(url.Length, length);
+            Assert.False(hasAmz);
+        }
+
         // ── SafeFileName (columnSlug_tikSlug_assetId.ext) ─────────────────
 
         [Fact]

@@ -115,6 +115,15 @@ namespace Odmon.Worker.Tests
             Assert.Equal(start, eligible);
         }
 
+        [Fact]
+        public void CoolingEligibility_EligibleFromDate_IsComputedInIsraelBusinessDays()
+        {
+            // Eligible-from is the calendar date after N Israeli business days; may fall on Fri/Sat.
+            var openSunday = new DateOnly(2026, 2, 15);
+            var eligible = SyncService.AddIsraeliBusinessDays(openSunday, 3);
+            Assert.Equal(new DateOnly(2026, 2, 18), eligible);
+        }
+
         // ====================================================================
         // IsIsraeliBusinessDay
         // ====================================================================
