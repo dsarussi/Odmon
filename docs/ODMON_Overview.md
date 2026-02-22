@@ -51,6 +51,7 @@ ODMON is a .NET 8 Worker Service that synchronizes case data from the Odcanit/Od
   - Downloads files to a local inbox, calls `dbo.ProcDocuments_AddNewDocument` with MoveFile=3
   - Copies files to the DestPath returned by the SP, verifies, and cleans up
   - Deduplicates by (MondayQuestionnaireItemId, ColumnId, AssetId) in MondayDocumentImports table
+  - Nispah (e.g. accident story) writes use Integration DB dedup table `NispahDeduplications`; duplicate-key (2601/2627) is treated as skip and does not trigger critical alerts. See [NISPAH_DEDUP_AND_INCIDENT_ALERTS.md](NISPAH_DEDUP_AND_INCIDENT_ALERTS.md).
 
 - **OdcanitDocumentWriter**: Calls Odcanit stored procedures for document creation
   - Resolves TikCounter from TikVisualID via dbo.MainTik (tries column "TikCounter" then "Counter" for DB compatibility)

@@ -816,24 +816,21 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            // Idempotency: persistent per-case flag in Integration DB. No text matching; no header/marker in Odcanit note.
-            CaseAnnexWriteState state;
+            // Guard before write: idempotency via per-case state. No Odcanit write or dedup insert if already written.
             try
             {
-                state = await _caseAnnexStateRepo.GetOrCreateStateAsync(tikCounter, ct);
+                if (await IsAccidentStoryAlreadyWrittenAsync(_caseAnnexStateRepo, tikCounter, ct))
+                {
+                    _logger.LogInformation(
+                        "ACCIDENTSTORY already written, skip | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, RunId={RunId}, reason=already written",
+                        tikCounter, tikVisualID, nispahType, runId ?? "");
+                    return;
+                }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex,
                     "ACCIDENTSTORY state read failed | TikCounter={TikCounter}, TikVisualID={TikVisualID}, RunId={RunId}",
-                    tikCounter, tikVisualID, runId ?? "");
-                return;
-            }
-
-            if (state.AccidentStoryAnnexWritten)
-            {
-                _logger.LogInformation(
-                    "ACCIDENT STORY SKIP | AlreadyWritten=true | TikCounter={TikCounter} TikNumber={TikNumber} RunId={RunId}",
                     tikCounter, tikVisualID, runId ?? "");
                 return;
             }
@@ -865,9 +862,10 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            var infoHashPrefix = GetInfoHashPrefix(result.Text);
             _logger.LogInformation(
-                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, RunId={RunId}, NispahType='{NispahType}', TextLength={TextLength}",
-                tikCounter, tikVisualID, questionnaireItemId, runId ?? "", nispahType, result.Text.Length);
+                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, InfoHashPrefix={InfoHashPrefix}, RunId={RunId}, TextLength={TextLength}",
+                tikCounter, tikVisualID, nispahType, infoHashPrefix, runId ?? "", result.Text.Length);
 
             var correlationId = $"accidentstory-{questionnaireItemId}";
 
@@ -878,7 +876,26 @@ namespace Odmon.Worker.Services
 
                 if (success)
                 {
-                    await _caseAnnexStateRepo.MarkAccidentStoryWrittenAsync(tikCounter, runId, ct);
+                    _logger.LogInformation(
+                        "ACCIDENTSTORY state update: about to mark written | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, InfoHashPrefix={InfoHashPrefix}, RunId={RunId}",
+                        tikCounter, tikVisualID, nispahType, infoHashPrefix, runId ?? "");
+                    try
+                    {
+                        await _caseAnnexStateRepo.MarkAccidentStoryWrittenAsync(tikCounter, runId, ct);
+                        _logger.LogInformation(
+                            "ACCIDENTSTORY state update: marked written | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, InfoHashPrefix={InfoHashPrefix}, RunId={RunId}, reason=written ok",
+                            tikCounter, tikVisualID, nispahType, infoHashPrefix, runId ?? "");
+                    }
+                    catch (Exception stateEx)
+                    {
+                        _logger.LogError(stateEx,
+                            "ACCIDENTSTORY state update failed | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, RunId={RunId}, reason=state update failed",
+                            tikCounter, tikVisualID, nispahType, runId ?? "");
+                        SendAlert(
+                            $"Accident story state update failed for TikVisualID={tikVisualID} (repeated writes may occur)",
+                            null, stateEx);
+                        return;
+                    }
                     _logger.LogInformation(
                         "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, RunId={RunId}, NispahType='{NispahType}', LinesIncluded={LinesIncluded}",
                         tikCounter, tikVisualID, questionnaireItemId, runId ?? "", nispahType, result.LinesIncluded);
@@ -892,6 +909,16 @@ namespace Odmon.Worker.Services
             }
             catch (Exception ex)
             {
+                // Dedup idempotency: SQL unique violation (2601/2627) = already written in a previous run — mark written and skip, no critical alert.
+                if (ex is DbUpdateException dbEx && NispahWriterService.IsSqlUniqueViolation(dbEx))
+                {
+                    await _caseAnnexStateRepo.MarkAccidentStoryWrittenAsync(tikCounter, runId, ct);
+                    _logger.LogWarning(
+                        "ACCIDENTSTORY dedup key already exists (skip, marked written) | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, RunId={RunId}, reason=dedup hit",
+                        tikCounter, tikVisualID, nispahType, runId ?? "");
+                    return;
+                }
+
                 _logger.LogError(ex,
                     "ACCIDENTSTORY FAILED | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, RunId={RunId}, Error={Error}",
                     tikCounter, tikVisualID, questionnaireItemId, runId ?? "", ex.Message);
@@ -902,10 +929,27 @@ namespace Odmon.Worker.Services
             }
         }
 
-        /// <summary>True when the exception is a SQL unique constraint violation (2627).</summary>
+        /// <summary>True when the exception is a SQL unique constraint violation (2627). For 2601+2627 use NispahWriterService.IsSqlUniqueViolation.</summary>
         internal static bool IsUniqueConstraintViolation(DbUpdateException ex)
         {
             return ex.InnerException is SqlException sqlEx && sqlEx.Number == 2627;
+        }
+
+        /// <summary>First 8 characters of SHA256 hex of text (for diagnostic logging). Matches NispahWriterService hash semantics.</summary>
+        private static string GetInfoHashPrefix(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            using var sha256 = SHA256.Create();
+            var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(text));
+            var hex = Convert.ToHexString(hash).ToLowerInvariant();
+            return hex.Length >= 8 ? hex[..8] : hex;
+        }
+
+        /// <summary>Returns true if the accident story annex is already written for this TikCounter. Used for guard-before-write; exposed for unit tests.</summary>
+        internal static async Task<bool> IsAccidentStoryAlreadyWrittenAsync(ICaseAnnexWriteStateRepository repo, int tikCounter, CancellationToken ct = default)
+        {
+            var state = await repo.GetOrCreateStateAsync(tikCounter, ct);
+            return state.AccidentStoryAnnexWritten;
         }
 
         /// <summary>

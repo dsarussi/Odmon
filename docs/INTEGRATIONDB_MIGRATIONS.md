@@ -30,6 +30,8 @@ or
 `HEALTHCHECK | NispahDeduplications table NOT FOUND in IntegrationDb (SqlException 208)...`  
 if the table is missing.
 
+**Dedup idempotency:** Duplicate-key violations (SQL 2601/2627) when inserting into `NispahDeduplications` are treated as a normal skip (no exception, no critical alert). See [NISPAH_DEDUP_AND_INCIDENT_ALERTS.md](NISPAH_DEDUP_AND_INCIDENT_ALERTS.md) for behavior, incident classification, and accident story flow.
+
 ## Migration: AddNispahDedupAndAuditTables
 
 - **Migration name:** `20260220112714_AddNispahDedupAndAuditTables`

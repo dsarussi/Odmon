@@ -61,5 +61,64 @@ namespace Odmon.Worker.Tests
 
             Assert.True(state.AccidentStoryAnnexWritten);
         }
+
+        /// <summary>
+        /// When dedup hit (2601/2627) is handled, we mark the case written so it is not re-processed.
+        /// This test verifies that calling MarkAccidentStoryWrittenAsync (as the dedup-handler does) sets Written + AtUtc + RunId.
+        /// </summary>
+        [Fact]
+        public async Task DedupHit_MarkWritten_SetsFlagAndStopsReprocessing()
+        {
+            await using var db = CreateInMemoryContext();
+            var repo = new CaseAnnexWriteStateRepository(db);
+            await repo.GetOrCreateStateAsync(39283, default);
+
+            // Simulate what DocumentIngestionService does on dedup hit (2601/2627): mark written so next run skips.
+            await repo.MarkAccidentStoryWrittenAsync(39283, "run-dedup-hit", default);
+
+            var state = await repo.GetOrCreateStateAsync(39283, default);
+            Assert.True(state.AccidentStoryAnnexWritten);
+            Assert.NotNull(state.AccidentStoryAnnexWrittenAtUtc);
+            Assert.Equal("run-dedup-hit", state.AccidentStoryAnnexWrittenRunId);
+        }
+
+        /// <summary>
+        /// When state is already written, IsAccidentStoryAlreadyWrittenAsync returns true so ProcessAccidentStoryAsync skips without calling the writer.
+        /// Uses a fake repo that returns Written=true.
+        /// </summary>
+        [Fact]
+        public async Task IsAccidentStoryAlreadyWrittenAsync_WhenStateWritten_ReturnsTrue()
+        {
+            var fakeRepo = new FakeStateRepoWrittenTrue();
+            var result = await DocumentIngestionService.IsAccidentStoryAlreadyWrittenAsync(fakeRepo, 39283, default);
+            Assert.True(result);
+        }
+
+        /// <summary>
+        /// Success path: when MarkAccidentStoryWrittenAsync is called exactly once, state is persisted (so no repeated writes).
+        /// </summary>
+        [Fact]
+        public async Task SuccessPath_MarkAccidentStoryWrittenAsync_CalledOnce_StatePersisted()
+        {
+            await using var db = CreateInMemoryContext();
+            var repo = new CaseAnnexWriteStateRepository(db);
+            await repo.GetOrCreateStateAsync(39283, default);
+
+            await repo.MarkAccidentStoryWrittenAsync(39283, "run-success", default);
+
+            var state = await repo.GetOrCreateStateAsync(39283, default);
+            Assert.True(state.AccidentStoryAnnexWritten);
+            Assert.NotNull(state.AccidentStoryAnnexWrittenAtUtc);
+            Assert.Equal("run-success", state.AccidentStoryAnnexWrittenRunId);
+        }
+
+        private sealed class FakeStateRepoWrittenTrue : ICaseAnnexWriteStateRepository
+        {
+            public Task<CaseAnnexWriteState> GetOrCreateStateAsync(int tikCounter, CancellationToken ct = default) =>
+                Task.FromResult(new CaseAnnexWriteState { TikCounter = tikCounter, AccidentStoryAnnexWritten = true });
+
+            public Task MarkAccidentStoryWrittenAsync(int tikCounter, string? runId = null, CancellationToken ct = default) =>
+                Task.CompletedTask;
+        }
     }
 }

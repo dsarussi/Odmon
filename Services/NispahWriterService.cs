@@ -386,22 +386,23 @@ namespace Odmon.Worker.Services
         {
             if (_nispahDedupTableMissing) return;
 
+            var dedup = new NispahDeduplication
+            {
+                CreatedAtUtc = createdAtUtc,
+                TikVisualID = tikVisualID,
+                NispahTypeName = nispahTypeName,
+                InfoHash = infoHash
+            };
+
             try
             {
-                var dedup = new NispahDeduplication
-                {
-                    CreatedAtUtc = createdAtUtc,
-                    TikVisualID = tikVisualID,
-                    NispahTypeName = nispahTypeName,
-                    InfoHash = infoHash
-                };
-
                 _integrationDb.NispahDeduplications.Add(dedup);
                 await _integrationDb.SaveChangesAsync(ct);
             }
-            catch (DbUpdateException ex) when (ex.InnerException is SqlException sqlEx && IsDuplicateKeySqlError(sqlEx.Number))
+            catch (DbUpdateException ex) when (IsSqlUniqueViolation(ex))
             {
-                // Idempotent: duplicate key (unique index UX_NispahDedup / constraint) — treat as skip, do not log exception (no stack trace).
+                // Idempotent: duplicate key (2601/2627) — treat as skip; do not log exception (no stack trace). Clean tracker so subsequent SaveChanges is not poisoned.
+                _integrationDb.Entry(dedup).State = EntityState.Detached;
                 _logger.LogInformation(
                     "Nispah dedup exists -> skipped | TikVisualID={TikVisualID}, NispahTypeName={NispahTypeName}, InfoHash={InfoHash}",
                     tikVisualID, nispahTypeName, infoHash);
@@ -421,6 +422,15 @@ namespace Odmon.Worker.Services
         internal static bool IsDuplicateKeySqlError(int sqlErrorNumber)
         {
             return sqlErrorNumber == 2601 || sqlErrorNumber == 2627;
+        }
+
+        /// <summary>
+        /// Returns true if the exception is a SQL Server unique constraint/index violation (SqlException 2601 or 2627),
+        /// e.g. when inserting a duplicate dedup row. Used to treat as skip and avoid critical incident email.
+        /// </summary>
+        internal static bool IsSqlUniqueViolation(DbUpdateException ex)
+        {
+            return ex?.InnerException is SqlException sqlEx && IsDuplicateKeySqlError(sqlEx.Number);
         }
 
         internal async Task PersistAuditLogAsync(NispahAuditLog auditLog, CancellationToken ct)

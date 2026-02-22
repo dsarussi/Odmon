@@ -81,5 +81,38 @@ namespace Odmon.Worker.Tests
             Assert.False(NispahWriterService.IsDuplicateKeySqlError(547));
             Assert.False(NispahWriterService.IsDuplicateKeySqlError(0));
         }
+
+        // ── IsSqlUniqueViolation (DbUpdateException → no critical alert) ───
+
+        [Fact]
+        public void IsSqlUniqueViolation_DbUpdateWith2601_ReturnsTrue()
+        {
+            var sqlEx = SqlExceptionTestHelper.Create(2601, "Cannot insert duplicate key in object 'dbo.NispahDeduplications'.");
+            var dbEx = new DbUpdateException("An error occurred while saving.", sqlEx);
+            Assert.True(NispahWriterService.IsSqlUniqueViolation(dbEx));
+        }
+
+        [Fact]
+        public void IsSqlUniqueViolation_DbUpdateWith2627_ReturnsTrue()
+        {
+            var sqlEx = SqlExceptionTestHelper.Create(2627, "Violation of UNIQUE KEY constraint.");
+            var dbEx = new DbUpdateException("An error occurred while saving.", sqlEx);
+            Assert.True(NispahWriterService.IsSqlUniqueViolation(dbEx));
+        }
+
+        [Fact]
+        public void IsSqlUniqueViolation_DbUpdateWith208_ReturnsFalse()
+        {
+            var sqlEx = SqlExceptionTestHelper.Create(208, "Invalid object name.");
+            var dbEx = new DbUpdateException("An error occurred while saving.", sqlEx);
+            Assert.False(NispahWriterService.IsSqlUniqueViolation(dbEx));
+        }
+
+        [Fact]
+        public void IsSqlUniqueViolation_NullOrNonSqlInner_ReturnsFalse()
+        {
+            Assert.False(NispahWriterService.IsSqlUniqueViolation(new DbUpdateException("msg", new InvalidOperationException())));
+            Assert.False(NispahWriterService.IsSqlUniqueViolation(new DbUpdateException("msg", (Exception?)null)));
+        }
     }
 }

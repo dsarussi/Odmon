@@ -96,6 +96,8 @@ Enable in `appsettings.json` or environment variables:
 
 See `docs/CONFIGURATION.md` for the full list of keys.
 
+Nispah (e.g. accident story) writes use Integration DB dedup and per-case state; duplicate-key (SQL 2601/2627) is treated as skip and does not trigger critical alerts. See `docs/NISPAH_DEDUP_AND_INCIDENT_ALERTS.md` and `docs/CHANGELOG_2026-02-20.md` for recent changes.
+
 ### Manual test: Monday file download (pre-signed URLs)
 
 Download URLs from Monday may be S3 pre-signed (with `X-Amz-Signature`). Any change to the URL invalidates the signature and yields **403 Forbidden**. The worker uses the exact URL returned by Monday and does not add query parameters.
