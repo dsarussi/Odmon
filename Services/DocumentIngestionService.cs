@@ -352,6 +352,9 @@ namespace Odmon.Worker.Services
                 throw new InvalidOperationException(
                     $"Asset {assetId} size {assetInfo.FileSize} exceeds max {_settings.MaxFileSizeBytes} bytes");
 
+            var allowlist = _settings.AllowedExtensions;
+            ExtensionDetectionResult? detection = TryDetectExtensionFromMetadata(assetInfo.Name, assetInfo.FileExtension, allowlist);
+
             using var downloadClient = _httpClientFactory.CreateClient("MondayFileDownload");
             HttpResponseMessage? response = null;
             try
@@ -368,22 +371,34 @@ namespace Odmon.Worker.Services
                 throw;
             }
 
-            var contentType = response!.Content.Headers.ContentType?.MediaType;
-            var ext = GetAllowedExtension(
-                assetInfo.Name,
-                assetInfo.FileExtension,
-                assetInfo.PublicUrl,
-                contentType,
-                _settings.AllowedExtensions);
+            if (detection == null)
+                detection = TryDetectExtensionFromContentType(response!.Content.Headers.ContentType?.MediaType, allowlist);
 
-            if (string.IsNullOrEmpty(ext))
+            byte[]? magicBuffer = null;
+            Stream? contentStreamForMagic = null;
+            if (detection == null)
             {
-                _logger.LogWarning(
-                    "DOCINGESTION SKIP no valid extension | AssetId={AssetId}, ItemId={ItemId}, OriginalFileNameLog={OriginalFileNameLog}, Url={Url}, Allowlist=[{Allowlist}]",
-                    assetId, record.MondayQuestionnaireItemId, SafeFileNameForLog(assetInfo.Name), assetInfo.PublicUrl, string.Join(",", _settings.AllowedExtensions));
-                throw new InvalidOperationException(
-                    $"No allowed extension for asset {assetId} (OriginalFileName/Url/ContentType did not yield pdf,jpg,jpeg,png). Skip.");
+                contentStreamForMagic = await response.Content.ReadAsStreamAsync(ct);
+                magicBuffer = new byte[8];
+                var read = await contentStreamForMagic.ReadAsync(magicBuffer.AsMemory(0, 8), ct);
+                detection = TryDetectExtensionFromMagicBytes(magicBuffer.AsSpan(0, read).ToArray(), allowlist);
+                if (detection == null)
+                {
+                    _logger.LogWarning(
+                        "DOCINGESTION SKIP no valid extension | AssetId={AssetId}, ItemId={ItemId}, assetName={AssetName}, assetFileExtension={AssetFileExtension}, detectedExtension=, detectionSource=, Allowlist=[{Allowlist}]",
+                        assetId, record.MondayQuestionnaireItemId, SafeFileNameForLog(assetInfo.Name), assetInfo.FileExtension ?? "", string.Join(",", allowlist));
+                    await contentStreamForMagic.DisposeAsync();
+                    throw new InvalidOperationException(
+                        $"No allowed extension for asset {assetId}. Skip.");
+                }
+                if (read < 8)
+                    magicBuffer = null;
             }
+
+            var ext = detection.Extension;
+            _logger.LogInformation(
+                "DOCINGESTION extension detected | AssetId={AssetId}, ItemId={ItemId}, assetName={AssetName}, assetFileExtension={AssetFileExtension}, detectedExtension={DetectedExtension}, detectionSource={DetectionSource}",
+                assetId, record.MondayQuestionnaireItemId, SafeFileNameForLog(assetInfo.Name), assetInfo.FileExtension ?? "", ext, detection.DetectionSource);
 
             var safeFileName = SafeFileName(record.ColumnId, tikVisualID, assetId, ext);
             _logger.LogInformation(
@@ -396,10 +411,22 @@ namespace Odmon.Worker.Services
             var targetPath = Path.Combine(caseFolderPath, safeFileName);
             var tempPath = targetPath + ".tmp";
 
-            await using (var contentStream = await response.Content.ReadAsStreamAsync(ct))
-            await using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920))
+            if (magicBuffer != null && contentStreamForMagic != null)
             {
-                await contentStream.CopyToAsync(fileStream, ct);
+                await using (contentStreamForMagic)
+                await using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920))
+                {
+                    await fileStream.WriteAsync(magicBuffer, ct);
+                    await contentStreamForMagic.CopyToAsync(fileStream, ct);
+                }
+            }
+            else
+            {
+                await using (var contentStream = await response.Content.ReadAsStreamAsync(ct))
+                await using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920))
+                {
+                    await contentStream.CopyToAsync(fileStream, ct);
+                }
             }
 
             if (File.Exists(targetPath))
@@ -900,15 +927,27 @@ namespace Odmon.Worker.Services
             ["image/webp"] = "webp"
         };
 
+        internal const int MaxExtensionLength = 5;
+        internal const string SourceFileExtension = "file_extension";
+        internal const string SourceName = "name";
+        internal const string SourceContentType = "content_type";
+        internal const string SourceMagicBytes = "magic_bytes";
+
+        /// <summary>Result of extension detection with source for logging.</summary>
+        internal sealed class ExtensionDetectionResult
+        {
+            public string Extension { get; init; } = string.Empty;
+            public string DetectionSource { get; init; } = string.Empty;
+        }
+
         /// <summary>
-        /// Returns an extension only if it is in the allowlist and length &lt;= 5.
-        /// Tries: Path.GetExtension(originalFileName), then URL path, then assetFileExtension, then MIME.
+        /// Strict priority: (a) asset.file_extension if in allowlist and &lt;= 5 chars,
+        /// (b) asset.name only if Path.GetExtension yields an allowlist extension &lt;= 5 chars.
+        /// Does NOT use name when it would yield JWT/long token. Never accepts extension &gt; 5 chars.
         /// </summary>
-        internal static string? GetAllowedExtension(
-            string? originalFileName,
+        internal static ExtensionDetectionResult? TryDetectExtensionFromMetadata(
+            string? assetName,
             string? assetFileExtension,
-            string? assetUrl,
-            string? contentType,
             IReadOnlyList<string> allowlist)
         {
             if (allowlist == null || allowlist.Count == 0) return null;
@@ -918,45 +957,81 @@ namespace Odmon.Worker.Services
             {
                 if (string.IsNullOrWhiteSpace(raw)) return null;
                 var s = raw.Trim().TrimStart('.').ToLowerInvariant();
-                return string.IsNullOrEmpty(s) ? null : s;
+                return string.IsNullOrEmpty(s) || s.Length > MaxExtensionLength ? null : s;
             }
 
-            static bool IsAllowed(string? ext, HashSet<string> allowed, int maxLen = 5)
+            static bool IsAllowed(string? ext, HashSet<string> allowed)
             {
-                if (string.IsNullOrEmpty(ext) || ext.Length > maxLen) return false;
+                if (string.IsNullOrEmpty(ext) || ext.Length > MaxExtensionLength) return false;
                 return allowed.Contains(ext);
             }
 
-            // a) Prefer OriginalFileName: Path.GetExtension, then allowlist check
-            if (!string.IsNullOrWhiteSpace(originalFileName))
+            // a) asset.file_extension if in allowlist
+            var apiExt = Normalize(assetFileExtension);
+            if (IsAllowed(apiExt, set))
+                return new ExtensionDetectionResult { Extension = apiExt!, DetectionSource = SourceFileExtension };
+
+            // b) asset.name only if it contains a valid allowlist extension (never use JWT segment)
+            if (!string.IsNullOrWhiteSpace(assetName))
             {
-                var ext = Normalize(Path.GetExtension(originalFileName));
-                if (IsAllowed(ext, set)) return ext;
+                var ext = Normalize(Path.GetExtension(assetName));
+                if (IsAllowed(ext, set))
+                    return new ExtensionDetectionResult { Extension = ext!, DetectionSource = SourceName };
             }
 
-            // b) URL path (not query string)
-            if (!string.IsNullOrWhiteSpace(assetUrl) && Uri.TryCreate(assetUrl, UriKind.Absolute, out var uri))
+            return null;
+        }
+
+        /// <summary>Try Content-Type mapping; only return if in allowlist and &lt;= 5 chars.</summary>
+        internal static ExtensionDetectionResult? TryDetectExtensionFromContentType(string? contentType, IReadOnlyList<string> allowlist)
+        {
+            if (allowlist == null || allowlist.Count == 0) return null;
+            if (string.IsNullOrWhiteSpace(contentType) || !MimeToExtension.TryGetValue(contentType, out var mapped)) return null;
+            var ext = mapped.TrimStart('.').ToLowerInvariant();
+            if (ext.Length > MaxExtensionLength) return null;
+            var set = new HashSet<string>(allowlist, StringComparer.OrdinalIgnoreCase);
+            if (!set.Contains(ext)) return null;
+            return new ExtensionDetectionResult { Extension = ext, DetectionSource = SourceContentType };
+        }
+
+        /// <summary>Check first bytes for %PDF; only returns pdf if in allowlist.</summary>
+        internal static ExtensionDetectionResult? TryDetectExtensionFromMagicBytes(byte[] firstBytes, IReadOnlyList<string> allowlist)
+        {
+            if (allowlist == null || allowlist.Count == 0) return null;
+            var set = new HashSet<string>(allowlist, StringComparer.OrdinalIgnoreCase);
+            if (!set.Contains("pdf")) return null;
+            if (firstBytes == null || firstBytes.Length < 4) return null;
+            if (firstBytes[0] == 0x25 && firstBytes[1] == 0x50 && firstBytes[2] == 0x44 && firstBytes[3] == 0x46) // %PDF
+                return new ExtensionDetectionResult { Extension = "pdf", DetectionSource = SourceMagicBytes };
+            return null;
+        }
+
+        /// <summary>
+        /// Returns an extension only if it is in the allowlist and length &lt;= 5.
+        /// Tries: file_extension, name (only if valid), URL path, then MIME. Prefer TryDetectExtensionFromMetadata + ContentType + MagicBytes for full flow.
+        /// </summary>
+        internal static string? GetAllowedExtension(
+            string? originalFileName,
+            string? assetFileExtension,
+            string? assetUrl,
+            string? contentType,
+            IReadOnlyList<string> allowlist)
+        {
+            var fromMeta = TryDetectExtensionFromMetadata(originalFileName, assetFileExtension, allowlist);
+            if (fromMeta != null) return fromMeta.Extension;
+            var set = allowlist != null ? new HashSet<string>(allowlist, StringComparer.OrdinalIgnoreCase) : null;
+            if (set != null && !string.IsNullOrWhiteSpace(assetUrl) && Uri.TryCreate(assetUrl, UriKind.Absolute, out var uri))
             {
                 var path = uri.AbsolutePath;
                 if (!string.IsNullOrEmpty(path))
                 {
-                    var ext = Normalize(Path.GetExtension(path));
-                    if (IsAllowed(ext, set)) return ext;
+                    var ext = (Path.GetExtension(path) ?? "").TrimStart('.').ToLowerInvariant();
+                    if (ext.Length <= MaxExtensionLength && set.Contains(ext))
+                        return ext;
                 }
             }
-
-            // c) assetFileExtension only if in allowlist and short
-            var apiExt = Normalize(assetFileExtension);
-            if (IsAllowed(apiExt, set)) return apiExt;
-
-            // d) MIME
-            if (!string.IsNullOrWhiteSpace(contentType) && MimeToExtension.TryGetValue(contentType, out var mapped))
-            {
-                var mimeExt = Normalize(mapped);
-                if (IsAllowed(mimeExt, set)) return mimeExt;
-            }
-
-            return null;
+            var fromCt = TryDetectExtensionFromContentType(contentType, allowlist!);
+            return fromCt?.Extension;
         }
 
         /// <summary>

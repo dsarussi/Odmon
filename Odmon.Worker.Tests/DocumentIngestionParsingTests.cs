@@ -351,6 +351,94 @@ namespace Odmon.Worker.Tests
             Assert.Null(ext);
         }
 
+        // ── TryDetectExtensionFromMetadata (strict: file_extension then name only if allowlisted) ───
+
+        [Fact]
+        public void TryDetectExtensionFromMetadata_JwtLikeFilename_DoesNotUseName_ReturnsNullWhenNoFileExtension()
+        {
+            var result = DocumentIngestionService.TryDetectExtensionFromMetadata(
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2FwcC5tb25kYXkuY29tIiwic3ViIjoiMTIzNDU2Nzg5MCJ9.Ypg2yDCq7dXkv6kV",
+                null,
+                Allowlist);
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public void TryDetectExtensionFromMetadata_JwtLikeFilename_UsesFileExtensionWhenPresent()
+        {
+            var result = DocumentIngestionService.TryDetectExtensionFromMetadata(
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOi...",
+                "pdf",
+                Allowlist);
+            Assert.NotNull(result);
+            Assert.Equal("pdf", result.Extension);
+            Assert.Equal(DocumentIngestionService.SourceFileExtension, result.DetectionSource);
+        }
+
+        [Fact]
+        public void TryDetectExtensionFromMetadata_ProperPdfFilename_UsesName()
+        {
+            var result = DocumentIngestionService.TryDetectExtensionFromMetadata("report.pdf", null, Allowlist);
+            Assert.NotNull(result);
+            Assert.Equal("pdf", result.Extension);
+            Assert.Equal(DocumentIngestionService.SourceName, result.DetectionSource);
+        }
+
+        [Fact]
+        public void TryDetectExtensionFromMetadata_InvalidExtension_ReturnsNull()
+        {
+            var result = DocumentIngestionService.TryDetectExtensionFromMetadata("file.xyz", null, Allowlist);
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public void TryDetectExtensionFromMetadata_FileExtensionTakesPriorityOverName()
+        {
+            var result = DocumentIngestionService.TryDetectExtensionFromMetadata("report.pdf", "jpg", Allowlist);
+            Assert.NotNull(result);
+            Assert.Equal("jpg", result.Extension);
+            Assert.Equal(DocumentIngestionService.SourceFileExtension, result.DetectionSource);
+        }
+
+        // ── TryDetectExtensionFromContentType ─────────────────────────────
+
+        [Fact]
+        public void TryDetectExtensionFromContentType_MissingExtensionButCorrectContentType_ReturnsPdf()
+        {
+            var result = DocumentIngestionService.TryDetectExtensionFromContentType("application/pdf", Allowlist);
+            Assert.NotNull(result);
+            Assert.Equal("pdf", result.Extension);
+            Assert.Equal(DocumentIngestionService.SourceContentType, result.DetectionSource);
+        }
+
+        [Fact]
+        public void TryDetectExtensionFromContentType_ImageJpeg_ReturnsJpg()
+        {
+            var result = DocumentIngestionService.TryDetectExtensionFromContentType("image/jpeg", Allowlist);
+            Assert.NotNull(result);
+            Assert.Equal("jpg", result.Extension);
+        }
+
+        // ── TryDetectExtensionFromMagicBytes ──────────────────────────────
+
+        [Fact]
+        public void TryDetectExtensionFromMagicBytes_PdfMagic_ReturnsPdf()
+        {
+            var pdfMagic = new byte[] { 0x25, 0x50, 0x44, 0x46, 0x2D }; // %PDF-
+            var result = DocumentIngestionService.TryDetectExtensionFromMagicBytes(pdfMagic, Allowlist);
+            Assert.NotNull(result);
+            Assert.Equal("pdf", result.Extension);
+            Assert.Equal(DocumentIngestionService.SourceMagicBytes, result.DetectionSource);
+        }
+
+        [Fact]
+        public void TryDetectExtensionFromMagicBytes_NotPdf_ReturnsNull()
+        {
+            var junk = new byte[] { 0x00, 0x01, 0x02, 0x03 };
+            var result = DocumentIngestionService.TryDetectExtensionFromMagicBytes(junk, Allowlist);
+            Assert.Null(result);
+        }
+
         // ── SafeFileName (columnSlug_tikSlug_assetId.ext) ─────────────────
 
         [Fact]
