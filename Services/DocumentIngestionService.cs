@@ -427,6 +427,12 @@ namespace Odmon.Worker.Services
             }
 
             if (detection == null)
+            {
+                var contentDisposition = response!.Content.Headers.ContentDisposition?.ToString()
+                    ?? (response.Headers.TryGetValues("Content-Disposition", out var cdVals) ? cdVals.FirstOrDefault() : null);
+                detection = TryDetectExtensionFromContentDisposition(contentDisposition, allowlist);
+            }
+            if (detection == null)
                 detection = TryDetectExtensionFromContentType(response!.Content.Headers.ContentType?.MediaType, allowlist);
 
             byte[]? magicBuffer = null;
@@ -452,11 +458,13 @@ namespace Odmon.Worker.Services
 
             var ext = detection.Extension;
             record.LastDetectionSource = detection.DetectionSource;
+            record.LastDetectedMimeType = detection.MimeType;
+            var detectedMimeForLog = detection.MimeType ?? "";
             _logger.LogInformation(
-                "DOCINGESTION extension detected | AssetId={AssetId}, ItemId={ItemId}, assetName={AssetName}, assetFileExtension={AssetFileExtension}, detectedExtension={DetectedExtension}, detectionSource={DetectionSource}",
-                assetId, record.MondayQuestionnaireItemId, SafeFileNameForLog(assetInfo.Name), assetInfo.FileExtension ?? "", ext, detection.DetectionSource);
+                "DOCINGESTION extension detection | AssetId={AssetId}, ColumnId={ColumnId}, TikCounter={TikCounter}, OriginalFileNameAsReceived={OriginalFileNameLog}, DetectedMimeType={DetectedMimeType}, DetectedExtension={DetectedExtension}, DetectionMethod={DetectionMethod}",
+                assetId, record.ColumnId, tikCounter, SafeFileNameForLog(assetInfo.Name), detectedMimeForLog, ext, detection.DetectionSource);
 
-            var safeFileName = SafeFileName(record.ColumnId, tikVisualID, assetId, ext);
+            var safeFileName = AssetSafeFileName(assetId, ext);
             _logger.LogInformation(
                 "DOCINGESTION SafeFileName (accepted) | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, SafeFileName={SafeFileName}, Ext={Ext}",
                 assetId, record.MondayQuestionnaireItemId, tikCounter, safeFileName, ext);
@@ -1016,6 +1024,7 @@ namespace Odmon.Worker.Services
         internal const string SourceFileExtension = "file_extension";
         internal const string SourceName = "name";
         internal const string SourceContentType = "content_type";
+        internal const string SourceContentDisposition = "content_disposition";
         internal const string SourceMagicBytes = "magic_bytes";
 
         /// <summary>Result of extension detection with source for logging.</summary>
@@ -1023,12 +1032,24 @@ namespace Odmon.Worker.Services
         {
             public string Extension { get; init; } = string.Empty;
             public string DetectionSource { get; init; } = string.Empty;
+            /// <summary>Set when detection source is content_type.</summary>
+            public string? MimeType { get; init; }
+        }
+
+        /// <summary>True if the value looks like a token (e.g. from protected_static URL) and should not be used as file type.</summary>
+        internal static bool IsTokenLikeExtension(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return true;
+            var t = raw.Trim();
+            if (t.Length > 10) return true;
+            if (t.StartsWith("eyJ", StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
         }
 
         /// <summary>
-        /// Strict priority: (a) asset.file_extension if in allowlist and &lt;= 5 chars,
-        /// (b) asset.name only if Path.GetExtension yields an allowlist extension &lt;= 5 chars.
-        /// Does NOT use name when it would yield JWT/long token. Never accepts extension &gt; 5 chars.
+        /// Strict priority: (a) asset.file_extension if in allowlist, &lt;= 5 chars, and NOT token-like;
+        /// (b) asset.name only if NOT JWT-like and Path.GetExtension yields an allowlist extension.
+        /// OriginalFileName is never the source of truth when token-like; we fall through to HTTP headers / content-type / magic.
         /// </summary>
         internal static ExtensionDetectionResult? TryDetectExtensionFromMetadata(
             string? assetName,
@@ -1051,12 +1072,15 @@ namespace Odmon.Worker.Services
                 return allowed.Contains(ext);
             }
 
-            // a) asset.file_extension if in allowlist
-            var apiExt = Normalize(assetFileExtension);
-            if (IsAllowed(apiExt, set))
-                return new ExtensionDetectionResult { Extension = apiExt!, DetectionSource = SourceFileExtension };
+            // a) asset.file_extension only if allowlisted and NOT token-like (do not use token from Monday)
+            if (!IsTokenLikeExtension(assetFileExtension))
+            {
+                var apiExt = Normalize(assetFileExtension);
+                if (IsAllowed(apiExt, set))
+                    return new ExtensionDetectionResult { Extension = apiExt!, DetectionSource = SourceFileExtension };
+            }
 
-            // b) asset.name only if NOT JWT-like and Path.GetExtension yields allowlist extension ≤5 chars
+            // b) asset.name only if NOT JWT-like and Path.GetExtension yields allowlist extension
             if (!string.IsNullOrWhiteSpace(assetName) && !IsSuspiciousFilename(assetName))
             {
                 var ext = Normalize(Path.GetExtension(assetName));
@@ -1065,6 +1089,32 @@ namespace Odmon.Worker.Services
             }
 
             return null;
+        }
+
+        /// <summary>Try Content-Disposition header filename; only return if extension is in allowlist and ≤5 chars.</summary>
+        internal static ExtensionDetectionResult? TryDetectExtensionFromContentDisposition(string? contentDispositionHeader, IReadOnlyList<string> allowlist)
+        {
+            if (allowlist == null || allowlist.Count == 0 || string.IsNullOrWhiteSpace(contentDispositionHeader)) return null;
+            var idx = contentDispositionHeader!.IndexOf("filename", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return null;
+            idx = contentDispositionHeader.IndexOf('=', idx + 8);
+            if (idx < 0) return null;
+            idx++;
+            while (idx < contentDispositionHeader.Length && (contentDispositionHeader[idx] == '*' || contentDispositionHeader[idx] == '=' || char.IsWhiteSpace(contentDispositionHeader[idx])))
+                idx++;
+            if (idx >= contentDispositionHeader.Length) return null;
+            var quote = contentDispositionHeader[idx] == '"' || contentDispositionHeader[idx] == '\'';
+            if (quote) idx++;
+            var start = idx;
+            while (idx < contentDispositionHeader.Length && contentDispositionHeader[idx] != ';' && contentDispositionHeader[idx] != '"' && contentDispositionHeader[idx] != '\'')
+                idx++;
+            var filename = contentDispositionHeader[start..idx].Trim().Trim('"', '\'');
+            if (string.IsNullOrEmpty(filename)) return null;
+            var ext = (Path.GetExtension(filename) ?? "").TrimStart('.').ToLowerInvariant();
+            if (ext.Length == 0 || ext.Length > MaxExtensionLength) return null;
+            var set = new HashSet<string>(allowlist, StringComparer.OrdinalIgnoreCase);
+            if (!set.Contains(ext)) return null;
+            return new ExtensionDetectionResult { Extension = ext, DetectionSource = SourceContentDisposition };
         }
 
         /// <summary>Try Content-Type mapping; only return if in allowlist and &lt;= 5 chars.</summary>
@@ -1076,7 +1126,7 @@ namespace Odmon.Worker.Services
             if (ext.Length > MaxExtensionLength) return null;
             var set = new HashSet<string>(allowlist, StringComparer.OrdinalIgnoreCase);
             if (!set.Contains(ext)) return null;
-            return new ExtensionDetectionResult { Extension = ext, DetectionSource = SourceContentType };
+            return new ExtensionDetectionResult { Extension = ext, DetectionSource = SourceContentType, MimeType = contentType };
         }
 
         /// <summary>Check first bytes for %PDF; only returns pdf if in allowlist.</summary>
@@ -1117,6 +1167,14 @@ namespace Odmon.Worker.Services
             }
             var fromCt = TryDetectExtensionFromContentType(contentType, allowlist!);
             return fromCt?.Extension;
+        }
+
+        /// <summary>Stable safe filename for inbox: asset_{AssetId}.{extension}. Used so file type is never derived from OriginalFileName.</summary>
+        internal static string AssetSafeFileName(long assetId, string extension)
+        {
+            var ext = (extension ?? "").TrimStart('.').ToLowerInvariant();
+            if (string.IsNullOrEmpty(ext)) ext = "bin";
+            return $"asset_{assetId}.{ext}";
         }
 
         /// <summary>

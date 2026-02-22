@@ -448,6 +448,51 @@ namespace Odmon.Worker.Tests
             Assert.Null(result);
         }
 
+        // ── Token-like OriginalFileName + Content-Type pdf (תצהיר ויפוי כוח / column file_mm0qwtat) ───
+
+        [Fact]
+        public void TokenLikeOriginalFileName_ContentTypeApplicationPdf_AllowlistPasses_DetectedExtensionPdf()
+        {
+            var tokenLikeName = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxOTg4NDcwMjMiLCJpc3MiOiJodHRwczovL2FwcC5tb25kYXkuY29tIn0.token";
+            var fromMeta = DocumentIngestionService.TryDetectExtensionFromMetadata(tokenLikeName, null, Allowlist);
+            Assert.Null(fromMeta);
+
+            var fromContentType = DocumentIngestionService.TryDetectExtensionFromContentType("application/pdf", Allowlist);
+            Assert.NotNull(fromContentType);
+            Assert.Equal("pdf", fromContentType.Extension);
+            Assert.Equal(DocumentIngestionService.SourceContentType, fromContentType.DetectionSource);
+            Assert.Equal("application/pdf", fromContentType.MimeType);
+
+            var safeFileName = DocumentIngestionService.AssetSafeFileName(198847023, "pdf");
+            Assert.Equal("asset_198847023.pdf", safeFileName);
+        }
+
+        [Fact]
+        public void AssetSafeFileName_AssetId198847023_ProducesAsset_Pdf()
+        {
+            var name = DocumentIngestionService.AssetSafeFileName(198847023, "pdf");
+            Assert.Equal("asset_198847023.pdf", name);
+        }
+
+        [Fact]
+        public void TryDetectExtensionFromContentDisposition_FilenamePdf_ReturnsPdf()
+        {
+            var result = DocumentIngestionService.TryDetectExtensionFromContentDisposition("attachment; filename=\"report.pdf\"", Allowlist);
+            Assert.NotNull(result);
+            Assert.Equal("pdf", result.Extension);
+            Assert.Equal(DocumentIngestionService.SourceContentDisposition, result.DetectionSource);
+        }
+
+        [Fact]
+        public void TryDetectExtensionFromMetadata_TokenLikeFileExtension_Ignored_ReturnsNull()
+        {
+            var result = DocumentIngestionService.TryDetectExtensionFromMetadata(
+                "anything",
+                "eyJhbGciOiJIUzI1NiJ9.eyJpc3M", // token-like file_extension
+                Allowlist);
+            Assert.Null(result);
+        }
+
         // ── SafeFileName (columnSlug_tikSlug_assetId.ext) ─────────────────
 
         [Fact]

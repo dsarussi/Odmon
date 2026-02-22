@@ -32,6 +32,10 @@ namespace Odmon.Worker.Models
         /// <summary>In-memory only (not persisted). Set during download for proof-of-write logging.</summary>
         [NotMapped]
         public string? LastDetectionSource { get; set; }
+
+        /// <summary>In-memory only (not persisted). Set when extension was detected from Content-Type.</summary>
+        [NotMapped]
+        public string? LastDetectedMimeType { get; set; }
     }
 
     public enum DocumentImportStatus
