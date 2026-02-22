@@ -211,10 +211,12 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            if (record.Status == DocumentImportStatus.Failed && record.RetryCount >= _settings.MaxRetryCount)
+            var maxAttempts = _settings.MaxRetryCount;
+            if (record.Status == DocumentImportStatus.Failed && record.RetryCount >= maxAttempts)
             {
-                _logger.LogWarning("DOCINGESTION asset {AssetId} exceeded max retries ({Max}), skipping",
-                    assetIdStr, _settings.MaxRetryCount);
+                _logger.LogWarning(
+                    "DOCINGESTION EXCEEDED MAX RETRIES | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, LastError={LastError}, LastStatus={LastStatus}",
+                    assetIdStr, questionnaireItemId, tikCounter, tikVisualID, record.ErrorMessage ?? "unknown", record.Status);
                 _totalSkipped++;
                 return;
             }
@@ -223,10 +225,14 @@ namespace Odmon.Worker.Services
             if (record.Status == DocumentImportStatus.Failed)
                 record.RetryCount++;
 
-            _logger.LogInformation(
-                "DOCINGESTION START | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, File={FileName}, Retry={Retry}",
-                tikVisualID, tikCounter, questionnaireItemId, columnId, assetIdStr, assetRef.Name, record.RetryCount);
+            var attempt = record.RetryCount + 1;
+            var attemptLabel = $"Attempt {attempt}/{maxAttempts}";
 
+            _logger.LogInformation(
+                "DOCINGESTION START | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, OriginalFileNameLog={OriginalFileNameLog}, {Attempt}",
+                tikVisualID, tikCounter, questionnaireItemId, columnId, assetIdStr, SafeFileNameForLog(assetRef.Name), attemptLabel);
+
+            var currentStage = "DOWNLOAD";
             try
             {
                 // Step 1: Download (skip if already downloaded and file exists)
@@ -234,7 +240,8 @@ namespace Odmon.Worker.Services
                     string.IsNullOrEmpty(record.InboxFilePath) ||
                     !File.Exists(record.InboxFilePath))
                 {
-                    await DownloadAssetToInboxAsync(record, assetRef.AssetId, tikVisualID, tikCounter, ct);
+                    currentStage = "DOWNLOAD";
+                    await DownloadAssetToInboxAsync(record, assetRef.AssetId, tikVisualID, tikCounter, ct, attempt, maxAttempts);
                 }
                 else
                 {
@@ -247,7 +254,15 @@ namespace Odmon.Worker.Services
                     !record.OdcanitDocCounter.HasValue ||
                     string.IsNullOrEmpty(record.OdcanitDestPath))
                 {
+                    currentStage = "UPLOAD";
+                    _logger.LogInformation(
+                        "DOCINGESTION STAGE=UPLOAD | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}",
+                        assetIdStr, questionnaireItemId, tikCounter, tikVisualID, attemptLabel);
                     await CreateDocumentRowAsync(record, tikCounter, ct);
+                    await CopyToDestPathAsync(record, ct);
+                    _logger.LogInformation(
+                        "DOCINGESTION STAGE=UPLOAD SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, DocCounter={DocCounter}, DestPath={DestPath}",
+                        assetIdStr, questionnaireItemId, tikCounter, record.OdcanitDocCounter, record.OdcanitDestPath);
                 }
                 else
                 {
@@ -255,10 +270,17 @@ namespace Odmon.Worker.Services
                         assetIdStr, record.OdcanitDocCounter);
                 }
 
-                // Step 3: Copy to DestPath
+                // Step 3: Copy to DestPath (if not done above)
                 if (record.Status < DocumentImportStatus.Copied)
                 {
+                    currentStage = "UPLOAD";
+                    _logger.LogInformation(
+                        "DOCINGESTION STAGE=UPLOAD | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, {Attempt}",
+                        assetIdStr, questionnaireItemId, tikCounter, attemptLabel);
                     await CopyToDestPathAsync(record, ct);
+                    _logger.LogInformation(
+                        "DOCINGESTION STAGE=UPLOAD SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, DestPath={DestPath}",
+                        assetIdStr, questionnaireItemId, tikCounter, record.OdcanitDestPath);
                 }
 
                 // Step 4: Verify
@@ -279,9 +301,9 @@ namespace Odmon.Worker.Services
                 assetSw.Stop();
                 _totalSucceeded++;
                 _logger.LogInformation(
-                    "DOCINGESTION SUCCESS | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, File={FileName}, DocCounter={DocCounter}, DestPath={DestPath}, Elapsed={ElapsedMs}ms",
+                    "DOCINGESTION SUCCESS | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, OriginalFileNameLog={OriginalFileNameLog}, SafeFile={SafeFile}, DocCounter={DocCounter}, DestPath={DestPath}, Elapsed={ElapsedMs}ms",
                     tikVisualID, tikCounter, questionnaireItemId, columnId, assetIdStr,
-                    record.OriginalFileName, record.OdcanitDocCounter, record.OdcanitDestPath, assetSw.ElapsedMilliseconds);
+                    SafeFileNameForLog(record.OriginalFileName), Path.GetFileName(record.InboxFilePath), record.OdcanitDocCounter, record.OdcanitDestPath, assetSw.ElapsedMilliseconds);
             }
             catch (Exception ex)
             {
@@ -293,14 +315,13 @@ namespace Odmon.Worker.Services
                 await SaveRecordAsync(record);
 
                 _logger.LogError(ex,
-                    "DOCINGESTION FAILED | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, File={FileName}, LastStatus={Status}, Elapsed={ElapsedMs}ms",
-                    tikVisualID, tikCounter, questionnaireItemId, columnId, assetIdStr,
-                    record.OriginalFileName, record.Status, assetSw.ElapsedMilliseconds);
+                    "DOCINGESTION FAILED | STAGE={Stage}, AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}, Error={Error}, Elapsed={ElapsedMs}ms",
+                    currentStage, assetIdStr, questionnaireItemId, tikCounter, tikVisualID, attemptLabel, ex.Message, assetSw.ElapsedMilliseconds);
 
                 if (!record.AlertSent)
                 {
                     SendAlert(
-                        $"Document ingestion failed: {record.OriginalFileName}",
+                        $"Document ingestion failed: AssetId={assetIdStr}, TikCounter={tikCounter}, Stage={currentStage}",
                         record, ex);
                     record.AlertSent = true;
                     await SaveRecordAsync(record);
@@ -311,55 +332,68 @@ namespace Odmon.Worker.Services
         // ───────── Step 1: Download ─────────
 
         private async Task DownloadAssetToInboxAsync(
-            MondayDocumentImport record, long assetId, string tikVisualID, int tikCounter, CancellationToken ct)
+            MondayDocumentImport record, long assetId, string tikVisualID, int tikCounter, CancellationToken ct,
+            int attempt, int maxAttempts)
         {
             var dlSw = Stopwatch.StartNew();
+            var attemptLabel = $"Attempt {attempt}/{maxAttempts}";
+
+            _logger.LogInformation(
+                "DOCINGESTION STAGE=DOWNLOAD | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}",
+                assetId, record.MondayQuestionnaireItemId, tikCounter, tikVisualID, attemptLabel);
 
             var assetInfo = await _mondayService.GetAssetDownloadInfoAsync(assetId, ct);
             if (assetInfo == null || string.IsNullOrWhiteSpace(assetInfo.PublicUrl))
                 throw new InvalidOperationException($"Cannot obtain download URL for asset {assetId}");
 
-            record.OriginalFileName = assetInfo.Name;
+            record.OriginalFileName = assetInfo.Name ?? string.Empty;
 
             if (assetInfo.FileSize > _settings.MaxFileSizeBytes)
                 throw new InvalidOperationException(
                     $"Asset {assetId} size {assetInfo.FileSize} exceeds max {_settings.MaxFileSizeBytes} bytes");
 
-            // Resolve extension from Monday metadata first
             var ext = ResolveFileExtension(assetInfo.Name, assetInfo.FileExtension, contentType: null);
 
-            // Begin download (headers read first); use Content-Type as MIME fallback if needed
             using var downloadClient = _httpClientFactory.CreateClient("MondayFileDownload");
-            using var response = await downloadClient.GetAsync(assetInfo.PublicUrl, HttpCompletionOption.ResponseHeadersRead, ct);
-            response.EnsureSuccessStatusCode();
+            HttpResponseMessage? response = null;
+            try
+            {
+                response = await downloadClient.GetAsync(assetInfo.PublicUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+                response.EnsureSuccessStatusCode();
+            }
+            catch (HttpRequestException ex)
+            {
+                var statusCode = response?.StatusCode;
+                _logger.LogWarning(ex,
+                    "DOCINGESTION STAGE=DOWNLOAD FAILED | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, {Attempt}, StatusCode={StatusCode}, Error={Error}",
+                    assetId, record.MondayQuestionnaireItemId, tikCounter, attemptLabel, (int?)statusCode ?? 0, ex.Message);
+                throw;
+            }
 
             if (string.IsNullOrWhiteSpace(ext))
             {
-                var contentType = response.Content.Headers.ContentType?.MediaType;
+                var contentType = response!.Content.Headers.ContentType?.MediaType;
                 ext = ResolveFileExtension(null, null, contentType);
-
                 if (!string.IsNullOrWhiteSpace(ext))
-                {
                     _logger.LogInformation(
-                        "DOCINGESTION EXT RESOLVED VIA MIME | AssetId={AssetId}, ContentType={ContentType}, Ext={Ext}, OriginalFileName='{OriginalFileName}'",
-                        assetId, contentType, ext, assetInfo.Name);
-                }
+                        "DOCINGESTION EXT RESOLVED VIA MIME | AssetId={AssetId}, ContentType={ContentType}, Ext={Ext}, OriginalFileNameLog={OriginalFileNameLog}",
+                        assetId, contentType, ext, SafeFileNameForLog(assetInfo.Name));
             }
 
             if (string.IsNullOrWhiteSpace(ext))
                 throw new InvalidOperationException(
-                    $"Cannot determine file extension for asset {assetId}, OriginalFileName='{assetInfo.Name}', FileExtension='{assetInfo.FileExtension}', ContentType='{response.Content.Headers.ContentType?.MediaType}'");
+                    $"Cannot determine file extension for asset {assetId}, FileExtension='{assetInfo.FileExtension}', ContentType='{response.Content.Headers.ContentType?.MediaType}'");
 
             var allowedSet = new HashSet<string>(_settings.AllowedExtensions, StringComparer.OrdinalIgnoreCase);
             if (!allowedSet.Contains(ext))
                 throw new InvalidOperationException(
-                    $"File extension '{ext}' not in allowlist [{string.Join(",", _settings.AllowedExtensions)}] for asset {assetId}, OriginalFileName='{assetInfo.Name}'");
+                    $"File extension '{ext}' not in allowlist [{string.Join(",", _settings.AllowedExtensions)}] for asset {assetId}");
 
             var safeTikDir = SanitizeTikVisualID(tikVisualID);
             var caseFolderPath = Path.Combine(_settings.InboxPath, "Cases", safeTikDir);
             Directory.CreateDirectory(caseFolderPath);
 
-            var safeFileName = GenerateSafeFileName(tikVisualID, assetId, record.ColumnId, ext);
+            var safeFileName = DeriveSafeFilename(assetInfo.Name, tikVisualID, tikCounter, assetId, ext);
             var targetPath = Path.Combine(caseFolderPath, safeFileName);
             var tempPath = targetPath + ".tmp";
 
@@ -373,6 +407,9 @@ namespace Odmon.Worker.Services
                 File.Delete(targetPath);
             File.Move(tempPath, targetPath);
 
+            if (string.Equals(ext, "pdf", StringComparison.OrdinalIgnoreCase) && !VerifyPdfMagicBytes(targetPath))
+                throw new InvalidOperationException($"Asset {assetId}: file does not have PDF magic bytes (%PDF) at path {targetPath}");
+
             var fileInfo = new FileInfo(targetPath);
             record.InboxFilePath = targetPath;
             record.FileSizeBytes = fileInfo.Length;
@@ -382,8 +419,25 @@ namespace Odmon.Worker.Services
 
             dlSw.Stop();
             _logger.LogInformation(
-                "DOCINGESTION DOWNLOADED | AssetId={AssetId}, OriginalFile={OriginalFileName}, SafeFile={SafeFileName}, Ext={Ext}, Size={Size}, InboxPath={InboxPath}, Elapsed={ElapsedMs}ms",
-                assetId, assetInfo.Name, safeFileName, ext, fileInfo.Length, targetPath, dlSw.ElapsedMilliseconds);
+                "DOCINGESTION STAGE=DOWNLOAD SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, SafeFile={SafeFileName}, Ext={Ext}, Size={Size}, OriginalFileNameLog={OriginalFileNameLog}, Elapsed={ElapsedMs}ms",
+                assetId, record.MondayQuestionnaireItemId, tikCounter, safeFileName, ext, fileInfo.Length, SafeFileNameForLog(assetInfo.Name), dlSw.ElapsedMilliseconds);
+        }
+
+        private static bool VerifyPdfMagicBytes(string filePath)
+        {
+            try
+            {
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                if (fs.Length < 5) return false;
+                var buf = new byte[5];
+                var read = fs.Read(buf, 0, 5);
+                if (read < 4) return false;
+                return buf[0] == 0x25 && buf[1] == 0x50 && buf[2] == 0x44 && buf[3] == 0x46; // %PDF
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         // ───────── Step 2: Create Odcanit document row ─────────
@@ -767,6 +821,72 @@ namespace Odmon.Worker.Services
             }
 
             return [];
+        }
+
+        // ───────── Filename normalization (JWT-like / unsafe names) ─────────
+
+        private const int MaxFilenameLength = 120;
+        private static readonly char[] InvalidFileNameChars = Path.GetInvalidFileNameChars();
+
+        /// <summary>True if the name should not be used for storage/upload (JWT-like, empty, or unsafe).</summary>
+        internal static bool IsSuspiciousFilename(string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return true;
+            var s = name.Trim();
+            if (s.Length > MaxFilenameLength) return true;
+            if (s.StartsWith("eyJ", StringComparison.OrdinalIgnoreCase)) return true; // JWT header
+            var dotCount = 0;
+            foreach (var c in s) { if (c == '.') dotCount++; }
+            if (dotCount > 4) return true; // many segments (e.g. JWT with .pdf)
+            if (s.IndexOfAny(InvalidFileNameChars) >= 0) return true;
+            return false;
+        }
+
+        /// <summary>Remove invalid chars, trim, cap length. Does not check for JWT/suspicious.</summary>
+        internal static string SanitizeFilename(string name, int maxLength = MaxFilenameLength)
+        {
+            if (string.IsNullOrEmpty(name)) return string.Empty;
+            var t = name.Trim();
+            var sb = new System.Text.StringBuilder(t.Length);
+            foreach (var c in t)
+            {
+                if (InvalidFileNameChars.Contains(c)) continue;
+                sb.Append(c);
+            }
+            var s = sb.ToString().Trim();
+            if (s.Length > maxLength) s = s[..maxLength];
+            return s;
+        }
+
+        /// <summary>Safe name for storage/upload: Attachment_TikPart_AssetId.ext when suspicious, else sanitized name with resolved extension.</summary>
+        internal static string DeriveSafeFilename(string? assetName, string tikVisualID, int tikCounter, long assetId, string extension)
+        {
+            var ext = extension.TrimStart('.').ToLowerInvariant();
+            if (!IsSuspiciousFilename(assetName))
+            {
+                var sanitized = SanitizeFilename(assetName!);
+                if (!string.IsNullOrEmpty(sanitized))
+                {
+                    var baseName = Path.GetFileNameWithoutExtension(sanitized);
+                    if (!string.IsNullOrEmpty(baseName))
+                        return baseName.Length > MaxFilenameLength - ext.Length - 1
+                            ? baseName[..(MaxFilenameLength - ext.Length - 2)] + "." + ext
+                            : baseName + "." + ext;
+                }
+            }
+            var tikPart = SanitizeTikVisualID(tikVisualID);
+            if (string.IsNullOrEmpty(tikPart) || tikPart.Length > 60) tikPart = tikCounter.ToString();
+            return $"Attachment_{tikPart}_{assetId}.{ext}";
+        }
+
+        /// <summary>For logging only: avoid leaking tokens; return length + short prefix.</summary>
+        internal static string SafeFileNameForLog(string? name)
+        {
+            if (string.IsNullOrEmpty(name)) return "len=0";
+            const int prefixLen = 8;
+            var len = name.Length;
+            var prefix = name.Length <= prefixLen ? name : name[..prefixLen] + "...";
+            return $"len={len} prefix={prefix}";
         }
 
         // ───────── Helpers ─────────

@@ -244,6 +244,60 @@ namespace Odmon.Worker.Tests
             Assert.Equal("1_11958", DocumentIngestionService.SanitizeTikVisualID("1\\11958"));
         }
 
+        // ── IsSuspiciousFilename / SanitizeFilename / DeriveSafeFilename / SafeFileNameForLog ───
+
+        [Fact]
+        public void IsSuspiciousFilename_NullOrEmpty_ReturnsTrue()
+        {
+            Assert.True(DocumentIngestionService.IsSuspiciousFilename(null));
+            Assert.True(DocumentIngestionService.IsSuspiciousFilename(""));
+            Assert.True(DocumentIngestionService.IsSuspiciousFilename("   "));
+        }
+
+        [Fact]
+        public void IsSuspiciousFilename_StartsWithEyJ_ReturnsTrue()
+        {
+            Assert.True(DocumentIngestionService.IsSuspiciousFilename("eyJ0eXAiOiJKV1QiLCJhbGc.pdf"));
+            Assert.True(DocumentIngestionService.IsSuspiciousFilename("eyJ..."));
+        }
+
+        [Fact]
+        public void IsSuspiciousFilename_NormalName_ReturnsFalse()
+        {
+            Assert.False(DocumentIngestionService.IsSuspiciousFilename("report.pdf"));
+            Assert.False(DocumentIngestionService.IsSuspiciousFilename("Photo.jpg"));
+        }
+
+        [Fact]
+        public void DeriveSafeFilename_Suspicious_ReturnsAttachmentPattern()
+        {
+            var name = DocumentIngestionService.DeriveSafeFilename("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRwczovL2FwcC5tb25kYXkuY29tIiwic3ViIjoiMTIzNDU2Nzg5MCJ9.Ypg2yDCq7dXkv6kV.pdf", "1/11958", 39283, 198847023, "pdf");
+            Assert.Equal("Attachment_1_11958_198847023.pdf", name);
+        }
+
+        [Fact]
+        public void DeriveSafeFilename_NormalName_ReturnsSanitizedWithExtension()
+        {
+            var name = DocumentIngestionService.DeriveSafeFilename("My Report.pdf", "1/11958", 39283, 123, "pdf");
+            Assert.Equal("My Report.pdf", name);
+        }
+
+        [Fact]
+        public void SafeFileNameForLog_ShortName_ReturnsLenAndPrefix()
+        {
+            var log = DocumentIngestionService.SafeFileNameForLog("report.pdf");
+            Assert.StartsWith("len=10 prefix=", log);
+            Assert.Contains("report", log);
+        }
+
+        [Fact]
+        public void SafeFileNameForLog_LongName_TruncatesPrefix()
+        {
+            var log = DocumentIngestionService.SafeFileNameForLog("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3M");
+            Assert.StartsWith("len=", log);
+            Assert.Contains("eyJ0eXAi...", log);
+        }
+
         // ── IsSmtpAuthFailure ────────────────────────────────────────────
 
         [Fact]
