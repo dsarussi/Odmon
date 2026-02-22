@@ -60,5 +60,26 @@ namespace Odmon.Worker.Tests
             NispahWriterService.ResetTableMissingFlags();
         }
 
+        // ── IsDuplicateKeySqlError (idempotent dedup: 2601/2627 → skip) ───
+
+        [Fact]
+        public void IsDuplicateKeySqlError_2601_ReturnsTrue()
+        {
+            Assert.True(NispahWriterService.IsDuplicateKeySqlError(2601));
+        }
+
+        [Fact]
+        public void IsDuplicateKeySqlError_2627_ReturnsTrue()
+        {
+            Assert.True(NispahWriterService.IsDuplicateKeySqlError(2627));
+        }
+
+        [Fact]
+        public void IsDuplicateKeySqlError_OtherNumbers_ReturnsFalse()
+        {
+            Assert.False(NispahWriterService.IsDuplicateKeySqlError(208));
+            Assert.False(NispahWriterService.IsDuplicateKeySqlError(547));
+            Assert.False(NispahWriterService.IsDuplicateKeySqlError(0));
+        }
     }
 }

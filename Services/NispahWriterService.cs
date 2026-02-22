@@ -373,6 +373,10 @@ namespace Odmon.Worker.Services
             return ex.Number == 1205 || ex.Number == -2;
         }
 
+        /// <summary>
+        /// Records a deduplication entry. Idempotent: if the unique key (TikVisualID, NispahTypeName, InfoHash) already exists
+        /// (e.g. rescans, concurrency), treats as normal skip — no exception, no ERROR log. Run continues; counts as success.
+        /// </summary>
         private async Task RecordDeduplicationAsync(
             string tikVisualID,
             string nispahTypeName,
@@ -395,10 +399,11 @@ namespace Odmon.Worker.Services
                 _integrationDb.NispahDeduplications.Add(dedup);
                 await _integrationDb.SaveChangesAsync(ct);
             }
-            catch (DbUpdateException ex) when (ex.InnerException is SqlException sqlEx && sqlEx.Number == 2627)
+            catch (DbUpdateException ex) when (ex.InnerException is SqlException sqlEx && IsDuplicateKeySqlError(sqlEx.Number))
             {
+                // Idempotent: duplicate key (unique index UX_NispahDedup / constraint) — treat as skip, do not log exception (no stack trace).
                 _logger.LogInformation(
-                    "Deduplication record already exists (race condition): TikVisualID={TikVisualID}, NispahTypeName={NispahTypeName}, InfoHash={InfoHash}",
+                    "Nispah dedup exists -> skipped | TikVisualID={TikVisualID}, NispahTypeName={NispahTypeName}, InfoHash={InfoHash}",
                     tikVisualID, nispahTypeName, infoHash);
             }
             catch (DbUpdateException ex) when (ex.InnerException is SqlException sqlEx && sqlEx.Number == 208)
@@ -410,6 +415,12 @@ namespace Odmon.Worker.Services
                         "NispahDeduplications table does not exist (SqlException 208). Dedup recording skipped. Run EF migrations to create the table.");
                 }
             }
+        }
+
+        /// <summary>True for SQL duplicate key errors: 2601 (unique index), 2627 (unique constraint). Concurrency-safe idempotency.</summary>
+        internal static bool IsDuplicateKeySqlError(int sqlErrorNumber)
+        {
+            return sqlErrorNumber == 2601 || sqlErrorNumber == 2627;
         }
 
         internal async Task PersistAuditLogAsync(NispahAuditLog auditLog, CancellationToken ct)
