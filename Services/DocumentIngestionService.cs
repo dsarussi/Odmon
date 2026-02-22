@@ -254,6 +254,41 @@ namespace Odmon.Worker.Services
                     !record.OdcanitDocCounter.HasValue ||
                     string.IsNullOrEmpty(record.OdcanitDestPath))
                 {
+                    // Validation guard before writing to Odcanit: file size > 0; for PDF also size > 1024 and %PDF magic
+                    if (!string.IsNullOrEmpty(record.InboxFilePath) && File.Exists(record.InboxFilePath))
+                    {
+                        var ext = Path.GetExtension(record.InboxFilePath)?.TrimStart('.').ToLowerInvariant() ?? "";
+                        if (record.FileSizeBytes <= 0)
+                        {
+                            record.RetryCount = maxAttempts;
+                            record.Status = DocumentImportStatus.Failed;
+                            record.ErrorMessage = "EmptyFile; file size is 0";
+                            record.UpdatedAtUtc = DateTime.UtcNow;
+                            await SaveRecordAsync(record);
+                            _totalSkipped++;
+                            _logger.LogWarning(
+                                "DOCINGESTION SKIP validation failed | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, Reason=EmptyFile",
+                                assetIdStr, questionnaireItemId, tikCounter);
+                            return;
+                        }
+                        if (string.Equals(ext, "pdf", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (record.FileSizeBytes <= 1024 || !VerifyPdfMagicBytes(record.InboxFilePath))
+                            {
+                                record.RetryCount = maxAttempts;
+                                record.Status = DocumentImportStatus.Failed;
+                                record.ErrorMessage = "PdfValidationFailed; size<=1024 or file does not start with %PDF";
+                                record.UpdatedAtUtc = DateTime.UtcNow;
+                                await SaveRecordAsync(record);
+                                _totalSkipped++;
+                                _logger.LogWarning(
+                                    "DOCINGESTION SKIP validation failed | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, Reason=WriteFailure (PDF guard: size>1024 and %PDF magic required)",
+                                    assetIdStr, questionnaireItemId, tikCounter);
+                                return;
+                            }
+                        }
+                    }
+
                     currentStage = "UPLOAD";
                     _logger.LogInformation(
                         "DOCINGESTION STAGE=UPLOAD | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}",
@@ -304,6 +339,26 @@ namespace Odmon.Worker.Services
                     "DOCINGESTION SUCCESS | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, OriginalFileNameLog={OriginalFileNameLog}, SafeFile={SafeFile}, DocCounter={DocCounter}, DestPath={DestPath}, Elapsed={ElapsedMs}ms",
                     tikVisualID, tikCounter, questionnaireItemId, columnId, assetIdStr,
                     SafeFileNameForLog(record.OriginalFileName), Path.GetFileName(record.InboxFilePath), record.OdcanitDocCounter, record.OdcanitDestPath, assetSw.ElapsedMilliseconds);
+
+                var detectedExt = Path.GetExtension(record.InboxFilePath!)?.TrimStart('.').ToLowerInvariant() ?? "";
+                if (string.Equals(detectedExt, "pdf", StringComparison.OrdinalIgnoreCase))
+                    _logger.LogInformation(
+                        "DOCINGESTION PDF WRITE SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, DetectedExtension=pdf, DetectionSource={DetectionSource}, FileSizeBytes={FileSizeBytes}, OdcanitAttachmentId={OdcanitAttachmentId}, Success=true",
+                        record.AssetId, record.MondayQuestionnaireItemId, record.TikCounter, record.LastDetectionSource ?? "unknown", record.FileSizeBytes, record.OdcanitDocCounter);
+            }
+            catch (InvalidExtensionException iex)
+            {
+                assetSw.Stop();
+                record.RetryCount = maxAttempts;
+                record.Status = DocumentImportStatus.Failed;
+                record.ErrorMessage = iex.Message.Length > 2000 ? iex.Message[..2000] : iex.Message;
+                record.UpdatedAtUtc = DateTime.UtcNow;
+                await SaveRecordAsync(record);
+                _totalSkipped++;
+                _logger.LogWarning(
+                    "DOCINGESTION SKIP invalid extension (no retries) | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, Reason=InvalidExtension",
+                    assetIdStr, questionnaireItemId, tikCounter, tikVisualID);
+                return;
             }
             catch (Exception ex)
             {
@@ -388,14 +443,15 @@ namespace Odmon.Worker.Services
                         "DOCINGESTION SKIP no valid extension | AssetId={AssetId}, ItemId={ItemId}, assetName={AssetName}, assetFileExtension={AssetFileExtension}, detectedExtension=, detectionSource=, Allowlist=[{Allowlist}]",
                         assetId, record.MondayQuestionnaireItemId, SafeFileNameForLog(assetInfo.Name), assetInfo.FileExtension ?? "", string.Join(",", allowlist));
                     await contentStreamForMagic.DisposeAsync();
-                    throw new InvalidOperationException(
-                        $"No allowed extension for asset {assetId}. Skip.");
+                    throw new InvalidExtensionException(
+                        $"InvalidExtension; no allowed extension for asset {assetId}. Name/file_extension not in allowlist and content-type/magic did not resolve.");
                 }
                 if (read < 8)
                     magicBuffer = null;
             }
 
             var ext = detection.Extension;
+            record.LastDetectionSource = detection.DetectionSource;
             _logger.LogInformation(
                 "DOCINGESTION extension detected | AssetId={AssetId}, ItemId={ItemId}, assetName={AssetName}, assetFileExtension={AssetFileExtension}, detectedExtension={DetectedExtension}, detectionSource={DetectionSource}",
                 assetId, record.MondayQuestionnaireItemId, SafeFileNameForLog(assetInfo.Name), assetInfo.FileExtension ?? "", ext, detection.DetectionSource);
@@ -1000,8 +1056,8 @@ namespace Odmon.Worker.Services
             if (IsAllowed(apiExt, set))
                 return new ExtensionDetectionResult { Extension = apiExt!, DetectionSource = SourceFileExtension };
 
-            // b) asset.name only if it contains a valid allowlist extension (never use JWT segment)
-            if (!string.IsNullOrWhiteSpace(assetName))
+            // b) asset.name only if NOT JWT-like and Path.GetExtension yields allowlist extension ≤5 chars
+            if (!string.IsNullOrWhiteSpace(assetName) && !IsSuspiciousFilename(assetName))
             {
                 var ext = Normalize(Path.GetExtension(assetName));
                 if (IsAllowed(ext, set))
@@ -1122,5 +1178,11 @@ namespace Odmon.Worker.Services
         {
             return tikVisualID.Replace("/", "_").Replace("\\", "_");
         }
+    }
+
+    /// <summary>Thrown when extension cannot be resolved; do not retry.</summary>
+    public sealed class InvalidExtensionException : InvalidOperationException
+    {
+        public InvalidExtensionException(string message) : base(message) { }
     }
 }

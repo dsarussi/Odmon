@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace Odmon.Worker.Models
 {
     public class MondayDocumentImport
@@ -26,6 +28,10 @@ namespace Odmon.Worker.Models
         public int RetryCount { get; set; }
         public DateTime? LastAttemptAtUtc { get; set; }
         public bool AlertSent { get; set; }
+
+        /// <summary>In-memory only (not persisted). Set during download for proof-of-write logging.</summary>
+        [NotMapped]
+        public string? LastDetectionSource { get; set; }
     }
 
     public enum DocumentImportStatus

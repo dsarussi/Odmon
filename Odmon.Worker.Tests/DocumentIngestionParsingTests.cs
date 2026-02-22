@@ -310,9 +310,18 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public void GetAllowedExtension_OriginalFileNameJwtLikeWithPdf_ReturnsPdf()
+        public void GetAllowedExtension_OriginalFileNameJwtLikeWithPdf_NoContentType_ReturnsNull()
         {
+            // JWT-like name is ignored for extension; without content-type/magic we get null
             var ext = DocumentIngestionService.GetAllowedExtension("eyJhbGciOiJIUzI1NiJ9.eyJpc3M.pdf", null, null, null, Allowlist);
+            Assert.Null(ext);
+        }
+
+        [Fact]
+        public void GetAllowedExtension_OriginalFileNameJwtLikeWithContentTypePdf_ReturnsPdf()
+        {
+            // JWT-like name ignored; content-type application/pdf resolves extension (pipeline acceptance)
+            var ext = DocumentIngestionService.GetAllowedExtension("eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRw", null, null, "application/pdf", Allowlist);
             Assert.Equal("pdf", ext);
         }
 
