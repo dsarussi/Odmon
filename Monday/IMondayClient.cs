@@ -1,4 +1,4 @@
-using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -6,6 +6,9 @@ namespace Odmon.Worker.Monday
 {
     public interface IMondayClient
     {
+        /// <summary>Returns group IDs for the board (order preserved). Used for bootstrap group resolution.</summary>
+        Task<IReadOnlyList<string>> GetBoardGroupIdsAsync(long boardId, CancellationToken ct);
+
         Task<long> CreateItemAsync(long boardId, string groupId, string itemName, string columnValuesJson, CancellationToken ct);
         /// <summary>Returns item state (e.g. "active", "archived", "deleted") or null if not found/error.</summary>
         Task<string?> GetItemStateAsync(long boardId, long itemId, CancellationToken ct);

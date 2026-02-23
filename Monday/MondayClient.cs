@@ -73,6 +73,52 @@ namespace Odmon.Worker.Monday
             return false;
         }
 
+        public async Task<IReadOnlyList<string>> GetBoardGroupIdsAsync(long boardId, CancellationToken ct)
+        {
+            var query = @"query ($boardId: ID!) {
+                boards(ids: [$boardId]) {
+                    groups {
+                        id
+                    }
+                }
+            }";
+            var variables = new Dictionary<string, object> { ["boardId"] = boardId.ToString() };
+
+            using var doc = await ExecuteGraphQLRequestAsync(query, variables, ct, "get_board_groups", boardId, null, null);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("data", out var data) ||
+                !data.TryGetProperty("boards", out var boards) ||
+                boards.ValueKind != JsonValueKind.Array ||
+                boards.GetArrayLength() == 0)
+            {
+                _logger.LogWarning("GetBoardGroupIdsAsync: No board found for BoardId={BoardId}", boardId);
+                return Array.Empty<string>();
+            }
+
+            var board = boards[0];
+            if (!board.TryGetProperty("groups", out var groups) || groups.ValueKind != JsonValueKind.Array)
+            {
+                _logger.LogWarning("GetBoardGroupIdsAsync: Board {BoardId} has no groups array", boardId);
+                return Array.Empty<string>();
+            }
+
+            var list = new List<string>();
+            foreach (var g in groups.EnumerateArray())
+            {
+                if (g.TryGetProperty("id", out var idEl))
+                {
+                    var id = idEl.GetString();
+                    if (!string.IsNullOrEmpty(id))
+                        list.Add(id);
+                }
+            }
+
+            _logger.LogDebug("GetBoardGroupIdsAsync: BoardId={BoardId}, GroupCount={Count}, Ids={Ids}",
+                boardId, list.Count, string.Join(", ", list));
+            return list;
+        }
+
         public async Task<long> CreateItemAsync(long boardId, string groupId, string itemName, string columnValuesJson, CancellationToken ct)
         {
             var query = @"mutation ($boardId: ID!, $groupId: String!, $itemName: String!, $columnVals: JSON!) {

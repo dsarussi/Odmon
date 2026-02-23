@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Odmon.Worker.Exceptions;
+using Odmon.Worker.Monday;
 using Odmon.Worker.Models;
 
 namespace Odmon.Worker.Services
@@ -23,11 +24,13 @@ namespace Odmon.Worker.Services
         /// This method is the ONLY place where Monday items are created.
         /// It does not depend on the change feed.
         /// It is idempotent: safe to run multiple times.
+        /// Group ID is resolved against the board's actual groups; invalid/stale config falls back to first group.
         /// </summary>
         internal async Task<BootstrapResult> RunBootstrapOnboardingAsync(
             string runId,
             long boardId,
             string groupId,
+            string requestedGroupIdSource,
             bool testMode,
             bool dryRun,
             DateTime cutoffDate,
@@ -152,6 +155,15 @@ namespace Odmon.Worker.Services
             // Respect maxItems
             var batch = (maxItems > 0 ? casesToOnboard.Take(maxItems) : casesToOnboard).ToList();
 
+            // Resolve group ID only when we have items to create: use configured if valid on board, else first group (safe fallback).
+            var resolvedGroupId = groupId;
+            if (batch.Count > 0)
+            {
+                var boardGroupIds = await _mondayClient.GetBoardGroupIdsAsync(boardId, ct);
+                resolvedGroupId = MondayGroupResolver.ResolveGroupId(
+                    boardId, boardGroupIds, groupId, requestedGroupIdSource, _logger);
+            }
+
             // 5) Create Monday items for each eligible case
             foreach (var c in batch)
             {
@@ -187,7 +199,7 @@ namespace Odmon.Worker.Services
                     if (!dryRun)
                     {
                         var (mondayItemId, retries) = await ExecuteWithRetryAsync(
-                            () => CreateMondayItemAsync(c, boardId, groupId, itemName, testMode, ct),
+                            () => CreateMondayItemAsync(c, boardId, resolvedGroupId, itemName, testMode, ct),
                             "bootstrap_create", c.TikCounter, ct);
 
                         result.NewlyOnboarded++;

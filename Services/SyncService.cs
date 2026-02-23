@@ -211,9 +211,12 @@ namespace Odmon.Worker.Services
 
             if (listenerUpdateOnly && cutoffDate.HasValue)
             {
+                var requestedGroupIdSource = (testMode && !string.IsNullOrWhiteSpace(testGroupId))
+                    ? "Monday:TestGroupId"
+                    : "Monday:ToDoGroupId";
                 stageTimer.Restart();
                 bootstrapResult = await RunBootstrapOnboardingAsync(
-                    runId, boardIdToUse, groupIdToUse, testMode, dryRun,
+                    runId, boardIdToUse, groupIdToUse, requestedGroupIdSource, testMode, dryRun,
                     cutoffDate.Value, maxItems, ct);
                 bootstrapCreated = bootstrapResult.NewlyOnboarded;
                 stageTimer.Stop();
