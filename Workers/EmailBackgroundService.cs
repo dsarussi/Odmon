@@ -6,6 +6,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Data.SqlClient;
 using Odmon.Worker.Data;
+using Odmon.Worker.OdcanitAccess;
 using Odmon.Worker.Services;
 
 namespace Odmon.Worker.Workers
@@ -42,17 +43,19 @@ namespace Odmon.Worker.Workers
         {
             LogSmtpConfigValidation();
 
-            if (!_config.GetValue<bool>("Email:Enabled", false))
+            var emailEnabled = _config.GetValue<bool>("Email:Enabled", false);
+            if (!emailEnabled)
             {
-                _logger.LogInformation("Email monitoring is DISABLED (Email:Enabled=false). EmailBackgroundService will idle.");
-                try { await Task.Delay(Timeout.Infinite, stoppingToken); } catch (OperationCanceledException) { }
-                return;
+                _logger.LogInformation("Email monitoring is DISABLED (Email:Enabled=false). Queue/digest disabled; daily summary will still be computed and logged.");
+            }
+            else
+            {
+                _logger.LogInformation("EmailBackgroundService started. Queue processing + daily summary + digest active.");
             }
 
-            _logger.LogInformation("EmailBackgroundService started. Queue processing + daily summary + digest active.");
-
-            // Process queue and run periodic tasks concurrently
-            var queueTask = ProcessQueueAsync(stoppingToken);
+            // Process queue (only when enabled) and run periodic tasks concurrently.
+            // Daily summary is always computed and logged; sent only when enabled.
+            var queueTask = emailEnabled ? ProcessQueueAsync(stoppingToken) : Task.Delay(Timeout.Infinite, stoppingToken);
             var periodicTask = RunPeriodicTasksAsync(stoppingToken);
 
             await Task.WhenAll(queueTask, periodicTask);
@@ -169,71 +172,76 @@ namespace Odmon.Worker.Workers
             {
                 using var scope = _scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<IntegrationDbContext>();
+                var odcanitDb = scope.ServiceProvider.GetRequiredService<OdcanitDbContext>();
+                var hearingBackfillEnabled = _config.GetValue<bool>("HearingBackfill:Enable", false);
 
-                // Query metrics for the last 24 hours
                 var since = DateTime.UtcNow.AddHours(-24);
-                var metrics = await db.SyncRunMetrics
-                    .AsNoTracking()
-                    .Where(m => m.StartedAtUtc >= since)
-                    .ToListAsync(ct);
 
-                // Count new mappings created today (UTC-based approximation)
+                // 1) System Activity (business-level)
                 var newMappings = await db.MondayItemMappings
                     .AsNoTracking()
                     .Where(m => m.CreatedAtUtc >= since)
                     .CountAsync(ct);
 
-                // Count failures today
-                var failures = await db.SyncFailures
+                var updatedToday = await db.MondayItemMappings
+                    .AsNoTracking()
+                    .Where(m => m.LastSyncFromOdcanitUtc >= since)
+                    .CountAsync(ct);
+
+                var runFailures = await db.SyncRunMetrics
+                    .AsNoTracking()
+                    .Where(m => m.StartedAtUtc >= since)
+                    .SumAsync(m => m.Failed + m.BootstrapFailed, ct);
+                var persistedFailures = await db.SyncFailures
                     .AsNoTracking()
                     .Where(f => f.OccurredAtUtc >= since)
                     .CountAsync(ct);
+                var totalFailures = runFailures + persistedFailures;
 
-                var circuitBreakerIncidents = metrics.Count(m => m.CircuitBreakerTripped);
-                var totalRuns = metrics.Count;
-                var totalCreated = metrics.Sum(m => m.BootstrapCreated);
-                var totalUpdated = metrics.Sum(m => m.Updated);
-                var totalSkipped = metrics.Sum(m => m.SkippedNoChange);
-                var totalCooling = metrics.Sum(m => m.CoolingFilteredOut);
-                var totalFailed = metrics.Sum(m => m.Failed) + metrics.Sum(m => m.BootstrapFailed);
-                var avgDuration = totalRuns > 0 ? metrics.Average(m => m.DurationMs) : 0;
-                var maxDuration = totalRuns > 0 ? metrics.Max(m => m.DurationMs) : 0;
-
-                // --- NEW: expected-to-open table (today/tomorrow/day-after) from OdmonIntegration/Odlight ---
-                var odcanitConn =
-                    _config.GetConnectionString("OdmonIntegration")
-                    ?? _config.GetConnectionString("Odlight")
-                    ?? _config["OdmonIntegration :ConnectionString"]
-                    ?? _config["Odlight:ConnectionString"];
-
-                string upcomingHtml;
-                if (!string.IsNullOrWhiteSpace(odcanitConn))
+                // 2) Cases expected to open (today/tomorrow/day-after) — use OdcanitDb connection
+                List<UpcomingEligibleRow>? upcomingRows = null;
+                try
                 {
-                    var upcoming = await UpcomingEligibleSection.LoadAsync(odcanitConn, ct);
-                    upcomingHtml = UpcomingEligibleSection.ToHtml(upcoming);
+                    var connStr = odcanitDb.Database.GetConnectionString();
+                    if (!string.IsNullOrWhiteSpace(connStr) && !connStr.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase) && !connStr.Contains("__USE_SECRET__", StringComparison.Ordinal))
+                    {
+                        upcomingRows = await UpcomingEligibleSection.LoadAsync(connStr, ct);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Daily summary: Could not load upcoming eligible cases from OdcanitDb.");
+                }
+
+                // 3) Hearings Backfill (only if enabled or has Imported/Failed today)
+                DailySummaryBackfillInfo? backfillInfo = null;
+                if (hearingBackfillEnabled)
+                {
+                    backfillInfo = await GetHearingBackfillSummaryAsync(db, since, ct);
                 }
                 else
                 {
-                    upcomingHtml =
-                        "<div style='direction:rtl;text-align:right;font-family:Arial,sans-serif;'>" +
-                        "<h3 style='margin:16px 0 8px;'>תיקים צפויים להיפתח (היום/מחר/מחרתיים)</h3>" +
-                        "<div style='color:#b00;'>לא מוגדר ConnectionString ל-OdmonIntegration/Odlight ולכן לא ניתן להציג את הטבלה.</div>" +
-                        "</div>";
+                    var importedToday = await db.HearingBackfillApr2026
+                        .AsNoTracking()
+                        .CountAsync(r => r.ImportStatus == "Imported" && r.ImportedAtUtc >= since, ct);
+                    var failedToday = await db.HearingBackfillApr2026
+                        .AsNoTracking()
+                        .CountAsync(r => r.ImportStatus == "Failed" && r.FailedAtUtc >= since, ct);
+                    if (importedToday > 0 || failedToday > 0)
+                        backfillInfo = await GetHearingBackfillSummaryAsync(db, since, ct);
                 }
-                // --- END NEW ---
 
                 var subject = $"Daily Summary – {israelDate:yyyy-MM-dd}";
-                var body = BuildDailySummaryHtml(
-                    israelDate, totalRuns, newMappings, totalCreated, totalUpdated,
-                    totalSkipped, totalCooling, totalFailed, failures,
-                    circuitBreakerIncidents, avgDuration, maxDuration,
-                    upcomingHtml);
+                var body = BuildDailySummaryHtml(israelDate, newMappings, updatedToday, totalFailures, upcomingRows ?? new List<UpcomingEligibleRow>(), backfillInfo);
 
-                await _emailNotifier.SendDailySummaryAsync(subject, body, ct);
+                if (_config.GetValue<bool>("Email:Enabled", false))
+                {
+                    await _emailNotifier.SendDailySummaryAsync(subject, body, ct);
+                }
 
                 _logger.LogInformation(
-                    "DAILY SUMMARY SENT | Date={Date}, Runs={Runs}, Created={Created}, Updated={Updated}, Failed={Failed}",
-                    israelDate, totalRuns, totalCreated, totalUpdated, totalFailed);
+                    "DAILY SUMMARY SENT | Date={Date}, NewMappings={New}, Updated={Updated}, Failures={Failures}, Upcoming={Upcoming}",
+                    israelDate, newMappings, updatedToday, totalFailures, upcomingRows?.Count ?? 0);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -241,41 +249,102 @@ namespace Odmon.Worker.Workers
             }
         }
 
-        private static string BuildDailySummaryHtml(
-            DateOnly date, int runs, int newMappings, int created, int updated,
-            int skipped, int cooling, int failed, int syncFailures,
-            int cbIncidents, double avgDurationMs, int maxDurationMs,
-            string upcomingHtml)
+        private static async Task<DailySummaryBackfillInfo?> GetHearingBackfillSummaryAsync(IntegrationDbContext db, DateTime since, CancellationToken ct)
         {
+            var importedToday = await db.HearingBackfillApr2026
+                .AsNoTracking()
+                .CountAsync(r => r.ImportStatus == "Imported" && r.ImportedAtUtc >= since, ct);
+            var failedToday = await db.HearingBackfillApr2026
+                .AsNoTracking()
+                .CountAsync(r => r.ImportStatus == "Failed" && r.FailedAtUtc >= since, ct);
+            var pendingRemaining = await db.HearingBackfillApr2026
+                .AsNoTracking()
+                .CountAsync(r => r.ImportStatus == "Pending", ct);
+            var topErrors = await db.HearingBackfillApr2026
+                .AsNoTracking()
+                .Where(r => r.ImportStatus == "Failed" && r.ImportError != null)
+                .OrderByDescending(r => r.FailedAtUtc)
+                .Select(r => r.ImportError!)
+                .Take(5)
+                .ToListAsync(ct);
+
+            return new DailySummaryBackfillInfo(importedToday, failedToday, pendingRemaining, topErrors);
+        }
+
+        private sealed record DailySummaryBackfillInfo(int ImportedToday, int FailedToday, int PendingRemaining, List<string> TopErrors);
+
+        private static string BuildDailySummaryHtml(
+            DateOnly date, int newMappings, int updatedToday, int totalFailures,
+            List<UpcomingEligibleRow> upcomingRows,
+            DailySummaryBackfillInfo? backfillInfo)
+        {
+            static string E(string s) => System.Net.WebUtility.HtmlEncode(s ?? string.Empty);
+
             var sb = new StringBuilder();
             sb.AppendLine("<html><body style='font-family:Arial,sans-serif;'>");
             sb.AppendLine($"<h2>ODMON Daily Summary — {date:yyyy-MM-dd}</h2>");
+
+            // 1) System Activity (business-level)
+            sb.AppendLine("<h3 style='margin:16px 0 8px;'>פעילות מערכת</h3>");
             sb.AppendLine("<table style='border-collapse:collapse; width:400px;'>");
-
-            void Row(string label, object value, bool warn = false)
-            {
-                var color = warn ? "color:red;font-weight:bold;" : "";
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>{label}</td><td style='padding:4px;{color}'>{value}</td></tr>");
-            }
-
-            Row("Sync runs", runs);
-            Row("New Monday items (mappings)", newMappings);
-            Row("Bootstrap created", created);
-            Row("Updated", updated);
-            Row("Skipped (no change)", skipped);
-            Row("Cooling filtered", cooling);
-            Row("Total failures (run-level)", failed, failed > 0);
-            Row("SyncFailures (persisted)", syncFailures, syncFailures > 0);
-            Row("Circuit breaker incidents", cbIncidents, cbIncidents > 0);
-            Row("Avg run duration", $"{avgDurationMs:F0} ms");
-            Row("Max run duration", $"{maxDurationMs} ms");
-
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>פריטים חדשים ב-Monday (היום)</td><td style='padding:4px;'>{newMappings}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>עודכנו היום</td><td style='padding:4px;'>{updatedToday}</td></tr>");
+            var failStyle = totalFailures > 0 ? "color:red;font-weight:bold;" : "";
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>סך כשלונות</td><td style='padding:4px;{failStyle}'>{totalFailures}</td></tr>");
             sb.AppendLine("</table>");
 
-            // --- NEW: append expected-to-open table (RTL) ---
+            // 2) Cases expected to open (today/tomorrow/day-after)
             sb.AppendLine("<hr/>");
-            sb.AppendLine(upcomingHtml);
-            // --- END NEW ---
+            sb.AppendLine("<div style='direction:rtl;text-align:right;font-family:Arial,sans-serif;'>");
+            sb.AppendLine("<h3 style='margin:16px 0 8px;'>תיקים צפויים להיפתח (היום/מחר/מחרתיים)</h3>");
+            if (upcomingRows.Count == 0)
+            {
+                sb.AppendLine("<div>אין תיקים צפויים בטווח הזה.</div>");
+            }
+            else
+            {
+                sb.AppendLine("<table style='border-collapse:collapse;width:100%;border:1px solid #ddd;' cellpadding='6'>");
+                sb.AppendLine("<thead><tr style='background:#f5f5f5;'>");
+                sb.AppendLine("<th style='border:1px solid #ddd;'>מספר תיק</th>");
+                sb.AppendLine("<th style='border:1px solid #ddd;'>תאריך יצירה</th>");
+                sb.AppendLine("<th style='border:1px solid #ddd;'>זמין לאחר</th>");
+                sb.AppendLine("<th style='border:1px solid #ddd;'>תקופה</th>");
+                sb.AppendLine("</tr></thead><tbody>");
+                foreach (var r in upcomingRows)
+                {
+                    sb.AppendLine("<tr>");
+                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{E(r.TikNumber)}</td>");
+                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{r.TsCreateDate:yyyy-MM-dd}</td>");
+                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{r.EligibleAfter:yyyy-MM-dd}</td>");
+                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{E(r.OpenBucket)}</td>");
+                    sb.AppendLine("</tr>");
+                }
+                sb.AppendLine("</tbody></table>");
+            }
+            sb.AppendLine("</div>");
+
+            // 3) Hearings Backfill (only if enabled or has data)
+            if (backfillInfo != null)
+            {
+                sb.AppendLine("<hr/>");
+                sb.AppendLine("<h3 style='margin:16px 0 8px;'>Backfill דיוני אפריל 2026</h3>");
+                sb.AppendLine("<table style='border-collapse:collapse; width:400px;'>");
+                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>יובאו היום</td><td style='padding:4px;'>{backfillInfo.ImportedToday}</td></tr>");
+                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>נכשלו היום</td><td style='padding:4px;'>{backfillInfo.FailedToday}</td></tr>");
+                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>ממתינים</td><td style='padding:4px;'>{backfillInfo.PendingRemaining}</td></tr>");
+                sb.AppendLine("</table>");
+                if (backfillInfo.TopErrors.Count > 0)
+                {
+                    sb.AppendLine("<p style='margin-top:8px;'><strong>5 טעויות אחרונות:</strong></p>");
+                    sb.AppendLine("<ul style='margin:0;padding-left:20px;'>");
+                    foreach (var err in backfillInfo.TopErrors)
+                    {
+                        var trimmed = err.Length > 200 ? err[..200] + "..." : err;
+                        sb.AppendLine($"<li style='margin:4px 0;'>{E(trimmed)}</li>");
+                    }
+                    sb.AppendLine("</ul>");
+                }
+            }
 
             sb.AppendLine("<br/><small>Generated by ODMON Worker email monitor.</small>");
             sb.AppendLine("</body></html>");
@@ -290,6 +359,9 @@ namespace Odmon.Worker.Workers
         {
             try
             {
+                if (!_config.GetValue<bool>("Email:Enabled", false))
+                    return;
+
                 var intervalMinutes = _config.GetValue<int>("Email:DigestIntervalMinutes", 15);
                 if (DateTime.UtcNow - _lastDigestUtc < TimeSpan.FromMinutes(intervalMinutes))
                     return;
@@ -362,7 +434,7 @@ DECLARE @TodayIsrael date =
         f.TikCounter,
         f.TikNumber,
         CAST(f.tsCreateDate AS date) AS tsCreateDate
-    FROM odlight.dbo.vwExportToOuterSystems_Files f
+    FROM dbo.vwExportToOuterSystems_Files f
 ),
 EligibleCalc AS
 (

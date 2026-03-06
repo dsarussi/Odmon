@@ -148,6 +148,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.Configure<OdcanitLoadOptions>(config.GetSection("OdcanitLoad"));
     services.Configure<DocumentIngestionSettings>(config.GetSection("MondayDocumentIngestion"));
     services.Configure<OdcanitDocumentSettings>(config.GetSection("OdcanitDocuments"));
+    services.Configure<HearingBackfillSettings>(config.GetSection("HearingBackfill"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
@@ -166,6 +167,8 @@ hostBuilder.ConfigureServices((context, services) =>
 
     services.AddScoped<SyncService>();
     services.AddHostedService<SyncWorker>();
+    services.AddScoped<HearingBackfillService>();
+    services.AddHostedService<HearingBackfillWorker>();
 
     // Document ingestion from Monday questionnaire board
     services.AddHttpClient<DocumentIngestionMondayService>(client =>
@@ -357,6 +360,7 @@ static async Task VerifyIntegrationDbConnectionAsync(IServiceProvider services)
         await VerifyTableExistsAsync(connection, "HearingNearestSnapshots", logger);
         await VerifyTableExistsAsync(connection, "SyncRunLocks", logger);
         await VerifyTableExistsAsync(connection, "SyncFailures", logger);
+        await VerifyTableExistsAsync(connection, "HearingBackfill_Apr2026", logger);
     }
     catch (Exception ex)
     {

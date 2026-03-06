@@ -23,6 +23,7 @@ namespace Odmon.Worker.Data
         public DbSet<MondayDocumentImport> MondayDocumentImports => Set<MondayDocumentImport>();
         public DbSet<NispahWriteLog> NispahWriteLogs => Set<NispahWriteLog>();
         public DbSet<CaseAnnexWriteState> CaseAnnexWriteStates => Set<CaseAnnexWriteState>();
+        public DbSet<HearingBackfillApr2026> HearingBackfillApr2026 => Set<HearingBackfillApr2026>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -197,7 +198,20 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.RequestedClaimAmount);
             });
 
+            modelBuilder.Entity<HearingBackfillApr2026>(b =>
+            {
+                b.ToTable("HearingBackfill_Apr2026");
+                b.HasKey(x => x.Id);
+                b.Property(x => x.ImportStatus).HasMaxLength(20).IsRequired().HasDefaultValueSql("N'Pending'");
+                b.Property(x => x.ImportedAtUtc).HasColumnType("datetime2(3)");
+                b.Property(x => x.MondayItemId).HasColumnType("bigint");
+                b.Property(x => x.ImportError).HasMaxLength(4000);
+                b.Property(x => x.FailedAtUtc).HasColumnType("datetime2(3)");
+            });
+
             base.OnModelCreating(modelBuilder);
         }
     }
 }
+
+

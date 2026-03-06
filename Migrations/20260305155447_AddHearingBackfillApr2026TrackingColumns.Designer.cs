@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Odmon.Worker.Data;
 
@@ -11,9 +12,11 @@ using Odmon.Worker.Data;
 namespace Odmon.Worker.Migrations
 {
     [DbContext(typeof(IntegrationDbContext))]
-    partial class IntegrationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260305155447_AddHearingBackfillApr2026TrackingColumns")]
+    partial class AddHearingBackfillApr2026TrackingColumns
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -133,10 +136,6 @@ namespace Odmon.Worker.Migrations
                     b.Property<DateTime?>("EventDate")
                         .HasColumnType("datetime2")
                         .HasColumnName("תאריך אירוע");
-
-                    b.Property<DateTime?>("FailedAtUtc")
-                        .HasColumnType("datetime2(3)")
-                        .HasColumnName("FailedAtUtc");
 
                     b.Property<DateTime?>("HearingDate")
                         .HasColumnType("datetime2")
