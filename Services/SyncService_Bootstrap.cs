@@ -15,6 +15,11 @@ namespace Odmon.Worker.Services
 {
     public partial class SyncService
     {
+        /// <summary>Cases opened on or before this date use legacy cooling-period logic.</summary>
+        private static readonly DateOnly LegacyCoolingCutoffDate = new(2026, 3, 5);
+
+        /// <summary>Cases opened on or after this date use ReadyForMonday field only (no cooling).</summary>
+        private static readonly DateOnly ReadyForMondayCutoffDate = new(2026, 3, 8);
         /// <summary>
         /// Phase A — Bootstrap Onboarding.
         /// Discovers all cases with tsCreateDate >= CutoffDate from Odcanit,
@@ -81,61 +86,61 @@ namespace Odmon.Worker.Services
             // 4) Load full case data from Odcanit for unmapped eligible TikCounters
             var casesToOnboard = await _odcanitReader.GetCasesByTikCountersAsync(unmappedEligible, ct);
 
-            // ── Apply cooling period filter (Israeli business days: Sun–Thu) ──
-            if (coolingEnabled)
+            // ── Apply onboarding eligibility (legacy cooling vs ReadyForMonday) ──
+            var beforeCount = casesToOnboard.Count;
+            var eligible = new List<OdcanitCase>();
+            var nullDateTikCounters = new List<(int TikCounter, string? TikNumber)>();
+
+            var israelTz = GetIsraelTimeZone();
+            var nowIsrael = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(
+                DateTime.SpecifyKind(utcNow, DateTimeKind.Utc), israelTz));
+
+            foreach (var c in casesToOnboard)
             {
-                var beforeCount = casesToOnboard.Count;
-                var cooled = new List<OdcanitCase>();
-                var nullDateTikCounters = new List<(int TikCounter, string? TikNumber)>();
+                var (isEligible, rulePath) = DetermineOnboardingEligibility(
+                    c, coolingPeriodDays, coolingEnabled, israelTz, utcNow, nowIsrael);
 
-                var israelTz = GetIsraelTimeZone();
-                var nowIsrael = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(
-                    DateTime.SpecifyKind(utcNow, DateTimeKind.Utc), israelTz));
-
-                foreach (var c in casesToOnboard)
+                if (rulePath == "NullDate")
                 {
-                    if (!c.tsCreateDate.HasValue)
-                    {
-                        nullDateTikCounters.Add((c.TikCounter, c.TikNumber));
-                        result.CoolingFilteredOut++;
-                        continue;
-                    }
-
-                    var openDateIsrael = DateOnly.FromDateTime(c.tsCreateDate.Value);
-                    var eligibleFrom = AddIsraeliBusinessDays(openDateIsrael, coolingPeriodDays);
-
-                    if (nowIsrael >= eligibleFrom)
-                    {
-                        _logger.LogInformation(
-                            "ELIGIBLE DUE TO COOLING PERIOD END: TikCounter={TikCounter}, TikNumber={TikNumber}, EligibleFromIsraelDate={EligibleFromIsraelDate}, NowIsrael={NowIsrael}",
-                            c.TikCounter, c.TikNumber ?? "<null>", eligibleFrom, nowIsrael);
-                        cooled.Add(c);
-                    }
-                    else
-                    {
-                        _logger.LogInformation(
-                            "COOLING FILTERED: TikCounter={TikCounter}, TikNumber={TikNumber}, OpenDateIsrael={OpenDateIsrael}, EligibleFromIsraelDate={EligibleFromIsraelDate}, NowIsraelDate={NowIsraelDate}",
-                            c.TikCounter, c.TikNumber ?? "<null>", openDateIsrael, eligibleFrom, nowIsrael);
-                        result.CoolingFilteredOut++;
-                    }
+                    nullDateTikCounters.Add((c.TikCounter, c.TikNumber));
+                    result.CoolingFilteredOut++;
+                    continue;
                 }
 
-                // Log null tsCreateDate warnings (once per run, batched)
-                if (nullDateTikCounters.Count > 0)
+                if (isEligible)
                 {
-                    foreach (var (tikCounter, tikNumber) in nullDateTikCounters)
-                    {
-                        _logger.LogWarning(
-                            "Cooling period: NULL tsCreateDate, not eligible for onboarding. TikCounter={TikCounter}, TikNumber={TikNumber}",
-                            tikCounter, tikNumber ?? "<null>");
-                    }
+                    eligible.Add(c);
+                    _logger.LogInformation(
+                        "{RulePath}: TikCounter={TikCounter}, TikNumber={TikNumber}, OpenDateIsrael={OpenDateIsrael}, ReadyForMonday={ReadyForMonday}",
+                        rulePath, c.TikCounter, c.TikNumber ?? "<null>",
+                        c.tsCreateDate.HasValue ? DateOnly.FromDateTime(c.tsCreateDate.Value).ToString("yyyy-MM-dd") : "<null>",
+                        c.IsReadyForMonday);
                 }
-
-                casesToOnboard = cooled;
-                _logger.LogInformation(
-                    "BOOTSTRAP | Cooling filter applied (Israeli business days): Candidates={Candidates}, CoolingFilteredOut={CoolingFilteredOut}, EligibleAfterCooling={Eligible}, CoolingPeriodDays={CoolingPeriodDays}, NowIsrael={NowIsrael}",
-                    beforeCount, result.CoolingFilteredOut, casesToOnboard.Count, coolingPeriodDays, nowIsrael);
+                else
+                {
+                    result.CoolingFilteredOut++;
+                    _logger.LogInformation(
+                        "{RulePath}: TikCounter={TikCounter}, TikNumber={TikNumber}, OpenDateIsrael={OpenDateIsrael}, ReadyForMonday={ReadyForMonday}",
+                        rulePath, c.TikCounter, c.TikNumber ?? "<null>",
+                        c.tsCreateDate.HasValue ? DateOnly.FromDateTime(c.tsCreateDate.Value).ToString("yyyy-MM-dd") : "<null>",
+                        c.IsReadyForMonday);
+                }
             }
+
+            if (nullDateTikCounters.Count > 0)
+            {
+                foreach (var (tikCounter, tikNumber) in nullDateTikCounters)
+                {
+                    _logger.LogWarning(
+                        "Onboarding: NULL tsCreateDate, not eligible. TikCounter={TikCounter}, TikNumber={TikNumber}",
+                        tikCounter, tikNumber ?? "<null>");
+                }
+            }
+
+            casesToOnboard = eligible;
+            _logger.LogInformation(
+                "BOOTSTRAP | Onboarding eligibility applied: Candidates={Candidates}, FilteredOut={FilteredOut}, Eligible={Eligible}, CoolingPeriodDays={CoolingPeriodDays}, NowIsrael={NowIsrael}",
+                beforeCount, result.CoolingFilteredOut, casesToOnboard.Count, coolingPeriodDays, nowIsrael);
 
             // Apply DocumentType derivation
             foreach (var c in casesToOnboard)
@@ -242,6 +247,57 @@ namespace Odmon.Worker.Services
                 result.CoolingFilteredOut, result.NewlyOnboarded, result.SkippedGuardrail, result.Failed, sw.ElapsedMilliseconds);
 
             return result;
+        }
+
+        /// <summary>
+        /// Determines whether an unmapped case is eligible for Monday onboarding.
+        /// - Cases opened on or before 2026-03-05: use legacy cooling period.
+        /// - Cases opened on or after 2026-03-08: require IsReadyForMonday (no cooling).
+        /// - 2026-03-06 and 2026-03-07: treated as legacy (no special handling).
+        /// </summary>
+        /// <returns>(eligible, rulePath) where rulePath is LegacyCoolingEligible, LegacyCoolingFiltered, ReadyForMondayEligible, ReadyForMondayFiltered, or NullDate.</returns>
+        private (bool eligible, string rulePath) DetermineOnboardingEligibility(
+            OdcanitCase c,
+            int coolingPeriodDays,
+            bool coolingEnabled,
+            TimeZoneInfo israelTz,
+            DateTime utcNow,
+            DateOnly nowIsrael)
+        {
+            if (!c.tsCreateDate.HasValue)
+                return (false, "NullDate");
+
+            var openDateIsrael = DateOnly.FromDateTime(c.tsCreateDate.Value);
+
+            if (openDateIsrael <= LegacyCoolingCutoffDate)
+            {
+                // Legacy: use cooling period
+                if (!coolingEnabled)
+                {
+                    _logger.LogDebug("LegacyCoolingEligible (cooling disabled): TikCounter={TikCounter}", c.TikCounter);
+                    return (true, "LegacyCoolingEligible");
+                }
+                var eligibleFrom = AddIsraeliBusinessDays(openDateIsrael, coolingPeriodDays);
+                if (nowIsrael >= eligibleFrom)
+                    return (true, "LegacyCoolingEligible");
+                return (false, "LegacyCoolingFiltered");
+            }
+
+            if (openDateIsrael >= ReadyForMondayCutoffDate)
+            {
+                // New: require IsReadyForMonday, no cooling
+                if (c.IsReadyForMonday)
+                    return (true, "ReadyForMondayEligible");
+                return (false, "ReadyForMondayFiltered");
+            }
+
+            // 2026-03-06 and 2026-03-07: treated as legacy (cooling)
+            if (!coolingEnabled)
+                return (true, "LegacyCoolingEligible");
+            var eligibleFromGap = AddIsraeliBusinessDays(openDateIsrael, coolingPeriodDays);
+            if (nowIsrael >= eligibleFromGap)
+                return (true, "LegacyCoolingEligible");
+            return (false, "LegacyCoolingFiltered");
         }
 
         /// <summary>Result counters for bootstrap onboarding.</summary>

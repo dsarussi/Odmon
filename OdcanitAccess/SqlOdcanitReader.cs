@@ -757,6 +757,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("כתובת דוא\"ל עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerEmail = row.strData);
             Add("חברה מבטחת צד ג'", (c, row) => c.ThirdPartyInsurerName = row.strData);
             Add("Third-party driver: insurer name", (c, row) => c.ThirdPartyInsurerName = row.strData);
+            Add("מוכן למאנדיי", (c, row) => c.IsReadyForMonday = string.Equals(row.strData?.Trim(), "כן", StringComparison.Ordinal));
             Add("ח.פ. חברת ביטוח", (c, row) => c.InsuranceCompanyId = row.strData);
             Add("כתובת חברת ביטוח", (c, row) => c.InsuranceCompanyAddress = row.strData);
             Add("כתובת דוא\"ל חברת ביטוח", (c, row) => c.InsuranceCompanyEmail = row.strData);

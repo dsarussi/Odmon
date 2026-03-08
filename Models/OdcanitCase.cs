@@ -211,6 +211,13 @@ namespace Odmon.Worker.Models
         /// </summary>
         [NotMapped]
         public string? DocumentType { get; set; }
+
+        /// <summary>
+        /// True when UserData (PageName="פרטי תיק נזיקין מליגל", FieldName="מוכן למאנדיי") has strData="כן".
+        /// Used for onboarding eligibility of cases opened on/after 2026-03-08.
+        /// </summary>
+        [NotMapped]
+        public bool IsReadyForMonday { get; set; }
     }
 }
 
