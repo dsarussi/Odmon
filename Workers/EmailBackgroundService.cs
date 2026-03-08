@@ -173,7 +173,6 @@ namespace Odmon.Worker.Workers
                 using var scope = _scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<IntegrationDbContext>();
                 var odcanitDb = scope.ServiceProvider.GetRequiredService<OdcanitDbContext>();
-                var hearingBackfillEnabled = _config.GetValue<bool>("HearingBackfill:Enable", false);
 
                 var since = DateTime.UtcNow.AddHours(-24);
 
@@ -213,26 +212,8 @@ namespace Odmon.Worker.Workers
                     _logger.LogWarning(ex, "Daily summary: Could not load upcoming eligible cases from OdcanitDb.");
                 }
 
-                // 3) Hearings Backfill (only if enabled or has Imported/Failed today)
-                DailySummaryBackfillInfo? backfillInfo = null;
-                if (hearingBackfillEnabled)
-                {
-                    backfillInfo = await GetHearingBackfillSummaryAsync(db, since, ct);
-                }
-                else
-                {
-                    var importedToday = await db.HearingBackfillApr2026
-                        .AsNoTracking()
-                        .CountAsync(r => r.ImportStatus == "Imported" && r.ImportedAtUtc >= since, ct);
-                    var failedToday = await db.HearingBackfillApr2026
-                        .AsNoTracking()
-                        .CountAsync(r => r.ImportStatus == "Failed" && r.FailedAtUtc >= since, ct);
-                    if (importedToday > 0 || failedToday > 0)
-                        backfillInfo = await GetHearingBackfillSummaryAsync(db, since, ct);
-                }
-
                 var subject = $"Daily Summary – {israelDate:yyyy-MM-dd}";
-                var body = BuildDailySummaryHtml(israelDate, newMappings, updatedToday, totalFailures, upcomingRows ?? new List<UpcomingEligibleRow>(), backfillInfo);
+                var body = BuildDailySummaryHtml(israelDate, newMappings, updatedToday, totalFailures, upcomingRows ?? new List<UpcomingEligibleRow>());
 
                 if (_config.GetValue<bool>("Email:Enabled", false))
                 {
@@ -249,34 +230,9 @@ namespace Odmon.Worker.Workers
             }
         }
 
-        private static async Task<DailySummaryBackfillInfo?> GetHearingBackfillSummaryAsync(IntegrationDbContext db, DateTime since, CancellationToken ct)
-        {
-            var importedToday = await db.HearingBackfillApr2026
-                .AsNoTracking()
-                .CountAsync(r => r.ImportStatus == "Imported" && r.ImportedAtUtc >= since, ct);
-            var failedToday = await db.HearingBackfillApr2026
-                .AsNoTracking()
-                .CountAsync(r => r.ImportStatus == "Failed" && r.FailedAtUtc >= since, ct);
-            var pendingRemaining = await db.HearingBackfillApr2026
-                .AsNoTracking()
-                .CountAsync(r => r.ImportStatus == "Pending", ct);
-            var topErrors = await db.HearingBackfillApr2026
-                .AsNoTracking()
-                .Where(r => r.ImportStatus == "Failed" && r.ImportError != null)
-                .OrderByDescending(r => r.FailedAtUtc)
-                .Select(r => r.ImportError!)
-                .Take(5)
-                .ToListAsync(ct);
-
-            return new DailySummaryBackfillInfo(importedToday, failedToday, pendingRemaining, topErrors);
-        }
-
-        private sealed record DailySummaryBackfillInfo(int ImportedToday, int FailedToday, int PendingRemaining, List<string> TopErrors);
-
         private static string BuildDailySummaryHtml(
             DateOnly date, int newMappings, int updatedToday, int totalFailures,
-            List<UpcomingEligibleRow> upcomingRows,
-            DailySummaryBackfillInfo? backfillInfo)
+            List<UpcomingEligibleRow> upcomingRows)
         {
             static string E(string s) => System.Net.WebUtility.HtmlEncode(s ?? string.Empty);
 
@@ -322,29 +278,6 @@ namespace Odmon.Worker.Workers
                 sb.AppendLine("</tbody></table>");
             }
             sb.AppendLine("</div>");
-
-            // 3) Hearings Backfill (only if enabled or has data)
-            if (backfillInfo != null)
-            {
-                sb.AppendLine("<hr/>");
-                sb.AppendLine("<h3 style='margin:16px 0 8px;'>Backfill דיוני אפריל 2026</h3>");
-                sb.AppendLine("<table style='border-collapse:collapse; width:400px;'>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>יובאו היום</td><td style='padding:4px;'>{backfillInfo.ImportedToday}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>נכשלו היום</td><td style='padding:4px;'>{backfillInfo.FailedToday}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>ממתינים</td><td style='padding:4px;'>{backfillInfo.PendingRemaining}</td></tr>");
-                sb.AppendLine("</table>");
-                if (backfillInfo.TopErrors.Count > 0)
-                {
-                    sb.AppendLine("<p style='margin-top:8px;'><strong>5 טעויות אחרונות:</strong></p>");
-                    sb.AppendLine("<ul style='margin:0;padding-left:20px;'>");
-                    foreach (var err in backfillInfo.TopErrors)
-                    {
-                        var trimmed = err.Length > 200 ? err[..200] + "..." : err;
-                        sb.AppendLine($"<li style='margin:4px 0;'>{E(trimmed)}</li>");
-                    }
-                    sb.AppendLine("</ul>");
-                }
-            }
 
             sb.AppendLine("<br/><small>Generated by ODMON Worker email monitor.</small>");
             sb.AppendLine("</body></html>");

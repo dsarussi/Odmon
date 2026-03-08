@@ -201,12 +201,7 @@ namespace Odmon.Worker.Data
             modelBuilder.Entity<HearingBackfillApr2026>(b =>
             {
                 b.ToTable("HearingBackfill_Apr2026");
-                b.HasKey(x => x.Id);
-                b.Property(x => x.ImportStatus).HasMaxLength(20).IsRequired().HasDefaultValueSql("N'Pending'");
-                b.Property(x => x.ImportedAtUtc).HasColumnType("datetime2(3)");
-                b.Property(x => x.MondayItemId).HasColumnType("bigint");
-                b.Property(x => x.ImportError).HasMaxLength(4000);
-                b.Property(x => x.FailedAtUtc).HasColumnType("datetime2(3)");
+                b.HasNoKey();
             });
 
             base.OnModelCreating(modelBuilder);

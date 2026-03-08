@@ -51,9 +51,9 @@ namespace Odmon.Worker.Workers
                     var service = scope.ServiceProvider.GetRequiredService<HearingBackfillService>();
                     var result = await service.RunAsync(stoppingToken);
 
-                    if (result.TotalPendingScanned == 0)
+                    if (result.NoMoreRows)
                     {
-                        _logger.LogInformation("HearingBackfillWorker: No pending rows. Stopping backfill loop.");
+                        _logger.LogInformation("HearingBackfillWorker: No more rows to process. Stopping backfill loop.");
                         return;
                     }
                 }
