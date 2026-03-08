@@ -31,7 +31,7 @@ namespace Odmon.Worker.Models
         public string? TikNumber { get; set; }
 
         [Column("מספר לקוח")]
-        public string? ClientNumber { get; set; }
+        public int? ClientNumber { get; set; }
 
         [Column("תאריך אירוע")]
         public DateTime? EventDate { get; set; }

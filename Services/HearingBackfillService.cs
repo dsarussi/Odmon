@@ -242,17 +242,17 @@ OFFSET {0} ROWS FETCH NEXT {1} ROWS ONLY";
             if (!string.IsNullOrWhiteSpace(row.TikNumber))
                 cv[TikNumberColumnId] = row.TikNumber.Trim();
 
-            if (!string.IsNullOrWhiteSpace(row.ClientNumber) && dropdownLabels != null)
+            if (row.ClientNumber.HasValue && dropdownLabels != null)
             {
-                var val = row.ClientNumber.Trim();
-                if (dropdownLabels.Contains(val))
-                    cv[ClientNumberColumnId] = new { labels = new[] { val } };
+                var clientNumberText = row.ClientNumber.Value.ToString();
+                if (dropdownLabels.Contains(clientNumberText))
+                    cv[ClientNumberColumnId] = new { labels = new[] { clientNumberText } };
                 else
                 {
                     dropdownSkipped = true;
                     _logger.LogWarning(
                         "HEARING BACKFILL | Dropdown label not found, skipping column | ColumnId={ColumnId}, MissingValue={Value}, TikNumber={TikNumber}",
-                        ClientNumberColumnId, val, row.TikNumber);
+                        ClientNumberColumnId, clientNumberText, row.TikNumber);
                 }
             }
 
