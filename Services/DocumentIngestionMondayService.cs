@@ -60,6 +60,18 @@ namespace Odmon.Worker.Services
             public long FileSize { get; set; }
         }
 
+        public class TaskItem
+        {
+            public long ItemId { get; set; }
+            public string Name { get; set; } = string.Empty;
+            public string? StatusLabel { get; set; }
+            public DateTime? StatusChangedAtUtc { get; set; }
+            public DateTime? ItemUpdatedAtUtc { get; set; }
+            public List<FileAssetRef> FileAssets { get; set; } = [];
+            public string? TikNumber { get; set; }
+            public string? LookupRawValue { get; set; }
+        }
+
         // ───────── Fetch questionnaire items (paginated) ─────────
 
         public async Task<List<QuestionnaireItem>> FetchQuestionnaireItemsAsync(
@@ -167,6 +179,207 @@ namespace Odmon.Worker.Services
 
             _logger.LogInformation("Total questionnaire items fetched: {Count} from board {BoardId}", items.Count, boardId);
             return items;
+        }
+
+        public async Task<List<TaskItem>> FetchTaskItemsAsync(
+            long boardId,
+            string taskStatusColumnId,
+            string fileColumnId,
+            string tikNumberColumnId,
+            int pageLimit,
+            CancellationToken ct)
+        {
+            var columnIds = new[] { taskStatusColumnId, fileColumnId, tikNumberColumnId };
+            var items = new List<TaskItem>();
+            string? cursor = null;
+
+            do
+            {
+                var columnValuesFragment = @"
+                                    column_values(ids: $columnIds) {
+                                        id
+                                        value
+                                        text
+                                    }";
+
+                string query;
+                Dictionary<string, object> variables;
+
+                if (cursor == null)
+                {
+                    query = $@"query ($boardId: ID!, $columnIds: [String!], $limit: Int!) {{
+                        boards(ids: [$boardId]) {{
+                            items_page(limit: $limit) {{
+                                cursor
+                                items {{
+                                    id
+                                    name
+                                    updated_at
+                                    {columnValuesFragment}
+                                }}
+                            }}
+                        }}
+                    }}";
+                    variables = new Dictionary<string, object>
+                    {
+                        ["boardId"] = boardId.ToString(),
+                        ["columnIds"] = columnIds,
+                        ["limit"] = pageLimit
+                    };
+                }
+                else
+                {
+                    query = $@"query ($cursor: String!, $columnIds: [String!], $limit: Int!) {{
+                        next_items_page(cursor: $cursor, limit: $limit) {{
+                            cursor
+                            items {{
+                                id
+                                name
+                                updated_at
+                                {columnValuesFragment}
+                            }}
+                        }}
+                    }}";
+                    variables = new Dictionary<string, object>
+                    {
+                        ["cursor"] = cursor,
+                        ["columnIds"] = columnIds,
+                        ["limit"] = pageLimit
+                    };
+                }
+
+                using var doc = await ExecuteGraphQLAsync(query, variables, ct);
+                var root = doc.RootElement;
+
+                JsonElement itemsPage;
+                if (cursor == null)
+                {
+                    if (!root.TryGetProperty("data", out var data) ||
+                        !data.TryGetProperty("boards", out var boards) ||
+                        boards.ValueKind != JsonValueKind.Array || boards.GetArrayLength() == 0 ||
+                        !boards[0].TryGetProperty("items_page", out itemsPage))
+                        break;
+                }
+                else
+                {
+                    if (!root.TryGetProperty("data", out var data) ||
+                        !data.TryGetProperty("next_items_page", out itemsPage))
+                        break;
+                }
+
+                cursor = itemsPage.TryGetProperty("cursor", out var cursorEl) && cursorEl.ValueKind == JsonValueKind.String
+                    ? cursorEl.GetString()
+                    : null;
+
+                if (!itemsPage.TryGetProperty("items", out var itemsArray) ||
+                    itemsArray.ValueKind != JsonValueKind.Array)
+                    break;
+
+                foreach (var itemEl in itemsArray.EnumerateArray())
+                {
+                    var ti = ParseTaskItem(itemEl, taskStatusColumnId, fileColumnId, tikNumberColumnId);
+                    if (ti != null)
+                        items.Add(ti);
+                }
+            } while (!string.IsNullOrEmpty(cursor));
+
+            _logger.LogInformation("Total task items fetched: {Count} from board {BoardId}", items.Count, boardId);
+            return items;
+        }
+
+        internal TaskItem? ParseTaskItem(JsonElement itemEl, string taskStatusColumnId, string fileColumnId, string tikNumberColumnId)
+        {
+            var idStr = itemEl.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(idStr) || !long.TryParse(idStr, out var itemId))
+                return null;
+
+            var name = itemEl.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? "" : "";
+            var itemUpdatedAt = itemEl.TryGetProperty("updated_at", out var updEl) && updEl.ValueKind == JsonValueKind.String
+                ? TryParseIso8601(updEl.GetString())
+                : null;
+            var ti = new TaskItem { ItemId = itemId, Name = name, ItemUpdatedAtUtc = itemUpdatedAt };
+
+            if (!itemEl.TryGetProperty("column_values", out var colValues) || colValues.ValueKind != JsonValueKind.Array)
+                return ti;
+
+            foreach (var col in colValues.EnumerateArray())
+            {
+                var colId = col.TryGetProperty("id", out var cidEl) ? cidEl.GetString() : null;
+                if (colId == null) continue;
+
+                var rawValue = col.TryGetProperty("value", out var valEl) && valEl.ValueKind == JsonValueKind.String ? valEl.GetString() : null;
+                var text = col.TryGetProperty("text", out var textEl) && textEl.ValueKind == JsonValueKind.String ? textEl.GetString()?.Trim() : null;
+
+                if (colId == taskStatusColumnId)
+                {
+                    ti.StatusLabel = !string.IsNullOrWhiteSpace(text) ? text : null;
+                    ti.StatusChangedAtUtc = TryParseStatusChangedAt(rawValue);
+                    continue;
+                }
+                if (colId == fileColumnId)
+                {
+                    if (!string.IsNullOrWhiteSpace(rawValue))
+                        ti.FileAssets = ParseFileAssets(rawValue);
+                    continue;
+                }
+                if (colId == tikNumberColumnId)
+                {
+                    ti.LookupRawValue = rawValue;
+                    ti.TikNumber = TryParseTikNumberFromLookup(text, rawValue);
+                    continue;
+                }
+            }
+            return ti;
+        }
+
+        private static DateTime? TryParseIso8601(string? s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            if (DateTime.TryParse(s, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                return dt.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : dt.ToUniversalTime();
+            return null;
+        }
+
+        private static DateTime? TryParseStatusChangedAt(string? valueJson)
+        {
+            if (string.IsNullOrWhiteSpace(valueJson)) return null;
+            try
+            {
+                using var doc = JsonDocument.Parse(valueJson);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("changed_at", out var changedEl) && changedEl.ValueKind == JsonValueKind.String)
+                {
+                    var s = changedEl.GetString();
+                    if (!string.IsNullOrWhiteSpace(s) && DateTime.TryParse(s, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                        return dt.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : dt.ToUniversalTime();
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static string? TryParseTikNumberFromLookup(string? text, string? valueJson)
+        {
+            if (!string.IsNullOrWhiteSpace(text) && text.Trim().Length > 0 && text.Trim().Length <= 64)
+                return text.Trim();
+            if (string.IsNullOrWhiteSpace(valueJson)) return null;
+            try
+            {
+                using var doc = JsonDocument.Parse(valueJson);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("text", out var textEl) && textEl.ValueKind == JsonValueKind.String)
+                {
+                    var s = textEl.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(s) && s.Length <= 64) return s;
+                }
+                if (root.TryGetProperty("value", out var valEl) && valEl.ValueKind == JsonValueKind.String)
+                {
+                    var s = valEl.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(s) && s.Length <= 64) return s;
+                }
+            }
+            catch { }
+            return null;
         }
 
         // ───────── Get TikVisualID from a case item ─────────

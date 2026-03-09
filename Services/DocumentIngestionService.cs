@@ -88,10 +88,209 @@ namespace Odmon.Worker.Services
                 }
             }
 
+            if (_settings.TasksSource is { Enabled: true })
+            {
+                try
+                {
+                    var taskItems = await _mondayService.FetchTaskItemsAsync(
+                        _settings.TasksSource.BoardId,
+                        _settings.TasksSource.TaskStatusColumnId,
+                        _settings.TasksSource.FileColumnId,
+                        _settings.TasksSource.TikNumberColumnId,
+                        _settings.TasksSource.ItemsPageLimit,
+                        ct);
+
+                    foreach (var taskItem in taskItems)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        try
+                        {
+                            await ProcessTaskItemAsync(taskItem, ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "DOCINGESTION unhandled error processing task item {ItemId}", taskItem.ItemId);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "DOCINGESTION failed to fetch task items from board {BoardId}", _settings.TasksSource.BoardId);
+                    SendAlert("Failed to fetch Tasks board", null, ex);
+                }
+            }
+
             sw.Stop();
             _logger.LogInformation(
                 "DOCINGESTION RUN COMPLETE | Elapsed={ElapsedMs}ms, Processed={Processed}, Succeeded={Succeeded}, Failed={Failed}, Skipped={Skipped}",
                 sw.ElapsedMilliseconds, _totalProcessed, _totalSucceeded, _totalFailed, _totalSkipped);
+        }
+
+        private async Task ProcessTaskItemAsync(DocumentIngestionMondayService.TaskItem item, CancellationToken ct)
+        {
+            var ts = _settings.TasksSource!;
+            var boardId = ts.BoardId;
+            var successLabel = ts.SuccessStatusLabel;
+            var fileColumnId = ts.FileColumnId;
+            var timeoutHours = ts.FileWaitTimeoutHours;
+
+            if (!string.Equals(item.StatusLabel?.Trim(), successLabel, StringComparison.Ordinal))
+            {
+                _logger.LogDebug("DOCINGESTION TASKS item {ItemId} status '{Status}' != '{Expected}', skipping",
+                    item.ItemId, item.StatusLabel ?? "<null>", successLabel);
+                return;
+            }
+
+            var hasFiles = item.FileAssets.Count > 0;
+
+            if (!hasFiles)
+            {
+                var statusChangedAt = item.StatusChangedAtUtc ?? item.ItemUpdatedAtUtc;
+                var cutoff = DateTime.UtcNow.AddHours(-timeoutHours);
+
+                if (statusChangedAt.HasValue && statusChangedAt.Value < cutoff)
+                {
+                    await MarkTaskTimeoutNoFileAsync(item.ItemId, fileColumnId, ct);
+                    _logger.LogWarning(
+                        "DOCINGESTION TASKS timeout-after-2-hours | BoardId={BoardId}, ItemId={ItemId}, StatusChangedAt={StatusChangedAt}, Reason=no file after {Hours}h",
+                        boardId, item.ItemId, statusChangedAt.Value, timeoutHours);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "DOCINGESTION TASKS pending-without-file | BoardId={BoardId}, ItemId={ItemId}, StatusChangedAt={StatusChangedAt}, Will retry next poll",
+                        boardId, item.ItemId, statusChangedAt);
+                }
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(item.TikNumber))
+            {
+                _logger.LogWarning(
+                    "DOCINGESTION TASKS business-failure TikNumber missing | BoardId={BoardId}, ItemId={ItemId}, LookupRawValue={LookupRawValue}",
+                    boardId, item.ItemId, item.LookupRawValue ?? "<null>");
+                await MarkTaskMissingTikFailureAsync(item, fileColumnId, ct);
+                _totalFailed++;
+                return;
+            }
+
+            int? tikCounter;
+            try
+            {
+                tikCounter = await _documentWriter.ResolveTikCounterAsync(item.TikNumber, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "DOCINGESTION TASKS failed to resolve TikCounter for TikNumber={TikNumber}, ItemId={ItemId}", item.TikNumber, item.ItemId);
+                SendAlert($"Tasks: TikCounter resolution failed for {item.TikNumber}", null, ex);
+                _totalFailed++;
+                return;
+            }
+
+            if (!tikCounter.HasValue)
+            {
+                _logger.LogWarning(
+                    "DOCINGESTION TASKS business-failure no TikCounter | BoardId={BoardId}, ItemId={ItemId}, TikNumber={TikNumber}",
+                    boardId, item.ItemId, item.TikNumber);
+                await MarkTaskMissingTikFailureAsync(item, fileColumnId, ct);
+                _totalFailed++;
+                return;
+            }
+
+            _logger.LogInformation(
+                "DOCINGESTION TASKS TikNumber resolved | BoardId={BoardId}, ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
+                boardId, item.ItemId, item.TikNumber, tikCounter.Value);
+
+            var assetRef = item.FileAssets[0];
+            if (item.FileAssets.Count > 1)
+            {
+                _logger.LogInformation(
+                    "DOCINGESTION TASKS multiple files, using first asset | BoardId={BoardId}, ItemId={ItemId}, AssetId={AssetId}, TotalFiles={Count}",
+                    boardId, item.ItemId, assetRef.AssetId, item.FileAssets.Count);
+            }
+
+            _logger.LogInformation(
+                "DOCINGESTION TASKS import-started | BoardId={BoardId}, ItemId={ItemId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
+                boardId, item.ItemId, assetRef.AssetId, item.TikNumber, tikCounter.Value);
+
+            await ProcessSingleAssetAsync(item.ItemId, 0, fileColumnId, assetRef, item.TikNumber, tikCounter.Value, ct);
+
+            _logger.LogInformation(
+                "DOCINGESTION TASKS import-succeeded | BoardId={BoardId}, ItemId={ItemId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
+                boardId, item.ItemId, assetRef.AssetId, item.TikNumber, tikCounter.Value);
+        }
+
+        private async Task MarkTaskTimeoutNoFileAsync(long itemId, string columnId, CancellationToken ct)
+        {
+            const string sentinelAssetId = "TIMEOUT";
+            var existing = await _integrationDb.MondayDocumentImports
+                .FirstOrDefaultAsync(r =>
+                    r.MondayQuestionnaireItemId == itemId &&
+                    r.ColumnId == columnId &&
+                    r.AssetId == sentinelAssetId, ct);
+
+            if (existing != null)
+            {
+                existing.Status = DocumentImportStatus.Failed;
+                existing.ErrorMessage = $"Timeout: {_settings.TasksSource!.FileWaitTimeoutHours}h passed since status ready, no file";
+                existing.UpdatedAtUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                _integrationDb.MondayDocumentImports.Add(new MondayDocumentImport
+                {
+                    CreatedAtUtc = DateTime.UtcNow,
+                    UpdatedAtUtc = DateTime.UtcNow,
+                    MondayQuestionnaireItemId = itemId,
+                    LinkedCaseItemId = null,
+                    ColumnId = columnId,
+                    AssetId = sentinelAssetId,
+                    TikVisualID = null,
+                    OriginalFileName = "",
+                    Status = DocumentImportStatus.Failed,
+                    ErrorMessage = $"Timeout: {_settings.TasksSource!.FileWaitTimeoutHours}h passed since status ready, no file"
+                });
+            }
+            await _integrationDb.SaveChangesAsync(ct);
+        }
+
+        private async Task MarkTaskMissingTikFailureAsync(
+            DocumentIngestionMondayService.TaskItem item,
+            string columnId,
+            CancellationToken ct)
+        {
+            var assetRef = item.FileAssets.Count > 0 ? item.FileAssets[0] : null;
+            var assetIdStr = assetRef?.AssetId.ToString() ?? "NO_TIK";
+            var existing = await _integrationDb.MondayDocumentImports
+                .FirstOrDefaultAsync(r =>
+                    r.MondayQuestionnaireItemId == item.ItemId &&
+                    r.ColumnId == columnId &&
+                    r.AssetId == assetIdStr, ct);
+
+            if (existing != null)
+            {
+                if (existing.Status == DocumentImportStatus.Success) return;
+                existing.Status = DocumentImportStatus.Failed;
+                existing.ErrorMessage = "TikNumber missing or empty in lookup column";
+                existing.UpdatedAtUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                _integrationDb.MondayDocumentImports.Add(new MondayDocumentImport
+                {
+                    CreatedAtUtc = DateTime.UtcNow,
+                    UpdatedAtUtc = DateTime.UtcNow,
+                    MondayQuestionnaireItemId = item.ItemId,
+                    LinkedCaseItemId = null,
+                    ColumnId = columnId,
+                    AssetId = assetIdStr,
+                    TikVisualID = item.TikNumber,
+                    OriginalFileName = assetRef?.Name ?? "",
+                    Status = DocumentImportStatus.Failed,
+                    ErrorMessage = "TikNumber missing or empty in lookup column"
+                });
+            }
+            await _integrationDb.SaveChangesAsync(ct);
         }
 
         private async Task ProcessQuestionnaireItemAsync(
@@ -209,7 +408,9 @@ namespace Odmon.Worker.Services
 
             if (record.Status == DocumentImportStatus.Success)
             {
-                _logger.LogDebug("DOCINGESTION asset {AssetId} already imported (Success), skipping", assetIdStr);
+                _logger.LogInformation(
+                    "DOCINGESTION duplicate-skipped | ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
+                    questionnaireItemId, columnId, assetIdStr, tikVisualID, tikCounter);
                 _totalSkipped++;
                 return;
             }

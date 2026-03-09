@@ -30,6 +30,21 @@ namespace Odmon.Worker.Configuration
             AccidentStory.Enabled
                 ? AccidentStory.NispahType
                 : AccidentStoryNispahType;
+
+        /// <summary>Optional Tasks board source (משימות). When enabled, also imports PDFs from items with status "טופס נוצר בהצלחה".</summary>
+        public TasksBoardSourceSettings? TasksSource { get; set; }
+    }
+
+    public class TasksBoardSourceSettings
+    {
+        public bool Enabled { get; set; } = false;
+        public long BoardId { get; set; } = 5035534505;
+        public string TaskStatusColumnId { get; set; } = "color_mkwej7ys";
+        public string SuccessStatusLabel { get; set; } = "טופס נוצר בהצלחה";
+        public string FileColumnId { get; set; } = "file_mkwerwmq";
+        public string TikNumberColumnId { get; set; } = "lookup_mm19bm4v";
+        public int FileWaitTimeoutHours { get; set; } = 2;
+        public int ItemsPageLimit { get; set; } = 50;
     }
 
     public class AccidentStorySettings

@@ -232,6 +232,19 @@ InvalidOperationException: BoardId is 0 for TikCounter=900000. Missing config ke
 | `MondayDocumentIngestion:MaxRetryCount` | int | 3 | Maximum retry attempts per failed asset. |
 | `MondayDocumentIngestion:CommandTimeoutSeconds` | int | 60 | SQL command timeout for SP calls. |
 
+**TasksSource** (optional) — Imports generated PDFs from the Monday Tasks board (משימות, 5035534505):
+
+| Config Key | Type | Default | Description |
+|------------|------|---------|-------------|
+| `MondayDocumentIngestion:TasksSource:Enabled` | bool | false | Enable Tasks board as additional document source. |
+| `MondayDocumentIngestion:TasksSource:BoardId` | long | 5035534505 | Tasks board ID. |
+| `MondayDocumentIngestion:TasksSource:TaskStatusColumnId` | string | color_mkwej7ys | Status column. |
+| `MondayDocumentIngestion:TasksSource:SuccessStatusLabel` | string | טופס נוצר בהצלחה | Status label indicating ready for import. |
+| `MondayDocumentIngestion:TasksSource:FileColumnId` | string | file_mkwerwmq | File column. |
+| `MondayDocumentIngestion:TasksSource:TikNumberColumnId` | string | lookup_mm19bm4v | Lookup column for TikNumber. |
+| `MondayDocumentIngestion:TasksSource:FileWaitTimeoutHours` | int | 2 | Hours to wait for file after status ready; then timeout failure. |
+| `MondayDocumentIngestion:TasksSource:ItemsPageLimit` | int | 50 | Max items per API page. |
+
 ### OdcanitDocuments
 
 | Config Key | Type | Default | Description |
