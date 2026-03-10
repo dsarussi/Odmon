@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -187,11 +188,20 @@ namespace Odmon.Worker.Services
             string fileColumnId,
             string tikNumberColumnId,
             int pageLimit,
+            bool isTestMode,
+            int timeoutSeconds,
             CancellationToken ct)
         {
             var columnIds = new[] { taskStatusColumnId, fileColumnId, tikNumberColumnId };
             var items = new List<TaskItem>();
             string? cursor = null;
+            var sw = Stopwatch.StartNew();
+            const int maxRetries = 3;
+            const int baseDelayMs = 1500;
+
+            _logger.LogInformation(
+                "TASKDOC FETCH START | BoardId={BoardId} | ItemsPageLimit={PageLimit} | TestTikNumber={TestMode} | TimeoutSeconds={Timeout}",
+                boardId, pageLimit, isTestMode ? "set" : "none", timeoutSeconds);
 
             do
             {
@@ -248,43 +258,89 @@ namespace Odmon.Worker.Services
                     };
                 }
 
-                using var doc = await ExecuteGraphQLAsync(query, variables, ct);
-                var root = doc.RootElement;
-
-                JsonElement itemsPage;
-                if (cursor == null)
+                JsonDocument? doc = null;
+                for (int attempt = 0; attempt < maxRetries; attempt++)
                 {
-                    if (!root.TryGetProperty("data", out var data) ||
-                        !data.TryGetProperty("boards", out var boards) ||
-                        boards.ValueKind != JsonValueKind.Array || boards.GetArrayLength() == 0 ||
-                        !boards[0].TryGetProperty("items_page", out itemsPage))
+                    if (ct.IsCancellationRequested) break;
+
+                    try
+                    {
+                        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+                        doc = await ExecuteGraphQLAsync(query, variables, timeoutCts.Token);
                         break;
+                    }
+                    catch (Exception ex) when (IsRetryable(ex))
+                    {
+                        if (attempt == maxRetries - 1)
+                        {
+                            sw.Stop();
+                            _logger.LogError(
+                                "TASKDOC FETCH FAILED | BoardId={BoardId} | ExceptionType={ExceptionType} | Message={Message} | ElapsedMs={ElapsedMs} | RetryAttempt={Attempt}",
+                                boardId, ex.GetType().Name, ex.Message, sw.ElapsedMilliseconds, attempt + 1);
+                            throw;
+                        }
+                        var delayMs = baseDelayMs * (1 << attempt);
+                        _logger.LogWarning(
+                            "TASKDOC FETCH RETRY | BoardId={BoardId} | Attempt={Attempt} | Error={Error} | BackoffMs={DelayMs}",
+                            boardId, attempt + 1, ex.Message, delayMs);
+                        await Task.Delay(delayMs, ct);
+                    }
                 }
-                else
+
+                if (doc == null) break;
+
+                using (doc)
                 {
-                    if (!root.TryGetProperty("data", out var data) ||
-                        !data.TryGetProperty("next_items_page", out itemsPage))
+                    var root = doc.RootElement;
+
+                    JsonElement itemsPage;
+                    if (cursor == null)
+                    {
+                        if (!root.TryGetProperty("data", out var data) ||
+                            !data.TryGetProperty("boards", out var boards) ||
+                            boards.ValueKind != JsonValueKind.Array || boards.GetArrayLength() == 0 ||
+                            !boards[0].TryGetProperty("items_page", out itemsPage))
+                            break;
+                    }
+                    else
+                    {
+                        if (!root.TryGetProperty("data", out var data) ||
+                            !data.TryGetProperty("next_items_page", out itemsPage))
+                            break;
+                    }
+
+                    cursor = itemsPage.TryGetProperty("cursor", out var cursorEl) && cursorEl.ValueKind == JsonValueKind.String
+                        ? cursorEl.GetString()
+                        : null;
+
+                    if (!itemsPage.TryGetProperty("items", out var itemsArray) ||
+                        itemsArray.ValueKind != JsonValueKind.Array)
                         break;
-                }
 
-                cursor = itemsPage.TryGetProperty("cursor", out var cursorEl) && cursorEl.ValueKind == JsonValueKind.String
-                    ? cursorEl.GetString()
-                    : null;
-
-                if (!itemsPage.TryGetProperty("items", out var itemsArray) ||
-                    itemsArray.ValueKind != JsonValueKind.Array)
-                    break;
-
-                foreach (var itemEl in itemsArray.EnumerateArray())
-                {
-                    var ti = ParseTaskItem(itemEl, taskStatusColumnId, fileColumnId, tikNumberColumnId);
-                    if (ti != null)
-                        items.Add(ti);
+                    foreach (var itemEl in itemsArray.EnumerateArray())
+                    {
+                        var ti = ParseTaskItem(itemEl, taskStatusColumnId, fileColumnId, tikNumberColumnId);
+                        if (ti != null)
+                            items.Add(ti);
+                    }
                 }
             } while (!string.IsNullOrEmpty(cursor));
 
-            _logger.LogInformation("Total task items fetched: {Count} from board {BoardId}", items.Count, boardId);
+            sw.Stop();
+            _logger.LogInformation(
+                "TASKDOC FETCH SUCCESS | BoardId={BoardId} | TotalFetched={Count} | ElapsedMs={ElapsedMs}",
+                boardId, items.Count, sw.ElapsedMilliseconds);
             return items;
+        }
+
+        private static bool IsRetryable(Exception ex)
+        {
+            if (ex is TaskCanceledException or OperationCanceledException)
+                return true;
+            if (ex is HttpRequestException)
+                return true;
+            return false;
         }
 
         internal TaskItem? ParseTaskItem(JsonElement itemEl, string taskStatusColumnId, string fileColumnId, string tikNumberColumnId)

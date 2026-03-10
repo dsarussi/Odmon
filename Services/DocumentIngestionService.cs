@@ -137,7 +137,11 @@ namespace Odmon.Worker.Services
             {
                 var taskItems = await _mondayService.FetchTaskItemsAsync(
                     ts.BoardId, ts.TaskStatusColumnId, ts.FileColumnId,
-                    ts.TikNumberColumnId, ts.ItemsPageLimit, ct);
+                    ts.TikNumberColumnId,
+                    ts.IsTestMode ? ts.TestModePageLimit : ts.ItemsPageLimit,
+                    ts.IsTestMode,
+                    ts.FetchTimeoutSeconds,
+                    ct);
 
                 tasksFetched = taskItems.Count;
                 _logger.LogInformation("TASKDOC FETCH SUMMARY | TotalFetched={Count}", tasksFetched);

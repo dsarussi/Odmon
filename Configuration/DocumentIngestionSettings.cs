@@ -47,6 +47,10 @@ namespace Odmon.Worker.Configuration
         public int ItemsPageLimit { get; set; } = 50;
         /// <summary>When set, only process items matching this TikNumber (test filter). Null/empty = process all.</summary>
         public string? TestTikNumber { get; set; }
+        /// <summary>HTTP timeout in seconds for Tasks board fetch. Default 120.</summary>
+        public int FetchTimeoutSeconds { get; set; } = 120;
+        /// <summary>When in test mode, fetch at most this many items per page to reduce payload. Default 10.</summary>
+        public int TestModePageLimit { get; set; } = 10;
         public bool IsTestMode => !string.IsNullOrWhiteSpace(TestTikNumber);
     }
 
