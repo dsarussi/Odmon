@@ -199,6 +199,7 @@ namespace Odmon.Worker.Services
             const int maxRetries = 3;
             const int baseDelayMs = 1500;
 
+            _loggedMirrorDiag = false;
             _logger.LogInformation(
                 "TASKDOC FETCH START | BoardId={BoardId} | ItemsPageLimit={PageLimit} | TestTikNumber={TestMode} | TimeoutSeconds={Timeout}",
                 boardId, pageLimit, isTestMode ? "set" : "none", timeoutSeconds);
@@ -210,6 +211,9 @@ namespace Odmon.Worker.Services
                                         id
                                         value
                                         text
+                                        ... on MirrorValue {
+                                            display_value
+                                        }
                                     }";
 
                 string query;
@@ -343,6 +347,8 @@ namespace Odmon.Worker.Services
             return false;
         }
 
+        private bool _loggedMirrorDiag;
+
         internal TaskItem? ParseTaskItem(JsonElement itemEl, string taskStatusColumnId, string fileColumnId, string tikNumberColumnId)
         {
             var idStr = itemEl.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
@@ -380,8 +386,23 @@ namespace Odmon.Worker.Services
                 }
                 if (colId == tikNumberColumnId)
                 {
+                    var displayValue = col.TryGetProperty("display_value", out var dvEl) && dvEl.ValueKind == JsonValueKind.String
+                        ? dvEl.GetString()?.Trim()
+                        : null;
+
+                    if (!_loggedMirrorDiag)
+                    {
+                        _loggedMirrorDiag = true;
+                        _logger.LogInformation(
+                            "TASKDOC MIRROR DIAG | ItemId={ItemId} | ColumnId={ColumnId} | text={Text} | value={Value} | display_value={DisplayValue}",
+                            itemId, colId,
+                            text ?? "<null>",
+                            rawValue != null ? (rawValue.Length > 120 ? rawValue[..120] : rawValue) : "<null>",
+                            displayValue ?? "<null>");
+                    }
+
                     ti.LookupRawValue = rawValue;
-                    ti.TikNumber = TryParseTikNumberFromLookup(text, rawValue);
+                    ti.TikNumber = TryParseTikNumberFromMirror(displayValue, text, rawValue);
                     continue;
                 }
             }
@@ -414,15 +435,26 @@ namespace Odmon.Worker.Services
             return null;
         }
 
-        private static string? TryParseTikNumberFromLookup(string? text, string? valueJson)
+        /// <summary>
+        /// Extract TikNumber from a mirror column. Priority: display_value > text > value JSON.
+        /// Monday mirror columns return data in display_value; text and value are typically null.
+        /// </summary>
+        private static string? TryParseTikNumberFromMirror(string? displayValue, string? text, string? valueJson)
         {
-            if (!string.IsNullOrWhiteSpace(text) && text.Trim().Length > 0 && text.Trim().Length <= 64)
+            if (!string.IsNullOrWhiteSpace(displayValue) && displayValue.Trim().Length <= 64)
+                return displayValue.Trim();
+            if (!string.IsNullOrWhiteSpace(text) && text.Trim().Length <= 64)
                 return text.Trim();
             if (string.IsNullOrWhiteSpace(valueJson)) return null;
             try
             {
                 using var doc = JsonDocument.Parse(valueJson);
                 var root = doc.RootElement;
+                if (root.TryGetProperty("display_value", out var dvEl) && dvEl.ValueKind == JsonValueKind.String)
+                {
+                    var s = dvEl.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(s) && s.Length <= 64) return s;
+                }
                 if (root.TryGetProperty("text", out var textEl) && textEl.ValueKind == JsonValueKind.String)
                 {
                     var s = textEl.GetString()?.Trim();
