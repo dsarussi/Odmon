@@ -45,6 +45,9 @@ namespace Odmon.Worker.Configuration
         public string TikNumberColumnId { get; set; } = "lookup_mm19bm4v";
         public int FileWaitTimeoutHours { get; set; } = 2;
         public int ItemsPageLimit { get; set; } = 50;
+        /// <summary>When set, only process items matching this TikNumber (test filter). Null/empty = process all.</summary>
+        public string? TestTikNumber { get; set; }
+        public bool IsTestMode => !string.IsNullOrWhiteSpace(TestTikNumber);
     }
 
     public class AccidentStorySettings

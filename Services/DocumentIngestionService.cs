@@ -90,6 +90,9 @@ namespace Odmon.Worker.Services
 
             if (_settings.TasksSource is { Enabled: true })
             {
+                if (_settings.TasksSource.IsTestMode)
+                    _logger.LogWarning("Tasks document import running in TEST MODE for TikNumber={TikNumber}", _settings.TasksSource.TestTikNumber);
+
                 try
                 {
                     var taskItems = await _mondayService.FetchTaskItemsAsync(
@@ -103,6 +106,15 @@ namespace Odmon.Worker.Services
                     foreach (var taskItem in taskItems)
                     {
                         if (ct.IsCancellationRequested) break;
+
+                        if (_settings.TasksSource.IsTestMode &&
+                            !string.Equals(taskItem.TikNumber?.Trim(), _settings.TasksSource.TestTikNumber!.Trim(), StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogDebug("DOCINGESTION TASKS tasks-test-filter-skip | ItemId={ItemId}, TikNumber={TikNumber}, TestTikNumber={TestTikNumber}",
+                                taskItem.ItemId, taskItem.TikNumber ?? "<null>", _settings.TasksSource.TestTikNumber);
+                            continue;
+                        }
+
                         try
                         {
                             await ProcessTaskItemAsync(taskItem, ct);
@@ -214,10 +226,6 @@ namespace Odmon.Worker.Services
                 boardId, item.ItemId, assetRef.AssetId, item.TikNumber, tikCounter.Value);
 
             await ProcessSingleAssetAsync(item.ItemId, 0, fileColumnId, assetRef, item.TikNumber, tikCounter.Value, ct);
-
-            _logger.LogInformation(
-                "DOCINGESTION TASKS import-succeeded | BoardId={BoardId}, ItemId={ItemId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
-                boardId, item.ItemId, assetRef.AssetId, item.TikNumber, tikCounter.Value);
         }
 
         private async Task MarkTaskTimeoutNoFileAsync(long itemId, string columnId, CancellationToken ct)
