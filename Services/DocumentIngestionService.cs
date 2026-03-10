@@ -27,6 +27,8 @@ namespace Odmon.Worker.Services
         private int _totalSucceeded;
         private int _totalFailed;
         private int _totalSkipped;
+        private int _accidentStoryEmptyCount;
+        private int _duplicateSkipCount;
 
         public DocumentIngestionService(
             IntegrationDbContext integrationDb,
@@ -56,6 +58,8 @@ namespace Odmon.Worker.Services
             _totalSucceeded = 0;
             _totalFailed = 0;
             _totalSkipped = 0;
+            _accidentStoryEmptyCount = 0;
+            _duplicateSkipCount = 0;
 
             var enabledSources = new List<string> { $"Questionnaire({_settings.BoardId})" };
             if (_settings.TasksSource is { Enabled: true })
@@ -70,6 +74,10 @@ namespace Odmon.Worker.Services
                 await ProcessTasksSourceAsync(ct);
 
             sw.Stop();
+            if (_accidentStoryEmptyCount > 0)
+                _logger.LogInformation("ACCIDENTSTORY EMPTY SUMMARY | Count={Count}", _accidentStoryEmptyCount);
+            if (_duplicateSkipCount > 0)
+                _logger.LogInformation("DOCINGESTION DUPLICATE SUMMARY | Count={Count}", _duplicateSkipCount);
             _logger.LogInformation(
                 "DOCINGESTION RUN COMPLETE | Sources=[{Sources}], Elapsed={ElapsedMs}ms, Processed={Processed}, Succeeded={Succeeded}, Failed={Failed}, Skipped={Skipped}",
                 string.Join(", ", enabledSources), sw.ElapsedMilliseconds, _totalProcessed, _totalSucceeded, _totalFailed, _totalSkipped);
@@ -117,12 +125,13 @@ namespace Odmon.Worker.Services
         private async Task ProcessTasksSourceAsync(CancellationToken ct)
         {
             var ts = _settings.TasksSource!;
+            _logger.LogInformation(
+                "TASKDOC SOURCE START | BoardId={BoardId} | TestTikNumber={TestTikNumber} | Enabled={Enabled}",
+                ts.BoardId, ts.TestTikNumber ?? "<none>", ts.Enabled);
+
             _logger.LogInformation("DOCINGESTION SOURCE START | Source=Tasks, BoardId={BoardId}", ts.BoardId);
             var sourceSw = Stopwatch.StartNew();
             int tasksFetched = 0, tasksProcessed = 0;
-
-            if (ts.IsTestMode)
-                _logger.LogWarning("TASKDOC TEST MODE | FilterTikNumber={TikNumber}", ts.TestTikNumber);
 
             try
             {
@@ -131,6 +140,35 @@ namespace Odmon.Worker.Services
                     ts.TikNumberColumnId, ts.ItemsPageLimit, ct);
 
                 tasksFetched = taskItems.Count;
+                _logger.LogInformation("TASKDOC FETCH SUMMARY | TotalFetched={Count}", tasksFetched);
+
+                int matchedItems = 0, successStatusItems = 0, itemsWithFile = 0, readyToImport = 0;
+                if (ts.IsTestMode && tasksFetched > 0)
+                {
+                    foreach (var ti in taskItems)
+                    {
+                        var lookupTik = ti.TikNumber?.Trim() ?? "";
+                        var statusMatch = string.Equals(ti.StatusLabel?.Trim(), ts.SuccessStatusLabel, StringComparison.Ordinal);
+                        var hasFile = ti.FileAssets.Count > 0;
+                        var matchesTest = string.Equals(lookupTik, ts.TestTikNumber!.Trim(), StringComparison.OrdinalIgnoreCase);
+
+                        if (matchesTest) matchedItems++;
+                        if (matchesTest && statusMatch) successStatusItems++;
+                        if (matchesTest && hasFile) itemsWithFile++;
+                        if (matchesTest && statusMatch && hasFile && !string.IsNullOrWhiteSpace(lookupTik)) readyToImport++;
+
+                        _logger.LogInformation(
+                            "TASKDOC TEST CHECK | ItemId={ItemId} | ItemName={ItemName} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText} | HasFile={HasFile} | FileCount={FileCount} | MatchesTest={MatchesTest}",
+                            ti.ItemId, ti.Name ?? "", string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, ti.StatusLabel ?? "<null>", hasFile, ti.FileAssets.Count, matchesTest);
+                    }
+
+                    _logger.LogInformation(
+                        "TASKDOC TEST SUMMARY | TestTikNumber={TestTikNumber} | MatchedItems={Matched} | SuccessStatusItems={SuccessStatus} | ItemsWithFile={WithFile} | ReadyToImport={Ready}",
+                        ts.TestTikNumber, matchedItems, successStatusItems, itemsWithFile, readyToImport);
+
+                    if (matchedItems == 0)
+                        _logger.LogWarning("TASKDOC TEST NO MATCH | TestTikNumber={TestTikNumber}", ts.TestTikNumber);
+                }
 
                 foreach (var taskItem in taskItems)
                 {
@@ -169,40 +207,37 @@ namespace Odmon.Worker.Services
             var fileColumnId = ts.FileColumnId;
             var hasFiles = item.FileAssets.Count > 0;
             var statusMatch = string.Equals(item.StatusLabel?.Trim(), ts.SuccessStatusLabel, StringComparison.Ordinal);
+            var lookupTik = item.TikNumber?.Trim() ?? "";
+            var statusText = item.StatusLabel ?? "<null>";
 
             if (!statusMatch)
+            {
+                _logger.LogInformation(
+                    "TASKDOC BLOCKED | Reason=StatusMismatch | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
+                    item.ItemId, string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, statusText);
                 return;
+            }
 
-            string route;
             if (!hasFiles)
             {
                 var statusChangedAt = item.StatusChangedAtUtc ?? item.ItemUpdatedAtUtc;
                 var timedOut = statusChangedAt.HasValue && statusChangedAt.Value < DateTime.UtcNow.AddHours(-ts.FileWaitTimeoutHours);
-                route = timedOut ? "TimeoutNoFile" : "PendingNoFile";
-            }
-            else if (string.IsNullOrWhiteSpace(item.TikNumber))
-                route = "MissingTikNumber";
-            else
-                route = "FileImport";
-
-            _logger.LogInformation(
-                "TASKDOC decision | ItemId={ItemId}, TikNumber={TikNumber}, HasFileAsset={HasFile}, AssetCount={AssetCount}, Route={Route}",
-                item.ItemId, item.TikNumber ?? "<null>", hasFiles, item.FileAssets.Count, route);
-
-            if (route == "PendingNoFile")
-                return;
-
-            if (route == "TimeoutNoFile")
-            {
-                await MarkTaskTimeoutNoFileAsync(item.ItemId, fileColumnId, ct);
-                _logger.LogWarning("TASKDOC timeout | ItemId={ItemId}, Reason=no file after {Hours}h", item.ItemId, ts.FileWaitTimeoutHours);
+                _logger.LogInformation(
+                    "TASKDOC BLOCKED | Reason=NoFile | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
+                    item.ItemId, string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, statusText);
+                if (timedOut)
+                {
+                    await MarkTaskTimeoutNoFileAsync(item.ItemId, fileColumnId, ct);
+                    _totalFailed++;
+                }
                 return;
             }
 
-            if (route == "MissingTikNumber")
+            if (string.IsNullOrWhiteSpace(item.TikNumber))
             {
-                _logger.LogWarning("TASKDOC skipped | ItemId={ItemId}, Reason=TikNumber missing, LookupRaw={Raw}",
-                    item.ItemId, item.LookupRawValue ?? "<null>");
+                _logger.LogInformation(
+                    "TASKDOC BLOCKED | Reason=LookupTikNumberMissing | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
+                    item.ItemId, "<empty>", statusText);
                 await MarkTaskMissingTikFailureAsync(item, fileColumnId, ct);
                 _totalFailed++;
                 return;
@@ -223,21 +258,18 @@ namespace Odmon.Worker.Services
 
             if (!tikCounter.HasValue)
             {
-                _logger.LogWarning("TASKDOC skipped | ItemId={ItemId}, Reason=no TikCounter for TikNumber={TikNumber}",
-                    item.ItemId, item.TikNumber);
+                _logger.LogInformation(
+                    "TASKDOC BLOCKED | Reason=NoTikCounter | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
+                    item.ItemId, item.TikNumber, statusText);
                 await MarkTaskMissingTikFailureAsync(item, fileColumnId, ct);
                 _totalFailed++;
                 return;
             }
 
             var assetRef = item.FileAssets[0];
-            if (item.FileAssets.Count > 1)
-                _logger.LogInformation("TASKDOC multiple files, using first | ItemId={ItemId}, AssetId={AssetId}, Total={Count}",
-                    item.ItemId, assetRef.AssetId, item.FileAssets.Count);
-
             _logger.LogInformation(
-                "TASKDOC import started | ItemId={ItemId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
-                item.ItemId, assetRef.AssetId, item.TikNumber, tikCounter.Value);
+                "TASKDOC IMPORT START | ItemId={ItemId} | TikNumber={TikNumber} | TikCounter={TikCounter} | AssetId={AssetId} | ColumnId={ColumnId}",
+                item.ItemId, item.TikNumber, tikCounter.Value, assetRef.AssetId, fileColumnId);
 
             await ProcessSingleAssetAsync(item.ItemId, 0, fileColumnId, assetRef, item.TikNumber!, tikCounter.Value, ct);
         }
@@ -430,10 +462,12 @@ namespace Odmon.Worker.Services
 
             if (record.Status == DocumentImportStatus.Success)
             {
-                _logger.LogInformation(
-                    "DOCINGESTION duplicate-skipped | ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
-                    questionnaireItemId, columnId, assetIdStr, tikVisualID, tikCounter);
+                _duplicateSkipCount++;
                 _totalSkipped++;
+                if (linkedCaseItemId == 0)
+                    _logger.LogInformation(
+                        "TASKDOC IMPORT SKIPPED | Reason=Duplicate | ItemId={ItemId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
+                        questionnaireItemId, assetIdStr, tikVisualID, tikCounter);
                 return;
             }
 
@@ -495,6 +529,9 @@ namespace Odmon.Worker.Services
                             _logger.LogWarning(
                                 "DOCINGESTION SKIP validation failed | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, Reason=EmptyFile",
                                 assetIdStr, questionnaireItemId, tikCounter);
+                            if (linkedCaseItemId == 0)
+                                _logger.LogWarning("TASKDOC IMPORT FAILED | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, Reason=EmptyFile",
+                                    questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId);
                             return;
                         }
                         if (string.Equals(ext, "pdf", StringComparison.OrdinalIgnoreCase))
@@ -510,6 +547,9 @@ namespace Odmon.Worker.Services
                                 _logger.LogWarning(
                                     "DOCINGESTION SKIP validation failed | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, Reason=WriteFailure (PDF guard: size>1024 and %PDF magic required)",
                                     assetIdStr, questionnaireItemId, tikCounter);
+                                if (linkedCaseItemId == 0)
+                                    _logger.LogWarning("TASKDOC IMPORT FAILED | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, Reason=PdfValidationFailed",
+                                        questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId);
                                 return;
                             }
                         }
@@ -565,6 +605,10 @@ namespace Odmon.Worker.Services
                     "DOCINGESTION SUCCESS | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, OriginalFileNameLog={OriginalFileNameLog}, SafeFile={SafeFile}, DocCounter={DocCounter}, DestPath={DestPath}, Elapsed={ElapsedMs}ms",
                     tikVisualID, tikCounter, questionnaireItemId, columnId, assetIdStr,
                     SafeFileNameForLog(record.OriginalFileName), Path.GetFileName(record.InboxFilePath), record.OdcanitDocCounter, record.OdcanitDestPath, assetSw.ElapsedMilliseconds);
+                if (linkedCaseItemId == 0)
+                    _logger.LogInformation(
+                        "TASKDOC IMPORT SUCCESS | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, DocCounter={DocCounter}, DestPath={DestPath}",
+                        questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId, record.OdcanitDocCounter, record.OdcanitDestPath);
 
                 var detectedExt = Path.GetExtension(record.InboxFilePath!)?.TrimStart('.').ToLowerInvariant() ?? "";
                 if (string.Equals(detectedExt, "pdf", StringComparison.OrdinalIgnoreCase))
@@ -584,6 +628,9 @@ namespace Odmon.Worker.Services
                 _logger.LogWarning(
                     "DOCINGESTION SKIP invalid extension (no retries) | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, Reason=InvalidExtension",
                     assetIdStr, questionnaireItemId, tikCounter, tikVisualID);
+                if (linkedCaseItemId == 0)
+                    _logger.LogWarning("TASKDOC IMPORT FAILED | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, Reason=InvalidExtension",
+                        questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId);
                 return;
             }
             catch (Exception ex)
@@ -598,6 +645,10 @@ namespace Odmon.Worker.Services
                 _logger.LogError(ex,
                     "DOCINGESTION FAILED | STAGE={Stage}, AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}, Error={Error}, Elapsed={ElapsedMs}ms",
                     currentStage, assetIdStr, questionnaireItemId, tikCounter, tikVisualID, attemptLabel, ex.Message, assetSw.ElapsedMilliseconds);
+                if (linkedCaseItemId == 0)
+                    _logger.LogError(
+                        "TASKDOC IMPORT FAILED | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, Stage={Stage}, Error={Error}",
+                        questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId, currentStage, ex.Message);
 
                 if (!record.AlertSent)
                 {
@@ -1079,9 +1130,7 @@ namespace Odmon.Worker.Services
 
             if (result == null)
             {
-                _logger.LogInformation(
-                    "ACCIDENTSTORY SKIP (empty) | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, LinkedCaseItemId={LinkedCaseItemId} — all column values empty",
-                    tikCounter, tikVisualID, questionnaireItemId, linkedCaseItemId);
+                _accidentStoryEmptyCount++;
                 return;
             }
 
