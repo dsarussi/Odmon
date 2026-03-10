@@ -57,19 +57,40 @@ namespace Odmon.Worker.Services
             _totalFailed = 0;
             _totalSkipped = 0;
 
+            var enabledSources = new List<string> { $"Questionnaire({_settings.BoardId})" };
+            if (_settings.TasksSource is { Enabled: true })
+                enabledSources.Add($"Tasks({_settings.TasksSource.BoardId})");
+
             var sw = Stopwatch.StartNew();
-            _logger.LogInformation("DOCINGESTION RUN START | Board={BoardId}", _settings.BoardId);
+            _logger.LogInformation("DOCINGESTION RUN START | Sources=[{Sources}]", string.Join(", ", enabledSources));
+
+            await ProcessQuestionnaireSourceAsync(ct, runId);
+
+            if (_settings.TasksSource is { Enabled: true })
+                await ProcessTasksSourceAsync(ct);
+
+            sw.Stop();
+            _logger.LogInformation(
+                "DOCINGESTION RUN COMPLETE | Sources=[{Sources}], Elapsed={ElapsedMs}ms, Processed={Processed}, Succeeded={Succeeded}, Failed={Failed}, Skipped={Skipped}",
+                string.Join(", ", enabledSources), sw.ElapsedMilliseconds, _totalProcessed, _totalSucceeded, _totalFailed, _totalSkipped);
+        }
+
+        private async Task ProcessQuestionnaireSourceAsync(CancellationToken ct, string? runId)
+        {
+            var boardId = _settings.BoardId;
+            _logger.LogInformation("DOCINGESTION SOURCE START | Source=Questionnaire, BoardId={BoardId}", boardId);
+            var sourceSw = Stopwatch.StartNew();
 
             List<DocumentIngestionMondayService.QuestionnaireItem> items;
             try
             {
                 items = await _mondayService.FetchQuestionnaireItemsAsync(
-                    _settings.BoardId, _settings.Columns, _settings.RelationColumnId,
+                    boardId, _settings.Columns, _settings.RelationColumnId,
                     _settings.ItemsPageLimit, ct);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "DOCINGESTION failed to fetch questionnaire items from board {BoardId}", _settings.BoardId);
+                _logger.LogError(ex, "DOCINGESTION failed to fetch questionnaire items from board {BoardId}", boardId);
                 SendAlert("Failed to fetch questionnaire board", null, ex);
                 return;
             }
@@ -88,54 +109,57 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            if (_settings.TasksSource is { Enabled: true })
+            sourceSw.Stop();
+            _logger.LogInformation("DOCINGESTION SOURCE COMPLETE | Source=Questionnaire, BoardId={BoardId}, Elapsed={ElapsedMs}ms",
+                boardId, sourceSw.ElapsedMilliseconds);
+        }
+
+        private async Task ProcessTasksSourceAsync(CancellationToken ct)
+        {
+            var ts = _settings.TasksSource!;
+            _logger.LogInformation("DOCINGESTION SOURCE START | Source=Tasks, BoardId={BoardId}", ts.BoardId);
+            var sourceSw = Stopwatch.StartNew();
+
+            if (ts.IsTestMode)
+                _logger.LogWarning("Tasks document import running in TEST MODE for TikNumber={TikNumber}", ts.TestTikNumber);
+
+            try
             {
-                if (_settings.TasksSource.IsTestMode)
-                    _logger.LogWarning("Tasks document import running in TEST MODE for TikNumber={TikNumber}", _settings.TasksSource.TestTikNumber);
+                var taskItems = await _mondayService.FetchTaskItemsAsync(
+                    ts.BoardId, ts.TaskStatusColumnId, ts.FileColumnId,
+                    ts.TikNumberColumnId, ts.ItemsPageLimit, ct);
 
-                try
+                foreach (var taskItem in taskItems)
                 {
-                    var taskItems = await _mondayService.FetchTaskItemsAsync(
-                        _settings.TasksSource.BoardId,
-                        _settings.TasksSource.TaskStatusColumnId,
-                        _settings.TasksSource.FileColumnId,
-                        _settings.TasksSource.TikNumberColumnId,
-                        _settings.TasksSource.ItemsPageLimit,
-                        ct);
+                    if (ct.IsCancellationRequested) break;
 
-                    foreach (var taskItem in taskItems)
+                    if (ts.IsTestMode &&
+                        !string.Equals(taskItem.TikNumber?.Trim(), ts.TestTikNumber!.Trim(), StringComparison.OrdinalIgnoreCase))
                     {
-                        if (ct.IsCancellationRequested) break;
+                        _logger.LogDebug("DOCINGESTION TASKS tasks-test-filter-skip | ItemId={ItemId}, TikNumber={TikNumber}, TestTikNumber={TestTikNumber}",
+                            taskItem.ItemId, taskItem.TikNumber ?? "<null>", ts.TestTikNumber);
+                        continue;
+                    }
 
-                        if (_settings.TasksSource.IsTestMode &&
-                            !string.Equals(taskItem.TikNumber?.Trim(), _settings.TasksSource.TestTikNumber!.Trim(), StringComparison.OrdinalIgnoreCase))
-                        {
-                            _logger.LogDebug("DOCINGESTION TASKS tasks-test-filter-skip | ItemId={ItemId}, TikNumber={TikNumber}, TestTikNumber={TestTikNumber}",
-                                taskItem.ItemId, taskItem.TikNumber ?? "<null>", _settings.TasksSource.TestTikNumber);
-                            continue;
-                        }
-
-                        try
-                        {
-                            await ProcessTaskItemAsync(taskItem, ct);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "DOCINGESTION unhandled error processing task item {ItemId}", taskItem.ItemId);
-                        }
+                    try
+                    {
+                        await ProcessTaskItemAsync(taskItem, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "DOCINGESTION unhandled error processing task item {ItemId}", taskItem.ItemId);
                     }
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "DOCINGESTION failed to fetch task items from board {BoardId}", _settings.TasksSource.BoardId);
-                    SendAlert("Failed to fetch Tasks board", null, ex);
-                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "DOCINGESTION failed to fetch task items from board {BoardId}", ts.BoardId);
+                SendAlert("Failed to fetch Tasks board", null, ex);
             }
 
-            sw.Stop();
-            _logger.LogInformation(
-                "DOCINGESTION RUN COMPLETE | Elapsed={ElapsedMs}ms, Processed={Processed}, Succeeded={Succeeded}, Failed={Failed}, Skipped={Skipped}",
-                sw.ElapsedMilliseconds, _totalProcessed, _totalSucceeded, _totalFailed, _totalSkipped);
+            sourceSw.Stop();
+            _logger.LogInformation("DOCINGESTION SOURCE COMPLETE | Source=Tasks, BoardId={BoardId}, Elapsed={ElapsedMs}ms",
+                ts.BoardId, sourceSw.ElapsedMilliseconds);
         }
 
         private async Task ProcessTaskItemAsync(DocumentIngestionMondayService.TaskItem item, CancellationToken ct)
