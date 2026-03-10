@@ -119,9 +119,10 @@ namespace Odmon.Worker.Services
             var ts = _settings.TasksSource!;
             _logger.LogInformation("DOCINGESTION SOURCE START | Source=Tasks, BoardId={BoardId}", ts.BoardId);
             var sourceSw = Stopwatch.StartNew();
+            int tasksFetched = 0, tasksProcessed = 0;
 
             if (ts.IsTestMode)
-                _logger.LogWarning("Tasks document import running in TEST MODE for TikNumber={TikNumber}", ts.TestTikNumber);
+                _logger.LogWarning("TASKDOC TEST MODE | FilterTikNumber={TikNumber}", ts.TestTikNumber);
 
             try
             {
@@ -129,82 +130,79 @@ namespace Odmon.Worker.Services
                     ts.BoardId, ts.TaskStatusColumnId, ts.FileColumnId,
                     ts.TikNumberColumnId, ts.ItemsPageLimit, ct);
 
+                tasksFetched = taskItems.Count;
+
                 foreach (var taskItem in taskItems)
                 {
                     if (ct.IsCancellationRequested) break;
 
                     if (ts.IsTestMode &&
                         !string.Equals(taskItem.TikNumber?.Trim(), ts.TestTikNumber!.Trim(), StringComparison.OrdinalIgnoreCase))
-                    {
-                        _logger.LogDebug("DOCINGESTION TASKS tasks-test-filter-skip | ItemId={ItemId}, TikNumber={TikNumber}, TestTikNumber={TestTikNumber}",
-                            taskItem.ItemId, taskItem.TikNumber ?? "<null>", ts.TestTikNumber);
                         continue;
-                    }
 
+                    tasksProcessed++;
                     try
                     {
                         await ProcessTaskItemAsync(taskItem, ct);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "DOCINGESTION unhandled error processing task item {ItemId}", taskItem.ItemId);
+                        _logger.LogError(ex, "TASKDOC unhandled error | ItemId={ItemId}", taskItem.ItemId);
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "DOCINGESTION failed to fetch task items from board {BoardId}", ts.BoardId);
+                _logger.LogError(ex, "TASKDOC fetch failed | BoardId={BoardId}", ts.BoardId);
                 SendAlert("Failed to fetch Tasks board", null, ex);
             }
 
             sourceSw.Stop();
-            _logger.LogInformation("DOCINGESTION SOURCE COMPLETE | Source=Tasks, BoardId={BoardId}, Elapsed={ElapsedMs}ms",
-                ts.BoardId, sourceSw.ElapsedMilliseconds);
+            _logger.LogInformation(
+                "DOCINGESTION SOURCE COMPLETE | Source=Tasks, BoardId={BoardId}, Fetched={Fetched}, Processed={Processed}, Elapsed={ElapsedMs}ms",
+                ts.BoardId, tasksFetched, tasksProcessed, sourceSw.ElapsedMilliseconds);
         }
 
         private async Task ProcessTaskItemAsync(DocumentIngestionMondayService.TaskItem item, CancellationToken ct)
         {
             var ts = _settings.TasksSource!;
-            var boardId = ts.BoardId;
-            var successLabel = ts.SuccessStatusLabel;
             var fileColumnId = ts.FileColumnId;
-            var timeoutHours = ts.FileWaitTimeoutHours;
-
-            if (!string.Equals(item.StatusLabel?.Trim(), successLabel, StringComparison.Ordinal))
-            {
-                _logger.LogDebug("DOCINGESTION TASKS item {ItemId} status '{Status}' != '{Expected}', skipping",
-                    item.ItemId, item.StatusLabel ?? "<null>", successLabel);
-                return;
-            }
-
             var hasFiles = item.FileAssets.Count > 0;
+            var statusMatch = string.Equals(item.StatusLabel?.Trim(), ts.SuccessStatusLabel, StringComparison.Ordinal);
 
+            if (!statusMatch)
+                return;
+
+            string route;
             if (!hasFiles)
             {
                 var statusChangedAt = item.StatusChangedAtUtc ?? item.ItemUpdatedAtUtc;
-                var cutoff = DateTime.UtcNow.AddHours(-timeoutHours);
+                var timedOut = statusChangedAt.HasValue && statusChangedAt.Value < DateTime.UtcNow.AddHours(-ts.FileWaitTimeoutHours);
+                route = timedOut ? "TimeoutNoFile" : "PendingNoFile";
+            }
+            else if (string.IsNullOrWhiteSpace(item.TikNumber))
+                route = "MissingTikNumber";
+            else
+                route = "FileImport";
 
-                if (statusChangedAt.HasValue && statusChangedAt.Value < cutoff)
-                {
-                    await MarkTaskTimeoutNoFileAsync(item.ItemId, fileColumnId, ct);
-                    _logger.LogWarning(
-                        "DOCINGESTION TASKS timeout-after-2-hours | BoardId={BoardId}, ItemId={ItemId}, StatusChangedAt={StatusChangedAt}, Reason=no file after {Hours}h",
-                        boardId, item.ItemId, statusChangedAt.Value, timeoutHours);
-                }
-                else
-                {
-                    _logger.LogInformation(
-                        "DOCINGESTION TASKS pending-without-file | BoardId={BoardId}, ItemId={ItemId}, StatusChangedAt={StatusChangedAt}, Will retry next poll",
-                        boardId, item.ItemId, statusChangedAt);
-                }
+            _logger.LogInformation(
+                "TASKDOC decision | ItemId={ItemId}, TikNumber={TikNumber}, HasFileAsset={HasFile}, AssetCount={AssetCount}, Route={Route}",
+                item.ItemId, item.TikNumber ?? "<null>", hasFiles, item.FileAssets.Count, route);
+
+            if (route == "PendingNoFile")
+                return;
+
+            if (route == "TimeoutNoFile")
+            {
+                await MarkTaskTimeoutNoFileAsync(item.ItemId, fileColumnId, ct);
+                _logger.LogWarning("TASKDOC timeout | ItemId={ItemId}, Reason=no file after {Hours}h", item.ItemId, ts.FileWaitTimeoutHours);
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(item.TikNumber))
+            if (route == "MissingTikNumber")
             {
-                _logger.LogWarning(
-                    "DOCINGESTION TASKS business-failure TikNumber missing | BoardId={BoardId}, ItemId={ItemId}, LookupRawValue={LookupRawValue}",
-                    boardId, item.ItemId, item.LookupRawValue ?? "<null>");
+                _logger.LogWarning("TASKDOC skipped | ItemId={ItemId}, Reason=TikNumber missing, LookupRaw={Raw}",
+                    item.ItemId, item.LookupRawValue ?? "<null>");
                 await MarkTaskMissingTikFailureAsync(item, fileColumnId, ct);
                 _totalFailed++;
                 return;
@@ -213,11 +211,11 @@ namespace Odmon.Worker.Services
             int? tikCounter;
             try
             {
-                tikCounter = await _documentWriter.ResolveTikCounterAsync(item.TikNumber, ct);
+                tikCounter = await _documentWriter.ResolveTikCounterAsync(item.TikNumber!, ct);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "DOCINGESTION TASKS failed to resolve TikCounter for TikNumber={TikNumber}, ItemId={ItemId}", item.TikNumber, item.ItemId);
+                _logger.LogError(ex, "TASKDOC resolve failed | ItemId={ItemId}, TikNumber={TikNumber}", item.ItemId, item.TikNumber);
                 SendAlert($"Tasks: TikCounter resolution failed for {item.TikNumber}", null, ex);
                 _totalFailed++;
                 return;
@@ -225,31 +223,23 @@ namespace Odmon.Worker.Services
 
             if (!tikCounter.HasValue)
             {
-                _logger.LogWarning(
-                    "DOCINGESTION TASKS business-failure no TikCounter | BoardId={BoardId}, ItemId={ItemId}, TikNumber={TikNumber}",
-                    boardId, item.ItemId, item.TikNumber);
+                _logger.LogWarning("TASKDOC skipped | ItemId={ItemId}, Reason=no TikCounter for TikNumber={TikNumber}",
+                    item.ItemId, item.TikNumber);
                 await MarkTaskMissingTikFailureAsync(item, fileColumnId, ct);
                 _totalFailed++;
                 return;
             }
 
-            _logger.LogInformation(
-                "DOCINGESTION TASKS TikNumber resolved | BoardId={BoardId}, ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
-                boardId, item.ItemId, item.TikNumber, tikCounter.Value);
-
             var assetRef = item.FileAssets[0];
             if (item.FileAssets.Count > 1)
-            {
-                _logger.LogInformation(
-                    "DOCINGESTION TASKS multiple files, using first asset | BoardId={BoardId}, ItemId={ItemId}, AssetId={AssetId}, TotalFiles={Count}",
-                    boardId, item.ItemId, assetRef.AssetId, item.FileAssets.Count);
-            }
+                _logger.LogInformation("TASKDOC multiple files, using first | ItemId={ItemId}, AssetId={AssetId}, Total={Count}",
+                    item.ItemId, assetRef.AssetId, item.FileAssets.Count);
 
             _logger.LogInformation(
-                "DOCINGESTION TASKS import-started | BoardId={BoardId}, ItemId={ItemId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
-                boardId, item.ItemId, assetRef.AssetId, item.TikNumber, tikCounter.Value);
+                "TASKDOC import started | ItemId={ItemId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
+                item.ItemId, assetRef.AssetId, item.TikNumber, tikCounter.Value);
 
-            await ProcessSingleAssetAsync(item.ItemId, 0, fileColumnId, assetRef, item.TikNumber, tikCounter.Value, ct);
+            await ProcessSingleAssetAsync(item.ItemId, 0, fileColumnId, assetRef, item.TikNumber!, tikCounter.Value, ct);
         }
 
         private async Task MarkTaskTimeoutNoFileAsync(long itemId, string columnId, CancellationToken ct)
