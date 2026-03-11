@@ -99,7 +99,7 @@ namespace Odmon.Worker.Services
                         $"{SpName} returned invalid DocCounter={docCounter} for TikCounter={tikCounter}, Name={fileName}, DestPath='{destPath}'");
                 }
 
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "SP {SpName} succeeded: TikCounter={TikCounter}, Name={FileName}, DocCounter={DocCounter}, DestPath={DestPath}",
                     SpName, tikCounter, fileName, docCounter, destPath);
 

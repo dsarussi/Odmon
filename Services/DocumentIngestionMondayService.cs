@@ -178,7 +178,7 @@ namespace Odmon.Worker.Services
 
             } while (!string.IsNullOrEmpty(cursor));
 
-            _logger.LogInformation("Total questionnaire items fetched: {Count} from board {BoardId}", items.Count, boardId);
+            _logger.LogDebug("Questionnaire items fetched: {Count} from board {BoardId}", items.Count, boardId);
             return items;
         }
 
@@ -199,8 +199,7 @@ namespace Odmon.Worker.Services
             const int maxRetries = 3;
             const int baseDelayMs = 1500;
 
-            _loggedMirrorDiag = false;
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "TASKDOC FETCH START | BoardId={BoardId} | ItemsPageLimit={PageLimit} | TestTikNumber={TestMode} | TimeoutSeconds={Timeout}",
                 boardId, pageLimit, isTestMode ? "set" : "none", timeoutSeconds);
 
@@ -332,7 +331,7 @@ namespace Odmon.Worker.Services
             } while (!string.IsNullOrEmpty(cursor));
 
             sw.Stop();
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "TASKDOC FETCH SUCCESS | BoardId={BoardId} | TotalFetched={Count} | ElapsedMs={ElapsedMs}",
                 boardId, items.Count, sw.ElapsedMilliseconds);
             return items;
@@ -346,8 +345,6 @@ namespace Odmon.Worker.Services
                 return true;
             return false;
         }
-
-        private bool _loggedMirrorDiag;
 
         internal TaskItem? ParseTaskItem(JsonElement itemEl, string taskStatusColumnId, string fileColumnId, string tikNumberColumnId)
         {
@@ -389,18 +386,6 @@ namespace Odmon.Worker.Services
                     var displayValue = col.TryGetProperty("display_value", out var dvEl) && dvEl.ValueKind == JsonValueKind.String
                         ? dvEl.GetString()?.Trim()
                         : null;
-
-                    if (!_loggedMirrorDiag)
-                    {
-                        _loggedMirrorDiag = true;
-                        _logger.LogInformation(
-                            "TASKDOC MIRROR DIAG | ItemId={ItemId} | ColumnId={ColumnId} | text={Text} | value={Value} | display_value={DisplayValue}",
-                            itemId, colId,
-                            text ?? "<null>",
-                            rawValue != null ? (rawValue.Length > 120 ? rawValue[..120] : rawValue) : "<null>",
-                            displayValue ?? "<null>");
-                    }
-
                     ti.LookupRawValue = rawValue;
                     ti.TikNumber = TryParseTikNumberFromMirror(displayValue, text, rawValue);
                     continue;

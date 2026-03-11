@@ -1,5 +1,38 @@
 namespace Odmon.Worker.Configuration
 {
+    /// <summary>
+    /// Centralized mapping from Monday file column IDs to Hebrew document type names.
+    /// Used to generate deterministic business filenames for Odcanit imports.
+    /// </summary>
+    public static class DocumentTypeMap
+    {
+        private static readonly Dictionary<string, string> Map = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["file_mkwerwmq"] = "כתב הגנה",
+            ["file_mm0qwtat"] = "תצהיר ויפוי כח",
+            ["file_mkzr2cmr"] = "מסמך נלווה",
+        };
+
+        public static string Resolve(string columnId)
+            => Map.TryGetValue(columnId, out var name) ? name : "מסמך";
+
+        /// <summary>
+        /// Build a deterministic business filename: "{TikNumber} - {DocType}.{ext}"
+        /// Invalid filename chars are stripped. "/" in TikVisualID becomes "-".
+        /// </summary>
+        public static string BuildBusinessFileName(string tikVisualID, string columnId, string extension)
+        {
+            var docType = Resolve(columnId);
+            var safeTik = tikVisualID.Replace("/", "-").Replace("\\", "-").Trim();
+            if (string.IsNullOrEmpty(safeTik)) safeTik = "unknown";
+            var ext = (extension ?? "pdf").TrimStart('.').ToLowerInvariant();
+            if (string.IsNullOrEmpty(ext)) ext = "pdf";
+            var raw = $"{safeTik} - {docType}.{ext}";
+            var invalid = Path.GetInvalidFileNameChars();
+            return new string(raw.Where(c => !invalid.Contains(c) || c == ' ' || c == '-' || c == '.').ToArray()).Trim();
+        }
+    }
+
     public class DocumentIngestionSettings
     {
         public bool Enabled { get; set; } = false;

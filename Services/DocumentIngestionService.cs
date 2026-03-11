@@ -125,13 +125,13 @@ namespace Odmon.Worker.Services
         private async Task ProcessTasksSourceAsync(CancellationToken ct)
         {
             var ts = _settings.TasksSource!;
-            _logger.LogInformation(
-                "TASKDOC SOURCE START | BoardId={BoardId} | TestTikNumber={TestTikNumber} | Enabled={Enabled}",
-                ts.BoardId, ts.TestTikNumber ?? "<none>", ts.Enabled);
-
-            _logger.LogInformation("DOCINGESTION SOURCE START | Source=Tasks, BoardId={BoardId}", ts.BoardId);
+            _logger.LogInformation("DOCINGESTION SOURCE START | Source=Tasks, BoardId={BoardId}, TestTikNumber={TestTikNumber}",
+                ts.BoardId, ts.TestTikNumber ?? "<none>");
             var sourceSw = Stopwatch.StartNew();
             int tasksFetched = 0, tasksProcessed = 0;
+            var prevSucceeded = _totalSucceeded;
+            var prevFailed = _totalFailed;
+            var prevSkipped = _totalSkipped;
 
             try
             {
@@ -146,30 +146,23 @@ namespace Odmon.Worker.Services
                 tasksFetched = taskItems.Count;
                 _logger.LogInformation("TASKDOC FETCH SUMMARY | TotalFetched={Count}", tasksFetched);
 
-                int matchedItems = 0, successStatusItems = 0, itemsWithFile = 0, readyToImport = 0;
                 if (ts.IsTestMode && tasksFetched > 0)
                 {
+                    int matchedItems = 0, successStatusItems = 0, itemsWithFile = 0, readyToImport = 0;
                     foreach (var ti in taskItems)
                     {
                         var lookupTik = ti.TikNumber?.Trim() ?? "";
-                        var statusMatch = string.Equals(ti.StatusLabel?.Trim(), ts.SuccessStatusLabel, StringComparison.Ordinal);
-                        var hasFile = ti.FileAssets.Count > 0;
-                        var matchesTest = string.Equals(lookupTik, ts.TestTikNumber!.Trim(), StringComparison.OrdinalIgnoreCase);
-
-                        if (matchesTest) matchedItems++;
-                        if (matchesTest && statusMatch) successStatusItems++;
-                        if (matchesTest && hasFile) itemsWithFile++;
-                        if (matchesTest && statusMatch && hasFile && !string.IsNullOrWhiteSpace(lookupTik)) readyToImport++;
-
-                        _logger.LogInformation(
-                            "TASKDOC TEST CHECK | ItemId={ItemId} | ItemName={ItemName} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText} | HasFile={HasFile} | FileCount={FileCount} | MatchesTest={MatchesTest}",
-                            ti.ItemId, ti.Name ?? "", string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, ti.StatusLabel ?? "<null>", hasFile, ti.FileAssets.Count, matchesTest);
+                        var sMatch = string.Equals(ti.StatusLabel?.Trim(), ts.SuccessStatusLabel, StringComparison.Ordinal);
+                        var hFile = ti.FileAssets.Count > 0;
+                        var mTest = string.Equals(lookupTik, ts.TestTikNumber!.Trim(), StringComparison.OrdinalIgnoreCase);
+                        if (mTest) matchedItems++;
+                        if (mTest && sMatch) successStatusItems++;
+                        if (mTest && hFile) itemsWithFile++;
+                        if (mTest && sMatch && hFile && !string.IsNullOrWhiteSpace(lookupTik)) readyToImport++;
                     }
-
                     _logger.LogInformation(
                         "TASKDOC TEST SUMMARY | TestTikNumber={TestTikNumber} | MatchedItems={Matched} | SuccessStatusItems={SuccessStatus} | ItemsWithFile={WithFile} | ReadyToImport={Ready}",
                         ts.TestTikNumber, matchedItems, successStatusItems, itemsWithFile, readyToImport);
-
                     if (matchedItems == 0)
                         _logger.LogWarning("TASKDOC TEST NO MATCH | TestTikNumber={TestTikNumber}", ts.TestTikNumber);
                 }
@@ -200,9 +193,15 @@ namespace Odmon.Worker.Services
             }
 
             sourceSw.Stop();
+            var imported = _totalSucceeded - prevSucceeded;
+            var skipped = _totalSkipped - prevSkipped;
+            var failed = _totalFailed - prevFailed;
             _logger.LogInformation(
-                "DOCINGESTION SOURCE COMPLETE | Source=Tasks, BoardId={BoardId}, Fetched={Fetched}, Processed={Processed}, Elapsed={ElapsedMs}ms",
-                ts.BoardId, tasksFetched, tasksProcessed, sourceSw.ElapsedMilliseconds);
+                "TASKDOC SUMMARY | Fetched={Fetched} | Processed={Processed} | Imported={Imported} | Skipped={Skipped} | Failed={Failed}",
+                tasksFetched, tasksProcessed, imported, skipped, failed);
+            _logger.LogInformation(
+                "DOCINGESTION SOURCE COMPLETE | Source=Tasks, BoardId={BoardId}, Elapsed={ElapsedMs}ms",
+                ts.BoardId, sourceSw.ElapsedMilliseconds);
         }
 
         private async Task ProcessTaskItemAsync(DocumentIngestionMondayService.TaskItem item, CancellationToken ct)
@@ -216,7 +215,7 @@ namespace Odmon.Worker.Services
 
             if (!statusMatch)
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "TASKDOC BLOCKED | Reason=StatusMismatch | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
                     item.ItemId, string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, statusText);
                 return;
@@ -226,7 +225,7 @@ namespace Odmon.Worker.Services
             {
                 var statusChangedAt = item.StatusChangedAtUtc ?? item.ItemUpdatedAtUtc;
                 var timedOut = statusChangedAt.HasValue && statusChangedAt.Value < DateTime.UtcNow.AddHours(-ts.FileWaitTimeoutHours);
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "TASKDOC BLOCKED | Reason=NoFile | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
                     item.ItemId, string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, statusText);
                 if (timedOut)
@@ -239,7 +238,7 @@ namespace Odmon.Worker.Services
 
             if (string.IsNullOrWhiteSpace(item.TikNumber))
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "TASKDOC BLOCKED | Reason=LookupTikNumberMissing | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
                     item.ItemId, "<empty>", statusText);
                 await MarkTaskMissingTikFailureAsync(item, fileColumnId, ct);
@@ -262,7 +261,7 @@ namespace Odmon.Worker.Services
 
             if (!tikCounter.HasValue)
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "TASKDOC BLOCKED | Reason=NoTikCounter | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
                     item.ItemId, item.TikNumber, statusText);
                 await MarkTaskMissingTikFailureAsync(item, fileColumnId, ct);
@@ -271,7 +270,7 @@ namespace Odmon.Worker.Services
             }
 
             var assetRef = item.FileAssets[0];
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "TASKDOC IMPORT START | ItemId={ItemId} | TikNumber={TikNumber} | TikCounter={TikCounter} | AssetId={AssetId} | ColumnId={ColumnId}",
                 item.ItemId, item.TikNumber, tikCounter.Value, assetRef.AssetId, fileColumnId);
 
@@ -426,7 +425,7 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "DOCINGESTION resolved TikVisualID={TikVisualID} → TikCounter={TikCounter} for item {ItemId}",
                 tikVisualID, tikCounter.Value, item.ItemId);
 
@@ -460,6 +459,22 @@ namespace Odmon.Worker.Services
             var assetIdStr = assetRef.AssetId.ToString();
             var assetSw = Stopwatch.StartNew();
 
+            if (string.IsNullOrWhiteSpace(tikVisualID) || tikCounter <= 0)
+            {
+                _logger.LogWarning("DOC SKIP PREINSERT | Reason=MissingTikNumber | ItemId={ItemId}, AssetId={AssetId}, TikVisualID={TikVisualID}, TikCounter={TikCounter}",
+                    questionnaireItemId, assetIdStr, tikVisualID ?? "<null>", tikCounter);
+                _totalSkipped++;
+                return;
+            }
+
+            if (linkedCaseItemId == 0 && string.IsNullOrWhiteSpace(columnId))
+            {
+                _logger.LogWarning("DOC SKIP PREINSERT | Reason=MissingCaseMapping | ItemId={ItemId}, AssetId={AssetId}, LinkedCaseItemId=0, ColumnId={ColumnId}",
+                    questionnaireItemId, assetIdStr, columnId ?? "<null>");
+                _totalSkipped++;
+                return;
+            }
+
             var record = await GetOrCreateTrackingRecordAsync(
                 questionnaireItemId, columnId, assetIdStr,
                 tikVisualID, tikCounter, linkedCaseItemId, assetRef.Name);
@@ -469,7 +484,7 @@ namespace Odmon.Worker.Services
                 _duplicateSkipCount++;
                 _totalSkipped++;
                 if (linkedCaseItemId == 0)
-                    _logger.LogInformation(
+                    _logger.LogDebug(
                         "TASKDOC IMPORT SKIPPED | Reason=Duplicate | ItemId={ItemId}, AssetId={AssetId}, TikNumber={TikNumber}, TikCounter={TikCounter}",
                         questionnaireItemId, assetIdStr, tikVisualID, tikCounter);
                 return;
@@ -492,7 +507,7 @@ namespace Odmon.Worker.Services
             var attempt = record.RetryCount + 1;
             var attemptLabel = $"Attempt {attempt}/{maxAttempts}";
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "DOCINGESTION START | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, OriginalFileNameLog={OriginalFileNameLog}, {Attempt}",
                 tikVisualID, tikCounter, questionnaireItemId, columnId, assetIdStr, SafeFileNameForLog(assetRef.Name), attemptLabel);
 
@@ -560,12 +575,12 @@ namespace Odmon.Worker.Services
                     }
 
                     currentStage = "UPLOAD";
-                    _logger.LogInformation(
+                    _logger.LogDebug(
                         "DOCINGESTION STAGE=UPLOAD | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}",
                         assetIdStr, questionnaireItemId, tikCounter, tikVisualID, attemptLabel);
-                    await CreateDocumentRowAsync(record, tikCounter, ct);
+                    await CreateDocumentRowAsync(record, tikCounter, tikVisualID, columnId, ct);
                     await CopyToDestPathAsync(record, ct);
-                    _logger.LogInformation(
+                    _logger.LogDebug(
                         "DOCINGESTION STAGE=UPLOAD SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, DocCounter={DocCounter}, DestPath={DestPath}",
                         assetIdStr, questionnaireItemId, tikCounter, record.OdcanitDocCounter, record.OdcanitDestPath);
                 }
@@ -579,13 +594,7 @@ namespace Odmon.Worker.Services
                 if (record.Status < DocumentImportStatus.Copied)
                 {
                     currentStage = "UPLOAD";
-                    _logger.LogInformation(
-                        "DOCINGESTION STAGE=UPLOAD | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, {Attempt}",
-                        assetIdStr, questionnaireItemId, tikCounter, attemptLabel);
                     await CopyToDestPathAsync(record, ct);
-                    _logger.LogInformation(
-                        "DOCINGESTION STAGE=UPLOAD SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, DestPath={DestPath}",
-                        assetIdStr, questionnaireItemId, tikCounter, record.OdcanitDestPath);
                 }
 
                 // Step 4: Verify
@@ -605,20 +614,14 @@ namespace Odmon.Worker.Services
 
                 assetSw.Stop();
                 _totalSucceeded++;
-                _logger.LogInformation(
-                    "DOCINGESTION SUCCESS | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, OriginalFileNameLog={OriginalFileNameLog}, SafeFile={SafeFile}, DocCounter={DocCounter}, DestPath={DestPath}, Elapsed={ElapsedMs}ms",
+                _logger.LogDebug(
+                    "DOCINGESTION SUCCESS | TikVisualID={TikVisualID}, TikCounter={TikCounter}, ItemId={ItemId}, ColId={ColId}, AssetId={AssetId}, DocCounter={DocCounter}, DestPath={DestPath}, Elapsed={ElapsedMs}ms",
                     tikVisualID, tikCounter, questionnaireItemId, columnId, assetIdStr,
-                    SafeFileNameForLog(record.OriginalFileName), Path.GetFileName(record.InboxFilePath), record.OdcanitDocCounter, record.OdcanitDestPath, assetSw.ElapsedMilliseconds);
+                    record.OdcanitDocCounter, record.OdcanitDestPath, assetSw.ElapsedMilliseconds);
                 if (linkedCaseItemId == 0)
                     _logger.LogInformation(
                         "TASKDOC IMPORT SUCCESS | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, DocCounter={DocCounter}, DestPath={DestPath}",
                         questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId, record.OdcanitDocCounter, record.OdcanitDestPath);
-
-                var detectedExt = Path.GetExtension(record.InboxFilePath!)?.TrimStart('.').ToLowerInvariant() ?? "";
-                if (string.Equals(detectedExt, "pdf", StringComparison.OrdinalIgnoreCase))
-                    _logger.LogInformation(
-                        "DOCINGESTION PDF WRITE SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, DetectedExtension=pdf, DetectionSource={DetectionSource}, FileSizeBytes={FileSizeBytes}, OdcanitAttachmentId={OdcanitAttachmentId}, Success=true",
-                        record.AssetId, record.MondayQuestionnaireItemId, record.TikCounter, record.LastDetectionSource ?? "unknown", record.FileSizeBytes, record.OdcanitDocCounter);
             }
             catch (InvalidExtensionException iex)
             {
@@ -678,7 +681,7 @@ namespace Odmon.Worker.Services
             var dlSw = Stopwatch.StartNew();
             var attemptLabel = $"Attempt {attempt}/{maxAttempts}";
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "DOCINGESTION STAGE=DOWNLOAD | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}",
                 assetId, record.MondayQuestionnaireItemId, tikCounter, tikVisualID, attemptLabel);
 
@@ -696,7 +699,7 @@ namespace Odmon.Worker.Services
             var downloadUrl = assetInfo.PublicUrl;
             var (urlHashPrefix, urlLength, hasAmzSignature) = GetDownloadUrlDiagnostics(downloadUrl);
             const bool urlWasModified = false;
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "DOCINGESTION DOWNLOAD URL (opaque) | AssetId={AssetId}, UrlHashPrefix={UrlHashPrefix}, UrlLength={UrlLength}, HasAmzSignature={HasAmzSignature}, UrlWasModified={UrlWasModified}",
                 assetId, urlHashPrefix, urlLength, hasAmzSignature, urlWasModified);
 
@@ -757,14 +760,11 @@ namespace Odmon.Worker.Services
             record.LastDetectionSource = detection.DetectionSource;
             record.LastDetectedMimeType = detection.MimeType;
             var detectedMimeForLog = detection.MimeType ?? "";
-            _logger.LogInformation(
-                "DOCINGESTION extension detection | AssetId={AssetId}, ColumnId={ColumnId}, TikCounter={TikCounter}, OriginalFileNameAsReceived={OriginalFileNameLog}, DetectedMimeType={DetectedMimeType}, DetectedExtension={DetectedExtension}, DetectionMethod={DetectionMethod}",
-                assetId, record.ColumnId, tikCounter, SafeFileNameForLog(assetInfo.Name), detectedMimeForLog, ext, detection.DetectionSource);
+            _logger.LogDebug(
+                "DOCINGESTION extension detection | AssetId={AssetId}, ColumnId={ColumnId}, TikCounter={TikCounter}, DetectedExtension={DetectedExtension}, DetectionMethod={DetectionMethod}",
+                assetId, record.ColumnId, tikCounter, ext, detection.DetectionSource);
 
             var safeFileName = AssetSafeFileName(assetId, ext);
-            _logger.LogInformation(
-                "DOCINGESTION SafeFileName (accepted) | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, SafeFileName={SafeFileName}, Ext={Ext}",
-                assetId, record.MondayQuestionnaireItemId, tikCounter, safeFileName, ext);
 
             var safeTikDir = SanitizeTikVisualID(tikVisualID);
             var caseFolderPath = Path.Combine(_settings.InboxPath, "Cases", safeTikDir);
@@ -805,9 +805,9 @@ namespace Odmon.Worker.Services
             await SaveRecordAsync(record);
 
             dlSw.Stop();
-            _logger.LogInformation(
-                "DOCINGESTION STAGE=DOWNLOAD SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, SafeFile={SafeFileName}, Ext={Ext}, Size={Size}, OriginalFileNameLog={OriginalFileNameLog}, Elapsed={ElapsedMs}ms",
-                assetId, record.MondayQuestionnaireItemId, tikCounter, safeFileName, ext, fileInfo.Length, SafeFileNameForLog(assetInfo.Name), dlSw.ElapsedMilliseconds);
+            _logger.LogDebug(
+                "DOCINGESTION STAGE=DOWNLOAD SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, Size={Size}, Elapsed={ElapsedMs}ms",
+                assetId, record.MondayQuestionnaireItemId, tikCounter, fileInfo.Length, dlSw.ElapsedMilliseconds);
         }
 
         private static bool VerifyPdfMagicBytes(string filePath)
@@ -830,13 +830,18 @@ namespace Odmon.Worker.Services
         // ───────── Step 2: Create Odcanit document row ─────────
 
         private async Task CreateDocumentRowAsync(
-            MondayDocumentImport record, int tikCounter, CancellationToken ct)
+            MondayDocumentImport record, int tikCounter, string tikVisualID, string columnId, CancellationToken ct)
         {
             var spSw = Stopwatch.StartNew();
 
-            var safeDocName = Path.GetFileName(record.InboxFilePath!);
+            var extension = Path.GetExtension(record.InboxFilePath!)?.TrimStart('.') ?? "pdf";
+            var businessFileName = DocumentTypeMap.BuildBusinessFileName(tikVisualID, columnId, extension);
+            _logger.LogDebug(
+                "DOC FILENAME BUILT | TikNumber={TikNumber} | ColumnId={ColumnId} | DocumentType={DocumentType} | FileName={FileName}",
+                tikVisualID, columnId, DocumentTypeMap.Resolve(columnId), businessFileName);
+
             var result = await _documentWriter.CreateDocumentRowAsync(
-                tikCounter, safeDocName, record.InboxFilePath!, ct);
+                tikCounter, businessFileName, record.InboxFilePath!, ct);
 
             record.OdcanitDocCounter = result.DocCounter;
             record.OdcanitDestPath = result.DestPath;
@@ -845,7 +850,7 @@ namespace Odmon.Worker.Services
             await SaveRecordAsync(record);
 
             spSw.Stop();
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "DOCINGESTION SP CREATED | AssetId={AssetId}, DocCounter={DocCounter}, DestPath={DestPath}, Elapsed={ElapsedMs}ms",
                 record.AssetId, result.DocCounter, result.DestPath, spSw.ElapsedMilliseconds);
         }
@@ -873,7 +878,7 @@ namespace Odmon.Worker.Services
             await SaveRecordAsync(record);
 
             copySw.Stop();
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "DOCINGESTION COPIED | AssetId={AssetId}, DestPath={DestPath}, Elapsed={ElapsedMs}ms",
                 record.AssetId, destPath, copySw.ElapsedMilliseconds);
         }
@@ -900,7 +905,7 @@ namespace Odmon.Worker.Services
             record.Status = DocumentImportStatus.Verified;
             record.UpdatedAtUtc = DateTime.UtcNow;
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "DOCINGESTION VERIFIED | AssetId={AssetId}, DestPath={DestPath}, Size={Size}",
                 record.AssetId, destPath, destInfo.Length);
         }
@@ -916,8 +921,6 @@ namespace Odmon.Worker.Services
                 if (File.Exists(record.InboxFilePath))
                 {
                     File.Delete(record.InboxFilePath);
-                    _logger.LogInformation("DOCINGESTION DELETED inbox file | AssetId={AssetId}, Path={Path}",
-                        record.AssetId, record.InboxFilePath);
                 }
             }
             catch (Exception ex)
@@ -1088,8 +1091,8 @@ namespace Odmon.Worker.Services
 
             if (!_settings.AccidentStory.WriteEnabled)
             {
-                _logger.LogInformation(
-                    "ACCIDENTSTORY SKIP (WriteEnabled=false) | TikCounter={TikCounter}, ItemId={ItemId} — feature flag disabled",
+                _logger.LogDebug(
+                    "ACCIDENTSTORY SKIP (WriteEnabled=false) | TikCounter={TikCounter}, ItemId={ItemId}",
                     tikCounter, questionnaireItemId);
                 return;
             }
@@ -1099,9 +1102,9 @@ namespace Odmon.Worker.Services
             {
                 if (await IsAccidentStoryAlreadyWrittenAsync(_caseAnnexStateRepo, tikCounter, ct))
                 {
-                    _logger.LogInformation(
-                        "ACCIDENTSTORY already written, skip | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, RunId={RunId}, reason=already written",
-                        tikCounter, tikVisualID, nispahType, runId ?? "");
+                    _logger.LogDebug(
+                        "ACCIDENTSTORY already written, skip | TikCounter={TikCounter}, TikVisualID={TikVisualID}",
+                        tikCounter, tikVisualID);
                     return;
                 }
             }
@@ -1138,10 +1141,9 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            var infoHashPrefix = GetInfoHashPrefix(result.Text);
-            _logger.LogInformation(
-                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, InfoHashPrefix={InfoHashPrefix}, RunId={RunId}, TextLength={TextLength}",
-                tikCounter, tikVisualID, nispahType, infoHashPrefix, runId ?? "", result.Text.Length);
+            _logger.LogDebug(
+                "ACCIDENTSTORY WRITING | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, TextLength={TextLength}",
+                tikCounter, tikVisualID, nispahType, result.Text.Length);
 
             var correlationId = $"accidentstory-{questionnaireItemId}";
 
@@ -1152,15 +1154,9 @@ namespace Odmon.Worker.Services
 
                 if (success)
                 {
-                    _logger.LogInformation(
-                        "ACCIDENTSTORY state update: about to mark written | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, InfoHashPrefix={InfoHashPrefix}, RunId={RunId}",
-                        tikCounter, tikVisualID, nispahType, infoHashPrefix, runId ?? "");
                     try
                     {
                         await _caseAnnexStateRepo.MarkAccidentStoryWrittenAsync(tikCounter, runId, ct);
-                        _logger.LogInformation(
-                            "ACCIDENTSTORY state update: marked written | TikCounter={TikCounter}, TikVisualID={TikVisualID}, NispahType={NispahType}, InfoHashPrefix={InfoHashPrefix}, RunId={RunId}, reason=written ok",
-                            tikCounter, tikVisualID, nispahType, infoHashPrefix, runId ?? "");
                     }
                     catch (Exception stateEx)
                     {
@@ -1172,9 +1168,9 @@ namespace Odmon.Worker.Services
                             null, stateEx);
                         return;
                     }
-                    _logger.LogInformation(
-                        "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}, RunId={RunId}, NispahType='{NispahType}', LinesIncluded={LinesIncluded}",
-                        tikCounter, tikVisualID, questionnaireItemId, runId ?? "", nispahType, result.LinesIncluded);
+                    _logger.LogDebug(
+                        "ACCIDENTSTORY SUCCESS | TikCounter={TikCounter}, TikVisualID={TikVisualID}, ItemId={ItemId}",
+                        tikCounter, tikVisualID, questionnaireItemId);
                 }
                 else
                 {
@@ -1542,10 +1538,6 @@ namespace Odmon.Worker.Services
 
             return "";
         }
-
-        [Obsolete("Use GetAllowedExtension or ResolveFileExtension instead")]
-        internal static string ExtractFileExtension(string originalFileName, string? fallbackExtension)
-            => ResolveFileExtension(originalFileName, fallbackExtension, contentType: null);
 
         internal static string GenerateSafeFileName(string tikVisualID, long assetId, string columnId, string extension)
         {
