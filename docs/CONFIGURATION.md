@@ -240,7 +240,7 @@ InvalidOperationException: BoardId is 0 for TikCounter=900000. Missing config ke
 | `MondayDocumentIngestion:TasksSource:BoardId` | long | 5035534505 | Tasks board ID. |
 | `MondayDocumentIngestion:TasksSource:TaskStatusColumnId` | string | color_mkwej7ys | Status column. |
 | `MondayDocumentIngestion:TasksSource:SuccessStatusLabel` | string | טופס נוצר בהצלחה | Status label indicating ready for import. |
-| `MondayDocumentIngestion:TasksSource:FileColumnId` | string | file_mkwerwmq | File column. |
+| `MondayDocumentIngestion:TasksSource:FileColumnId` | string | file_mm1bvngc | WORD file column (Word documents only: .docx, .doc). |
 | `MondayDocumentIngestion:TasksSource:TikNumberColumnId` | string | lookup_mm19bm4v | Lookup column for TikNumber. |
 | `MondayDocumentIngestion:TasksSource:FileWaitTimeoutHours` | int | 2 | Hours to wait for file after status ready; then timeout failure. |
 | `MondayDocumentIngestion:TasksSource:ItemsPageLimit` | int | 50 | Max items per API page. |

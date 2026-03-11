@@ -8,7 +8,7 @@ namespace Odmon.Worker.Configuration
     {
         private static readonly Dictionary<string, string> Map = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["file_mkwerwmq"] = "כתב הגנה",
+            ["file_mm1bvngc"] = "כתב הגנה",
             ["file_mm0qwtat"] = "תצהיר ויפוי כח",
             ["file_mkzr2cmr"] = "מסמך נלווה",
         };
@@ -64,7 +64,7 @@ namespace Odmon.Worker.Configuration
                 ? AccidentStory.NispahType
                 : AccidentStoryNispahType;
 
-        /// <summary>Optional Tasks board source (משימות). When enabled, also imports PDFs from items with status "טופס נוצר בהצלחה".</summary>
+        /// <summary>Optional Tasks board source (משימות). When enabled, imports Word documents from items with status "טופס נוצר בהצלחה".</summary>
         public TasksBoardSourceSettings? TasksSource { get; set; }
     }
 
@@ -74,7 +74,8 @@ namespace Odmon.Worker.Configuration
         public long BoardId { get; set; } = 5035534505;
         public string TaskStatusColumnId { get; set; } = "color_mkwej7ys";
         public string SuccessStatusLabel { get; set; } = "טופס נוצר בהצלחה";
-        public string FileColumnId { get; set; } = "file_mkwerwmq";
+        public string FileColumnId { get; set; } = "file_mm1bvngc";
+        public string[] AllowedExtensions { get; set; } = ["docx", "doc"];
         public string TikNumberColumnId { get; set; } = "lookup_mm19bm4v";
         public int FileWaitTimeoutHours { get; set; } = 2;
         public int ItemsPageLimit { get; set; } = 50;

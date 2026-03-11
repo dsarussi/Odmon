@@ -204,11 +204,19 @@ namespace Odmon.Worker.Services
                 ts.BoardId, sourceSw.ElapsedMilliseconds);
         }
 
+        private static readonly HashSet<string> WordExtensions = new(StringComparer.OrdinalIgnoreCase) { ".docx", ".doc" };
+
+        private static bool IsWordAsset(string? assetName)
+        {
+            if (string.IsNullOrWhiteSpace(assetName)) return false;
+            var ext = Path.GetExtension(assetName);
+            return WordExtensions.Contains(ext);
+        }
+
         private async Task ProcessTaskItemAsync(DocumentIngestionMondayService.TaskItem item, CancellationToken ct)
         {
             var ts = _settings.TasksSource!;
             var fileColumnId = ts.FileColumnId;
-            var hasFiles = item.FileAssets.Count > 0;
             var statusMatch = string.Equals(item.StatusLabel?.Trim(), ts.SuccessStatusLabel, StringComparison.Ordinal);
             var lookupTik = item.TikNumber?.Trim() ?? "";
             var statusText = item.StatusLabel ?? "<null>";
@@ -221,17 +229,40 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            if (!hasFiles)
+            var wordAssets = item.FileAssets.Where(a => IsWordAsset(a.Name)).ToList();
+            var hasWordFile = wordAssets.Count > 0;
+            var nonWordCount = item.FileAssets.Count - wordAssets.Count;
+
+            if (nonWordCount > 0)
+            {
+                _logger.LogDebug(
+                    "TASKDOC FILE SOURCE | Column={Column} | ItemId={ItemId} | TotalAssets={Total} | WordAssets={Word} | SkippedNonWord={NonWord}",
+                    fileColumnId, item.ItemId, item.FileAssets.Count, wordAssets.Count, nonWordCount);
+            }
+
+            if (!hasWordFile)
             {
                 var statusChangedAt = item.StatusChangedAtUtc ?? item.ItemUpdatedAtUtc;
                 var timedOut = statusChangedAt.HasValue && statusChangedAt.Value < DateTime.UtcNow.AddHours(-ts.FileWaitTimeoutHours);
-                _logger.LogDebug(
-                    "TASKDOC BLOCKED | Reason=NoFile | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
-                    item.ItemId, string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, statusText);
-                if (timedOut)
+
+                if (item.FileAssets.Count > 0)
                 {
-                    await MarkTaskTimeoutNoFileAsync(item.ItemId, fileColumnId, ct);
+                    _logger.LogWarning(
+                        "TASKDOC ERROR | Reason=NoWordFile | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText} | TotalAssets={Total} | AssetNames={Names}",
+                        item.ItemId, string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, statusText,
+                        item.FileAssets.Count, string.Join(", ", item.FileAssets.Select(a => a.Name)));
                     _totalFailed++;
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "TASKDOC BLOCKED | Reason=MissingWordFile | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
+                        item.ItemId, string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, statusText);
+                    if (timedOut)
+                    {
+                        await MarkTaskTimeoutNoFileAsync(item.ItemId, fileColumnId, ct);
+                        _totalFailed++;
+                    }
                 }
                 return;
             }
@@ -269,10 +300,11 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            var assetRef = item.FileAssets[0];
+            var assetRef = wordAssets[0];
+            var assetExt = Path.GetExtension(assetRef.Name)?.TrimStart('.').ToLowerInvariant() ?? "docx";
             _logger.LogDebug(
-                "TASKDOC IMPORT START | ItemId={ItemId} | TikNumber={TikNumber} | TikCounter={TikCounter} | AssetId={AssetId} | ColumnId={ColumnId}",
-                item.ItemId, item.TikNumber, tikCounter.Value, assetRef.AssetId, fileColumnId);
+                "TASKDOC IMPORT START | ItemId={ItemId} | TikNumber={TikNumber} | TikCounter={TikCounter} | AssetId={AssetId} | ColumnId={ColumnId} | Extension={Ext} | AssetName={AssetName}",
+                item.ItemId, item.TikNumber, tikCounter.Value, assetRef.AssetId, fileColumnId, assetExt, assetRef.Name);
 
             await ProcessSingleAssetAsync(item.ItemId, 0, fileColumnId, assetRef, item.TikNumber!, tikCounter.Value, ct);
         }
