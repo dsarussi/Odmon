@@ -135,7 +135,6 @@ namespace Odmon.Worker.Workers
             var maxItems = _config.GetValue<int>("Sync:MaxItemsPerRun", 0);
             var testingEnabled = _config.GetValue<bool>("Testing:Enable", false);
             var odmonTestCasesEnabled = _config.GetValue<bool>("OdmonTestCases:Enable", false);
-            var safetyTestMode = _config.GetValue<bool>("Safety:TestMode", false);
             var boardId = _config.GetValue<long>("Monday:BoardId", 0);
             var casesBoardId = _config.GetValue<long>("Monday:CasesBoardId", 0);
             var allowListEnabled = _config.GetValue<bool>("OdcanitLoad:EnableAllowList", false);
@@ -153,7 +152,6 @@ namespace Odmon.Worker.Workers
             _logger.LogInformation("  OdcanitLoad.AllowList: {AllowList}", allowListEnabled);
             _logger.LogInformation("  Testing.Enable:        {Testing}", testingEnabled);
             _logger.LogInformation("  OdmonTestCases.Enable: {TestCases}", odmonTestCasesEnabled);
-            _logger.LogInformation("  Safety.TestMode:       {SafetyTest}", safetyTestMode);
             _logger.LogInformation("══════════════════════════════════════════════════════════════");
 
             // Loud warnings
@@ -172,17 +170,12 @@ namespace Odmon.Worker.Workers
                 _logger.LogWarning("*** OdmonTestCases IS ON — the worker loads synthetic test data. Set OdmonTestCases:Enable=false for production. ***");
             }
 
-            if (safetyTestMode)
-            {
-                _logger.LogWarning("*** Safety.TestMode IS ON — production safety features may be bypassed. ***");
-            }
-
             if (boardId == 0)
             {
                 _logger.LogError("*** Monday:BoardId is 0 or missing. The worker will fail. Check configuration. ***");
             }
 
-            if (!testingEnabled && !odmonTestCasesEnabled && !dryRun && !safetyTestMode)
+            if (!testingEnabled && !odmonTestCasesEnabled && !dryRun)
             {
                 _logger.LogInformation("MODE: PRODUCTION — real Odcanit cases will be synced to Monday.");
             }

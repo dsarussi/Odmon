@@ -300,32 +300,16 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            // ── Resolve DocumentType via client-number mapping with fallback ──
+            // ── Resolve DocumentType from TikVisualID prefix (business client number) ──
+            var clientNumber = DocumentTypeMap.ParseClientNumber(item.TikNumber, '/');
             string documentType;
             string derivationPath;
-            int? sideCounter = null;
-            try
-            {
-                sideCounter = await _documentWriter.ResolveSideCounterAsync(tikCounter.Value, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "TASKDOC DOCTYPE | Path=SideCounterResolveFailed | TikCounter={TikCounter}", tikCounter.Value);
-            }
 
-            if (sideCounter.HasValue)
+            if (clientNumber.HasValue)
             {
-                var explicitType = DocumentTypeMap.ResolveByClientNumber(sideCounter.Value);
-                if (explicitType != null)
-                {
-                    documentType = explicitType;
-                    derivationPath = "ExplicitMapping";
-                }
-                else
-                {
-                    documentType = DocumentTypeMap.Resolve(fileColumnId);
-                    derivationPath = "LegacyFallback";
-                }
+                var (resolved, path) = DocumentTypeMap.ResolveDocumentType(clientNumber.Value);
+                derivationPath = path;
+                documentType = resolved ?? DocumentTypeMap.Resolve(fileColumnId);
             }
             else
             {
@@ -333,17 +317,23 @@ namespace Odmon.Worker.Services
                 derivationPath = "LegacyFallback";
             }
 
-            if (derivationPath == "LegacyFallback")
+            if (derivationPath == "Unresolved")
             {
                 _logger.LogWarning(
                     "TASKDOC DOCTYPE | Path={Path} | TikCounter={TikCounter} | TikVisualID={TikVisualID} | ClientNumber={ClientNumber} | DocumentType={DocumentType}",
-                    derivationPath, tikCounter.Value, item.TikNumber, sideCounter?.ToString() ?? "<null>", documentType);
+                    derivationPath, tikCounter.Value, item.TikNumber, clientNumber?.ToString() ?? "<null>", documentType);
+            }
+            else if (derivationPath == "LegacyFallback")
+            {
+                _logger.LogWarning(
+                    "TASKDOC DOCTYPE | Path={Path} | TikCounter={TikCounter} | TikVisualID={TikVisualID} | ClientNumber={ClientNumber} | DocumentType={DocumentType}",
+                    derivationPath, tikCounter.Value, item.TikNumber, clientNumber?.ToString() ?? "<null>", documentType);
             }
             else
             {
                 _logger.LogInformation(
                     "TASKDOC DOCTYPE | Path={Path} | TikCounter={TikCounter} | TikVisualID={TikVisualID} | ClientNumber={ClientNumber} | DocumentType={DocumentType}",
-                    derivationPath, tikCounter.Value, item.TikNumber, sideCounter, documentType);
+                    derivationPath, tikCounter.Value, item.TikNumber, clientNumber, documentType);
             }
 
             var assetRef = wordAssets[0];

@@ -2351,69 +2351,24 @@ namespace Odmon.Worker.Services
         }
 
         /// <summary>
-        /// Determines DocumentType from ClientVisualID based on strict business rules.
-        /// DocumentType does NOT exist in Odcanit DB and must be derived deterministically.
-        /// ClientNumber is defined as the substring before '\' (backslash) if present, otherwise the entire ClientVisualID.
+        /// Determines DocumentType from ClientVisualID using the shared DocumentTypeMap.
+        /// Delegates to the centralized mapping (ExplicitMapping → LegacyFallback → Unresolved).
         /// </summary>
-        /// <param name="clientVisualID">ClientVisualID in format "ClientNumber\OtherData", e.g. "102\5334"</param>
-        /// <returns>DocumentType status label</returns>
-        /// <exception cref="InvalidOperationException">Thrown if ClientVisualID is invalid or cannot be parsed (critical field)</exception>
         private static string DetermineDocumentTypeFromClientVisualId(string? clientVisualID)
         {
-            if (string.IsNullOrWhiteSpace(clientVisualID))
+            var clientNumber = DocumentTypeMap.ParseClientNumber(clientVisualID, '\\');
+            if (!clientNumber.HasValue)
             {
                 throw new InvalidOperationException(
-                    "Cannot determine DocumentType: ClientVisualID is null or empty. DocumentType is a critical field and must be derived from ClientVisualID.");
+                    $"Cannot determine DocumentType: failed to parse ClientNumber from ClientVisualID '{clientVisualID ?? "<null>"}'.");
             }
 
-            // Extract ClientNumber (substring before '\' if present, otherwise entire string)
-            var backslashIndex = clientVisualID.IndexOf('\\');
-            string clientNumberStr;
-            
-            if (backslashIndex > 0)
-            {
-                clientNumberStr = clientVisualID.Substring(0, backslashIndex).Trim();
-            }
-            else
-            {
-                // No backslash found, use entire string
-                clientNumberStr = clientVisualID.Trim();
-            }
+            var (docType, _) = DocumentTypeMap.ResolveDocumentType(clientNumber.Value);
+            if (docType != null)
+                return docType;
 
-            if (!int.TryParse(clientNumberStr, out var clientNumber))
-            {
-                throw new InvalidOperationException(
-                    $"Cannot determine DocumentType: Failed to parse ClientNumber from ClientVisualID '{clientVisualID}'. Extracted: '{clientNumberStr}'. DocumentType is a critical field.");
-            }
-
-            // Apply business rules
-            // Rule 1: ClientNumber 1, 2, 5, 8 → "כתב הגנה"
-            if (clientNumber == 1 || clientNumber == 2 || clientNumber == 5 || clientNumber == 8)
-            {
-                return "כתב הגנה";
-            }
-
-            // Rule 2: ClientNumber 6 → "מכתב דרישה אילי"
-            if (clientNumber == 6)
-            {
-                return "מכתב דרישה אילי";
-            }
-
-            // Rule 3: ClientNumber 7, 9, 4 → "כתב תביעה"
-            if (clientNumber == 7 || clientNumber == 9 || clientNumber == 4)
-            {
-                return "כתב תביעה";
-            }
-
-            // Rule 4: ClientNumber >= 100 (3+ digits) → "כתב תביעה"
-            if (clientNumber >= 100)
-            {
-                return "כתב תביעה";
-            }
-
-            // If no rule matches, this is an unexpected ClientNumber - fail loudly
             throw new InvalidOperationException(
-                $"Cannot determine DocumentType: ClientNumber {clientNumber} (from ClientVisualID '{clientVisualID}') does not match any known business rule. DocumentType is a critical field.");
+                $"Cannot determine DocumentType: ClientNumber {clientNumber.Value} (from ClientVisualID '{clientVisualID}') does not match any known business rule.");
         }
 
         private static string? DetermineResponsibleText(OdcanitCase c)

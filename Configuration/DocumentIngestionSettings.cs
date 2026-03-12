@@ -41,7 +41,37 @@ namespace Odmon.Worker.Configuration
             [6]   = "מכתב דרישה אילי",
         };
 
-        /// <summary>Resolve DocumentType by client number (SideCounter). Returns null if not in explicit mapping.</summary>
+        /// <summary>
+        /// Extracts the business client number from a visual ID string.
+        /// TikVisualID uses '/' (e.g. "9/1990" → 9). ClientVisualID uses '\' (e.g. "102\5334" → 102).
+        /// </summary>
+        public static int? ParseClientNumber(string? id, char separator)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return null;
+            var sepIndex = id.IndexOf(separator);
+            var prefix = sepIndex > 0 ? id.Substring(0, sepIndex).Trim() : id.Trim();
+            return int.TryParse(prefix, out var num) ? num : null;
+        }
+
+        /// <summary>
+        /// Resolves DocumentType using the official client-number mapping with legacy fallback.
+        /// Returns (DocumentType, DerivationPath) where DerivationPath is ExplicitMapping, LegacyFallback, or Unresolved.
+        /// </summary>
+        public static (string? DocumentType, string DerivationPath) ResolveDocumentType(int clientNumber)
+        {
+            if (ClientMap.TryGetValue(clientNumber, out var explicitType))
+                return (explicitType, "ExplicitMapping");
+
+            if (clientNumber is 4 or 7 or 9)
+                return ("כתב תביעה", "LegacyFallback");
+
+            if (clientNumber >= 100)
+                return ("כתב תביעה", "LegacyFallback");
+
+            return (null, "Unresolved");
+        }
+
+        /// <summary>Resolve DocumentType by client number. Returns null if not in explicit mapping.</summary>
         public static string? ResolveByClientNumber(int clientNumber)
             => ClientMap.TryGetValue(clientNumber, out var name) ? name : null;
 

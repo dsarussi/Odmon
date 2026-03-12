@@ -31,7 +31,7 @@ namespace Odmon.Worker.Tests
         {
             var boardGroupIds = new[] { "topics" };
             var result = MondayGroupResolver.ResolveGroupId(
-                5035534500, boardGroupIds, "new_group29179", "Monday:ToDoGroupId", CreateLogger());
+                5035534500, boardGroupIds, "stale_group_id", "Monday:ToDoGroupId", CreateLogger());
             Assert.Equal("topics", result);
         }
 

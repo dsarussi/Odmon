@@ -113,42 +113,6 @@ namespace Odmon.Worker.Services
         }
 
         /// <summary>
-        /// Resolves SideCounter (client number) from TikCounter using vwExportToOuterSystems_Files.
-        /// </summary>
-        public async Task<int?> ResolveSideCounterAsync(int tikCounter, CancellationToken ct)
-        {
-            var connection = _odcanitDb.Database.GetDbConnection();
-            var wasClosed = connection.State == ConnectionState.Closed;
-
-            if (wasClosed)
-                await connection.OpenAsync(ct);
-
-            try
-            {
-                await using var command = (SqlCommand)connection.CreateCommand();
-                command.CommandText = "SELECT TOP 1 SideCounter FROM dbo.vwExportToOuterSystems_Files WHERE TikCounter = @TikCounter";
-                command.CommandType = CommandType.Text;
-                command.CommandTimeout = 15;
-                command.Parameters.Add(new SqlParameter("@TikCounter", SqlDbType.Int) { Value = tikCounter });
-
-                var result = await command.ExecuteScalarAsync(ct);
-                if (result is int value)
-                    return value;
-                if (result is DBNull || result is null)
-                    return null;
-                if (int.TryParse(result.ToString(), out var parsed))
-                    return parsed;
-
-                return null;
-            }
-            finally
-            {
-                if (wasClosed && connection.State == ConnectionState.Open)
-                    await connection.CloseAsync();
-            }
-        }
-
-        /// <summary>
         /// Resolves TikCounter from TikVisualID using dbo.MainTik.
         /// Tries column "TikCounter" first; if that column doesn't exist (SqlException 207)
         /// or returns null, falls back to column "Counter" for compatibility across DB versions.
