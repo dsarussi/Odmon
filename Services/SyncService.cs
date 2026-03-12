@@ -154,7 +154,7 @@ namespace Odmon.Worker.Services
                 runId, dataSource, testMode, dryRun, maxItems);
 
             var casesBoardId = _mondaySettings.CasesBoardId;
-            var defaultGroupId = _mondaySettings.ToDoGroupId;
+            var defaultGroupId = SanitizeGroupId(_mondaySettings.ToDoGroupId, "Monday:ToDoGroupId");
             if (string.IsNullOrWhiteSpace(defaultGroupId))
             {
                 _logger.LogError("Monday ToDo group id is missing from configuration.");
@@ -171,9 +171,10 @@ namespace Odmon.Worker.Services
                     boardIdToUse = testBoardId;
                 }
 
-                if (!string.IsNullOrWhiteSpace(testGroupId))
+                var sanitizedTestGroup = SanitizeGroupId(testGroupId, "Monday:TestGroupId");
+                if (!string.IsNullOrWhiteSpace(sanitizedTestGroup))
                 {
-                    groupIdToUse = testGroupId;
+                    groupIdToUse = sanitizedTestGroup;
                 }
             }
 
@@ -3147,6 +3148,20 @@ namespace Odmon.Worker.Services
         /// Checks if a case belongs to Client 6 based on ClientVisualID.
         /// Client 6 has special handling: DocumentType is omitted from Monday sync.
         /// </summary>
+        /// <summary>
+        /// Guards against stale deployed config values for Monday group IDs.
+        /// Replaces any "new_group*" value with "topics" (the correct production group).
+        /// </summary>
+        private string? SanitizeGroupId(string? groupId, string configKey)
+        {
+            if (groupId != null && groupId.StartsWith("new_group", StringComparison.Ordinal))
+            {
+                _logger.LogWarning("SYNC | Overriding stale {ConfigKey}='{StaleId}' → 'topics'", configKey, groupId);
+                return "topics";
+            }
+            return groupId;
+        }
+
         private static bool IsClient6(string? clientVisualID)
         {
             if (string.IsNullOrWhiteSpace(clientVisualID))

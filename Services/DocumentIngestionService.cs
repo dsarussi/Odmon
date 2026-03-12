@@ -911,8 +911,10 @@ namespace Odmon.Worker.Services
                 "Resolved Odcanit filename | Tik={TikVisualID} | DocumentType={DocumentType} | FinalName={FinalName}",
                 tikVisualID, resolvedType, businessFileName);
 
+            // SP constructs DestPath by appending extension from @FilePath — pass name without extension to avoid duplication
+            var spFileName = Path.GetFileNameWithoutExtension(businessFileName);
             var result = await _documentWriter.CreateDocumentRowAsync(
-                tikCounter, businessFileName, record.InboxFilePath!, ct);
+                tikCounter, spFileName, record.InboxFilePath!, ct);
 
             record.OdcanitDocCounter = result.DocCounter;
             record.OdcanitDestPath = result.DestPath;
