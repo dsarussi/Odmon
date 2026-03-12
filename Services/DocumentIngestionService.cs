@@ -300,13 +300,59 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            // ── Resolve DocumentType via client-number mapping with fallback ──
+            string documentType;
+            string derivationPath;
+            int? sideCounter = null;
+            try
+            {
+                sideCounter = await _documentWriter.ResolveSideCounterAsync(tikCounter.Value, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "TASKDOC DOCTYPE | Path=SideCounterResolveFailed | TikCounter={TikCounter}", tikCounter.Value);
+            }
+
+            if (sideCounter.HasValue)
+            {
+                var explicitType = DocumentTypeMap.ResolveByClientNumber(sideCounter.Value);
+                if (explicitType != null)
+                {
+                    documentType = explicitType;
+                    derivationPath = "ExplicitMapping";
+                }
+                else
+                {
+                    documentType = DocumentTypeMap.Resolve(fileColumnId);
+                    derivationPath = "LegacyFallback";
+                }
+            }
+            else
+            {
+                documentType = DocumentTypeMap.Resolve(fileColumnId);
+                derivationPath = "LegacyFallback";
+            }
+
+            if (derivationPath == "LegacyFallback")
+            {
+                _logger.LogWarning(
+                    "TASKDOC DOCTYPE | Path={Path} | TikCounter={TikCounter} | TikVisualID={TikVisualID} | ClientNumber={ClientNumber} | DocumentType={DocumentType}",
+                    derivationPath, tikCounter.Value, item.TikNumber, sideCounter?.ToString() ?? "<null>", documentType);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "TASKDOC DOCTYPE | Path={Path} | TikCounter={TikCounter} | TikVisualID={TikVisualID} | ClientNumber={ClientNumber} | DocumentType={DocumentType}",
+                    derivationPath, tikCounter.Value, item.TikNumber, sideCounter, documentType);
+            }
+
             var assetRef = wordAssets[0];
             var assetExt = Path.GetExtension(assetRef.Name)?.TrimStart('.').ToLowerInvariant() ?? "docx";
             _logger.LogDebug(
                 "TASKDOC IMPORT START | ItemId={ItemId} | TikNumber={TikNumber} | TikCounter={TikCounter} | AssetId={AssetId} | ColumnId={ColumnId} | Extension={Ext} | AssetName={AssetName}",
                 item.ItemId, item.TikNumber, tikCounter.Value, assetRef.AssetId, fileColumnId, assetExt, assetRef.Name);
 
-            await ProcessSingleAssetAsync(item.ItemId, 0, fileColumnId, assetRef, item.TikNumber!, tikCounter.Value, ct);
+            await ProcessSingleAssetAsync(item.ItemId, 0, fileColumnId, assetRef, item.TikNumber!, tikCounter.Value, ct, documentType);
         }
 
         private async Task MarkTaskTimeoutNoFileAsync(long itemId, string columnId, CancellationToken ct)
@@ -485,7 +531,8 @@ namespace Odmon.Worker.Services
         private async Task ProcessSingleAssetAsync(
             long questionnaireItemId, long linkedCaseItemId, string columnId,
             DocumentIngestionMondayService.FileAssetRef assetRef,
-            string tikVisualID, int tikCounter, CancellationToken ct)
+            string tikVisualID, int tikCounter, CancellationToken ct,
+            string? documentType = null)
         {
             _totalProcessed++;
             var assetIdStr = assetRef.AssetId.ToString();
@@ -610,7 +657,7 @@ namespace Odmon.Worker.Services
                     _logger.LogDebug(
                         "DOCINGESTION STAGE=UPLOAD | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}",
                         assetIdStr, questionnaireItemId, tikCounter, tikVisualID, attemptLabel);
-                    await CreateDocumentRowAsync(record, tikCounter, tikVisualID, columnId, ct);
+                    await CreateDocumentRowAsync(record, tikCounter, tikVisualID, columnId, ct, documentType);
                     await CopyToDestPathAsync(record, ct);
                     _logger.LogDebug(
                         "DOCINGESTION STAGE=UPLOAD SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, DocCounter={DocCounter}, DestPath={DestPath}",
@@ -862,15 +909,17 @@ namespace Odmon.Worker.Services
         // ───────── Step 2: Create Odcanit document row ─────────
 
         private async Task CreateDocumentRowAsync(
-            MondayDocumentImport record, int tikCounter, string tikVisualID, string columnId, CancellationToken ct)
+            MondayDocumentImport record, int tikCounter, string tikVisualID, string columnId, CancellationToken ct,
+            string? documentType = null)
         {
             var spSw = Stopwatch.StartNew();
 
+            var resolvedType = documentType ?? DocumentTypeMap.Resolve(columnId);
             var extension = Path.GetExtension(record.InboxFilePath!) ?? ".pdf";
-            var businessFileName = DocumentTypeMap.BuildBusinessFileName(tikCounter, tikVisualID, columnId, extension);
+            var businessFileName = DocumentTypeMap.BuildBusinessFileName(tikCounter, tikVisualID, resolvedType, extension);
             _logger.LogInformation(
                 "Resolved Odcanit filename | Tik={TikVisualID} | DocumentType={DocumentType} | FinalName={FinalName}",
-                tikVisualID, DocumentTypeMap.Resolve(columnId), businessFileName);
+                tikVisualID, resolvedType, businessFileName);
 
             var result = await _documentWriter.CreateDocumentRowAsync(
                 tikCounter, businessFileName, record.InboxFilePath!, ct);
