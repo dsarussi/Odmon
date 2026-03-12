@@ -8,7 +8,7 @@ namespace Odmon.Worker.Configuration
     {
         private static readonly Dictionary<string, string> Map = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["file_mm1bvngc"] = "כתב הגנה",
+            ["file_mm1bvngc"] = "כתב תביעה",
             ["file_mm0qwtat"] = "תצהיר ויפוי כח",
             ["file_mkzr2cmr"] = "מסמך נלווה",
         };
@@ -17,19 +17,20 @@ namespace Odmon.Worker.Configuration
             => Map.TryGetValue(columnId, out var name) ? name : "מסמך";
 
         /// <summary>
-        /// Build a deterministic business filename: "{TikNumber} - {DocType}.{ext}"
+        /// Build a deterministic business filename: "({TikCounter}){TikVisualID} - {DocType}.{ext}"
         /// Invalid filename chars are stripped. "/" in TikVisualID becomes "-".
         /// </summary>
-        public static string BuildBusinessFileName(string tikVisualID, string columnId, string extension)
+        public static string BuildBusinessFileName(int tikCounter, string tikVisualID, string columnId, string extension)
         {
             var docType = Resolve(columnId);
             var safeTik = tikVisualID.Replace("/", "-").Replace("\\", "-").Trim();
             if (string.IsNullOrEmpty(safeTik)) safeTik = "unknown";
-            var ext = (extension ?? "pdf").TrimStart('.').ToLowerInvariant();
+            var ext = (extension ?? ".pdf").TrimStart('.');
             if (string.IsNullOrEmpty(ext)) ext = "pdf";
-            var raw = $"{safeTik} - {docType}.{ext}";
+            ext = ext.ToLowerInvariant();
+            var raw = $"({tikCounter}){safeTik} - {docType}.{ext}";
             var invalid = Path.GetInvalidFileNameChars();
-            return new string(raw.Where(c => !invalid.Contains(c) || c == ' ' || c == '-' || c == '.').ToArray()).Trim();
+            return new string(raw.Where(c => !invalid.Contains(c) || c == ' ' || c == '-' || c == '.' || c == '(' || c == ')').ToArray()).Trim();
         }
     }
 

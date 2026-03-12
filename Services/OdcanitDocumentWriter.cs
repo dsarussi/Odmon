@@ -59,7 +59,7 @@ namespace Odmon.Worker.Services
                 var summary = $"ODMON import: {fileName}";
 
                 command.Parameters.Add(new SqlParameter("@TikCounter", SqlDbType.Int) { Value = tikCounter });
-                command.Parameters.Add(new SqlParameter("@Name", SqlDbType.VarChar, 200) { Value = fileName });
+                command.Parameters.Add(new SqlParameter("@Name", SqlDbType.NVarChar, 200) { Value = fileName });
                 command.Parameters.Add(new SqlParameter("@summary", SqlDbType.VarChar, 5000) { Value = summary });
                 command.Parameters.Add(new SqlParameter("@CategoryCounter", SqlDbType.Int) { Value = _settings.CategoryCounter });
                 command.Parameters.Add(new SqlParameter("@SubCategoryCounter", SqlDbType.Int) { Value = _settings.SubCategoryCounter });

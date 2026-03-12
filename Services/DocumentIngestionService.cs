@@ -866,11 +866,11 @@ namespace Odmon.Worker.Services
         {
             var spSw = Stopwatch.StartNew();
 
-            var extension = Path.GetExtension(record.InboxFilePath!)?.TrimStart('.') ?? "pdf";
-            var businessFileName = DocumentTypeMap.BuildBusinessFileName(tikVisualID, columnId, extension);
-            _logger.LogDebug(
-                "DOC FILENAME BUILT | TikNumber={TikNumber} | ColumnId={ColumnId} | DocumentType={DocumentType} | FileName={FileName}",
-                tikVisualID, columnId, DocumentTypeMap.Resolve(columnId), businessFileName);
+            var extension = Path.GetExtension(record.InboxFilePath!) ?? ".pdf";
+            var businessFileName = DocumentTypeMap.BuildBusinessFileName(tikCounter, tikVisualID, columnId, extension);
+            _logger.LogInformation(
+                "Resolved Odcanit filename | Tik={TikVisualID} | DocumentType={DocumentType} | FinalName={FinalName}",
+                tikVisualID, DocumentTypeMap.Resolve(columnId), businessFileName);
 
             var result = await _documentWriter.CreateDocumentRowAsync(
                 tikCounter, businessFileName, record.InboxFilePath!, ct);

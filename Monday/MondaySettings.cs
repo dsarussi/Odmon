@@ -5,8 +5,8 @@ namespace Odmon.Worker.Monday
         public string? ApiToken { get; set; }
         public long BoardId { get; set; }
         public long CasesBoardId { get; set; }
-        public string? ToDoGroupId { get; set; }
-        public string? TestGroupId { get; set; }
+        public string? ToDoGroupId { get; set; } = "topics";
+        public string? TestGroupId { get; set; } = "topics";
         public string? ClientPhoneColumnId { get; set; } = "phone_mkwe10tx";
         public string? ClientEmailColumnId { get; set; } = "email_mkwefwgy";
         public string? CaseNumberColumnId { get; set; } = "text_mkwe19hn";
@@ -34,7 +34,7 @@ namespace Odmon.Worker.Monday
         public string? ClientTaxIdColumnId { get; set; } = "text_mkwjzsvg";
         public string? PolicyHolderNameColumnId { get; set; } = "text_mky27a51";
         public string? PolicyHolderIdColumnId { get; set; } = "text_mkwjqdb4";
-        public string? PolicyHolderAddressColumnId { get; set; } = "text_mkwjan1q";
+        public string? PolicyHolderAddressColumnId { get; set; } = "text_mkxer5d1";
         public string? PolicyHolderPhoneColumnId { get; set; } = "phone_mkwjzg9";
         public string? PolicyHolderEmailColumnId { get; set; } = "email_mkwjbh2t";
         public string? MainCarNumberColumnId { get; set; } = "text_mkwjnwh7";
@@ -45,7 +45,7 @@ namespace Odmon.Worker.Monday
         public string? AdditionalDefendantsColumnId { get; set; } = "long_text_mkwjhngq";
         public string? PlaintiffNameColumnId { get; set; } = "text_mkwj5k8e";
         public string? PlaintiffIdColumnId { get; set; } = "text_mkwj82zd";
-        public string? PlaintiffAddressColumnId { get; set; } = "text_mkwjvvp6";
+        public string? PlaintiffAddressColumnId { get; set; } = "text_mm1b2eaz";
         public string? PlaintiffPhoneColumnId { get; set; } = "phone_mkwe10tx";
         public string? PlaintiffEmailColumnId { get; set; } = "email_mkwjy4rs";
         public string? DefendantNameColumnId { get; set; } = "text_mkxeabj2";
@@ -65,7 +65,7 @@ namespace Odmon.Worker.Monday
         public string? ThirdPartyLawyerAddressColumnId { get; set; } = "text_mkwjdzdg";
         public string? ThirdPartyLawyerPhoneColumnId { get; set; } = "phone_mkwjfge2";
         public string? ThirdPartyLawyerEmailColumnId { get; set; } = "email_mkwj4mmk";
-        public string? CourtNameStatusColumnId { get; set; } = "color_mkwj24j";
+        public string? CourtNameStatusColumnId { get; set; }
         public string? CourtCityColumnId { get; set; } = "text_mkxez28d";
         public string? CourtCaseNumberColumnId { get; set; } = "text_mkwj3kf4";
         public string? JudgeNameColumnId { get; set; } = "text_mkwjne8v";
@@ -74,8 +74,8 @@ namespace Odmon.Worker.Monday
         /// <summary>Hearing status column (פעיל / מבוטל / הועבר). ColumnId: color_mkzqbrta.</summary>
         public string? HearingStatusColumnId { get; set; } = "color_mkzqbrta";
         public string? AttorneyNameColumnId { get; set; } = "text_mkxeqj54";
-        public string? DefenseStreetColumnId { get; set; } = "text_mkxer5d1";
-        public string? ClaimStreetColumnId { get; set; } = "text_mkxwzxcq";
+        public string? DefenseStreetColumnId { get; set; } = "text_mkxwzxcq";
+        public string? ClaimStreetColumnId { get; set; }
         public string? ComplaintReceivedDateColumnId { get; set; } = "date_mkxeapah";
         public string? CaseFolderIdColumnId { get; set; } = "text_mkxe3vhk";
         public string? TaskTypeStatusColumnId { get; set; } = "color_mkwyq310";

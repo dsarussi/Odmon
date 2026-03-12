@@ -57,7 +57,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 |--------------|-----------|----------------|-------|
 | שם בעל פוליסה | *Dynamic* | `OdcanitCase.PolicyHolderName` | Column ID resolved dynamically by title "שם בעל פוליסה" via MondayMetadataProvider |
 | תעודת זהות בעל פוליסה | text_mkwjqdb4 | `OdcanitCase.PolicyHolderId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "ת.ז. בעל פוליסה", "תעודת זהות בעל פוליסה", "Policy holder: id") |
-| כתובת בעל פוליסה | text_mkwjan1q | `OdcanitCase.PolicyHolderAddress` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת בעל פוליסה", "Policy holder: address") |
+| כתובת בעל פוליסה | text_mkxer5d1 | `OdcanitCase.PolicyHolderAddress` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת בעל פוליסה", "Policy holder: address") |
 | טלפון בעל פוליסה | phone_mkwjzg9 | `OdcanitCase.PolicyHolderPhone` (normalized) | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "סלולרי בעל פוליסה", "Policy holder: phone"). Normalized to E.164 format |
 | דוא"ל בעל פוליסה | email_mkwjbh2t | `OdcanitCase.PolicyHolderEmail` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת דוא\"ל בעל פוליסה", "Policy holder: email") |
 
@@ -82,7 +82,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 |--------------|-----------|----------------|-------|
 | שם תובע | text_mkwj5k8e | `OdcanitCase.PlaintiffName` | From vwSides where SideTypeName indicates Plaintiff role |
 | תעודת זהות תובע | text_mkwj82zd | `OdcanitCase.PlaintiffId` | From vwSides (ID field) |
-| כתובת תובע | text_mkwjvvp6 | `OdcanitCase.PlaintiffAddress` | From vwSides (FullAddress field) |
+| כתובת תובע | text_mm1b2eaz | `OdcanitCase.PlaintiffAddress` | From vwSides (FullAddress field) |
 | טלפון תובע | phone_mkwjm44s | `OdcanitCase.PlaintiffPhone` (normalized) | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "סלולרי תובע"). Normalized to E.164 format |
 | דוא"ל תובע | email_mkwjy4rs | `OdcanitCase.PlaintiffEmail` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת דוא\"ל תובע") |
 
@@ -121,7 +121,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 
 | Monday Column | Column ID | Odcanit Source | Notes |
 |--------------|-----------|----------------|-------|
-| שם בית משפט | color_mkwj24j | `OdcanitCase.CourtName` | Status column. From diary events (vwDiaryEvents) - CourtName or CourtCodeName |
+| שם בית משפט | ~~color_mkwj24j~~ (removed — column does not exist on board) | `OdcanitCase.CourtName` | Was status column; removed from sync payload. |
 | עיר בית משפט | text_mkxez28d | `OdcanitCase.CourtCity` | From diary events (vwDiaryEvents) - City field |
 | מספר תיק בבית משפט | text_mkwj3kf4 | `OdcanitCase.CourtCaseNumber` | From vwHozlapFormsData_TikMainData - concatenation of clcCourtNum + CourtName |
 | שם שופט | text_mkwjne8v | `OdcanitCase.JudgeName` | From diary events (vwDiaryEvents) - JudgeName field |
@@ -131,8 +131,8 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | Monday Column | Column ID | Odcanit Source | Notes |
 |--------------|-----------|----------------|-------|
 | שם עורך דין | text_mkxeqj54 | `OdcanitCase.AttorneyName` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "שם עורך דין") |
-| מרחוב (הגנה) | text_mkxer5d1 | `OdcanitCase.DefenseStreet` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "מרחוב (הגנה)") |
-| מרחוב (תביעה) | text_mkxwzxcq | `OdcanitCase.ClaimStreet` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "מרחוב (תביעה)") |
+| כתובת נתבע / מרחוב (הגנה) | text_mkxwzxcq | `OdcanitCase.DefenseStreet` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת נתבע" or "מרחוב (הגנה)") |
+| מרחוב (תביעה) | _(no live column)_ | `OdcanitCase.ClaimStreet` | From legal user data — no corresponding Monday column; not sent. |
 | folderID | text_mkxe3vhk | `OdcanitCase.CaseFolderId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "folderID") |
 | הערות | long_text_mkwe5h8v | `OdcanitCase.Notes` | Case notes |
 | נתבעים נוספים | long_text_mkwjhngq | `OdcanitCase.AdditionalDefendants` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "נתבעים נוספים") |

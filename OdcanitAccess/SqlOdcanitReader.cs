@@ -668,6 +668,14 @@ namespace Odmon.Worker.OdcanitAccess
                     odcanitCase.CourtCaseNumber ?? "<null>",
                     odcanitCase.CourtCity ?? "<null>",
                     odcanitCase.CourtName ?? "<null>");
+
+                _logger.LogDebug(
+                    "ADDRESS MAPPING | TikCounter={TikCounter} | PolicyHolderAddress='{PolicyHolderAddress}' | PlaintiffAddress='{PlaintiffAddress}' | DefenseStreet='{DefenseStreet}' | PlaintiffAddressFromUserData={FromUserData}",
+                    odcanitCase.TikCounter,
+                    odcanitCase.PolicyHolderAddress ?? "<null>",
+                    odcanitCase.PlaintiffAddress ?? "<null>",
+                    odcanitCase.DefenseStreet ?? "<null>",
+                    plaintiffAddressFromUserData);
             }
         }
 
@@ -766,7 +774,11 @@ namespace Odmon.Worker.OdcanitAccess
             Add("שם מוסך", (c, row) => c.GarageName = row.strData);
             Add("שם תובע", (c, row) => c.PlaintiffName = row.strData);
             Add("ת.ז. תובע", (c, row) => c.PlaintiffId = row.strData);
-            Add("כתובת תובע", (c, row) => c.PlaintiffAddress = row.strData);
+            Add("כתובת תובע", (c, row) =>
+            {
+                if (!string.IsNullOrWhiteSpace(row.strData))
+                    c.PlaintiffAddress = row.strData;
+            });
             Add("סלולרי תובע", (c, row) => c.PlaintiffPhone = row.strData);
             Add("כתובת דוא\"ל תובע", (c, row) => c.PlaintiffEmail = row.strData);
             Add("שם נתבע", (c, row) => c.DefendantName = row.strData);

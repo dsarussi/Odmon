@@ -1107,8 +1107,6 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerAddressColumnId, c.ThirdPartyLawyerAddress);
             TryAddPhoneColumn(columnValues, _mondaySettings.ThirdPartyLawyerPhoneColumnId, c.ThirdPartyLawyerPhone, c.TikCounter, "Third-party lawyer phone");
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerEmailColumnId, c.ThirdPartyLawyerEmail);
-            // TODO: Ensure court labels on Monday match Odcanit court names.
-            TryAddStatusLabelColumn(columnValues, _mondaySettings.CourtNameStatusColumnId, c.CourtName);
             // CourtCity and JudgeName are handled above in the hearing gating section with EffectiveCourtCity logic
             TryAddStringColumn(columnValues, _mondaySettings.CourtCaseNumberColumnId, c.CourtCaseNumber);
             TryAddStringColumn(columnValues, _mondaySettings.AttorneyNameColumnId, c.AttorneyName);
@@ -2059,11 +2057,6 @@ namespace Odmon.Worker.Services
             if (!string.IsNullOrWhiteSpace(_mondaySettings.HearingHourColumnId))
             {
                 criticalColumns.Add(_mondaySettings.HearingHourColumnId);
-            }
-
-            if (!string.IsNullOrWhiteSpace(_mondaySettings.CourtNameStatusColumnId))
-            {
-                criticalColumns.Add(_mondaySettings.CourtNameStatusColumnId);
             }
 
             // Allow additional critical columns from configuration
