@@ -52,7 +52,7 @@ namespace Odmon.Worker.Monday
         public string? DefendantFaxColumnId { get; set; } = "text_mkxe2zay";
         public string? ThirdPartyDriverNameColumnId { get; set; } = "text_mkwj9bvj";
         public string? ThirdPartyDriverIdColumnId { get; set; } = "text_mkwjmad2";
-        public string? ThirdPartyCarNumberColumnId { get; set; } = "text_mkwj5jpn";
+        public string? ThirdPartyCarNumberColumnId { get; set; } = "text_mky2df4d";
         public string? ThirdPartyPhoneColumnId { get; set; } = "phone_mkwj9a3a";
         public string? ThirdPartyInsurerStatusColumnId { get; set; } = "color_mkwjz9mp";
         public string? InsuranceCompanyIdColumnId { get; set; } = "text_mkwjmpex";
@@ -81,6 +81,8 @@ namespace Odmon.Worker.Monday
         public string? TaskTypeStatusColumnId { get; set; } = "color_mkwyq310";
         public string? ResponsibleTextColumnId { get; set; } = "text_mkxz6j9y";
         public string? DocumentTypeStatusColumnId { get; set; } = "color_mkxhq546";
+        /// <summary>נסיבות התאונה בקצרה — short accident circumstances text column.</summary>
+        public string? ShortAccidentCircumstancesColumnId { get; set; } = "text_mky1vzgg";
 
         /// <summary>
         /// If true, inactive Monday items may be revived (new item created, mapping updated).

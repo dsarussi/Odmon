@@ -1113,6 +1113,7 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.AttorneyNameColumnId, c.AttorneyName);
             TryAddStringColumn(columnValues, _mondaySettings.DefenseStreetColumnId, c.DefenseStreet);
             TryAddStringColumn(columnValues, _mondaySettings.ClaimStreetColumnId, c.ClaimStreet);
+            TryAddStringColumn(columnValues, _mondaySettings.ShortAccidentCircumstancesColumnId, c.ShortAccidentCircumstances);
             TryAddStringColumn(columnValues, _mondaySettings.CaseFolderIdColumnId, c.CaseFolderId);
             TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
 
@@ -1235,6 +1236,14 @@ namespace Odmon.Worker.Services
                     notesColumnId ?? "<null>",
                     c.TikCounter);
             }
+
+            var tpCarColId = _mondaySettings.ThirdPartyCarNumberColumnId;
+            var accColId = _mondaySettings.ShortAccidentCircumstancesColumnId;
+            _logger.LogDebug(
+                "FIELD MAP | TikCounter={TikCounter} | ThirdPartyCarNumber='{Value}' → {ColId} | ShortAccidentCircumstances='{AccVal}' → {AccColId}",
+                c.TikCounter,
+                c.ThirdPartyCarNumber ?? "<null>", tpCarColId ?? "<null>",
+                c.ShortAccidentCircumstances ?? "<null>", accColId ?? "<null>");
 
             // DEBUG: Log column values before JSON serialization
             _logger.LogDebug(
@@ -3066,6 +3075,7 @@ namespace Odmon.Worker.Services
             AppendStr(sb, c.AttorneyName);
             AppendStr(sb, c.DefenseStreet);
             AppendStr(sb, c.ClaimStreet);
+            AppendStr(sb, c.ShortAccidentCircumstances);
             AppendStr(sb, c.CaseFolderId);
             AppendStr(sb, c.StatusName);
 

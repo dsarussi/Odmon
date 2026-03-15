@@ -711,6 +711,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("Driver: main car number", (c, row) => c.MainCarNumber = row.strData);
             Add("מספר רישוי נוסף", (c, row) => c.SecondCarNumber = row.strData);
             Add("מספר רישוי רכב ג'", (c, row) => c.ThirdPartyCarNumber = row.strData);
+            Add("מספר רישוי רכב ג", (c, row) => c.ThirdPartyCarNumber = row.strData);
             Add("מספר רכב צד ג'", (c, row) => c.ThirdPartyCarNumber = row.strData);
             Add("Third-party driver: car number", (c, row) => c.ThirdPartyCarNumber = row.strData);
             Add("סכום תביעה", (c, row) => c.RequestedClaimAmount = ExtractDecimal(row) ?? c.RequestedClaimAmount);
@@ -834,6 +835,8 @@ namespace Odmon.Worker.OdcanitAccess
 
             // Accident short circumstances: populate Notes from UserData "גרסאות תביעה"
             Add("גרסאות תביעה", (c, row) => c.Notes = row.strData);
+
+            Add("גרסת לקוח - נוסח משפטי", (c, row) => c.ShortAccidentCircumstances = row.strData);
 
             return dict;
         }

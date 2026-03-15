@@ -74,7 +74,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | Monday Column | Column ID | Odcanit Source | Notes |
 |--------------|-----------|----------------|-------|
 | מספר רכב ראשי | text_mkwjnwh7 | `OdcanitCase.MainCarNumber` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "מספר רישוי", "Main car number", "Driver: main car number") |
-| מספר רכב צד ג' | text_mkwj5jpn | `OdcanitCase.ThirdPartyCarNumber` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "מספר רישוי רכב ג'", "מספר רכב צד ג'", "Third-party driver: car number") |
+| מספר רכב צד ג' | text_mky2df4d | `OdcanitCase.ThirdPartyCarNumber` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "מספר רישוי רכב ג'", "מספר רישוי רכב ג", "מספר רכב צד ג'", "Third-party driver: car number"). Previous column id was text_mkwj5jpn (no longer active). |
 
 ### Plaintiff Information (from vwSides)
 
@@ -134,7 +134,8 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | כתובת נתבע / מרחוב (הגנה) | text_mkxwzxcq | `OdcanitCase.DefenseStreet` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת נתבע" or "מרחוב (הגנה)") |
 | מרחוב (תביעה) | _(no live column)_ | `OdcanitCase.ClaimStreet` | From legal user data — no corresponding Monday column; not sent. |
 | folderID | text_mkxe3vhk | `OdcanitCase.CaseFolderId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "folderID") |
-| הערות | long_text_mkwe5h8v | `OdcanitCase.Notes` | Case notes |
+| הערות | long_text_mkwe5h8v | `OdcanitCase.Notes` | From UserData "גרסאות תביעה" |
+| נסיבות התאונה בקצרה | text_mky1vzgg | `OdcanitCase.ShortAccidentCircumstances` | From UserData "גרסת לקוח - נוסח משפטי" |
 | נתבעים נוספים | long_text_mkwjhngq | `OdcanitCase.AdditionalDefendants` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "נתבעים נוספים") |
 | שם עד | text_mkwjt62y | `OdcanitCase.WitnessName` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "שם עד") |
 

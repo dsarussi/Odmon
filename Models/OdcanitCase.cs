@@ -192,6 +192,9 @@ namespace Odmon.Worker.Models
         public string? DefenseStreet { get; set; }
         [NotMapped]
         public string? ClaimStreet { get; set; }
+        /// <summary>Short accident circumstances from UserData "גרסת לקוח - נוסח משפטי".</summary>
+        [NotMapped]
+        public string? ShortAccidentCircumstances { get; set; }
         [NotMapped]
         public DateTime? ComplaintReceivedDate { get; set; }
         [NotMapped]
