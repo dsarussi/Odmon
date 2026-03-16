@@ -4,9 +4,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Data.SqlClient;
 using Odmon.Worker.Data;
-using Odmon.Worker.OdcanitAccess;
+using Odmon.Worker.Models;
 using Odmon.Worker.Services;
 
 namespace Odmon.Worker.Workers
@@ -172,48 +171,74 @@ namespace Odmon.Worker.Workers
             {
                 using var scope = _scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<IntegrationDbContext>();
-                var odcanitDb = scope.ServiceProvider.GetRequiredService<OdcanitDbContext>();
 
-                var since = DateTime.UtcNow.AddHours(-24);
+                var israelTz = SyncService.GetIsraelTimeZone();
+                var yesterdayIsrael = israelDate.AddDays(-1);
+                var (startUtc, endUtc) = GetYesterdayIsraelUtcRange(israelTz, yesterdayIsrael);
 
-                // 1) System Activity (business-level)
-                var newMappings = await db.MondayItemMappings
+                // Section 1 — Overview counts (yesterday Israel time)
+                var casesCreatedCount = await db.MondayItemMappings
                     .AsNoTracking()
-                    .Where(m => m.CreatedAtUtc >= since)
+                    .Where(m => m.CreatedAtUtc >= startUtc && m.CreatedAtUtc <= endUtc)
                     .CountAsync(ct);
 
-                var updatedToday = await db.MondayItemMappings
+                var hearingsSyncedCount = await db.HearingNearestSnapshots
                     .AsNoTracking()
-                    .Where(m => m.LastSyncFromOdcanitUtc >= since)
+                    .Where(h => h.LastSyncedAtUtc >= startUtc && h.LastSyncedAtUtc <= endUtc)
                     .CountAsync(ct);
 
-                var runFailures = await db.SyncRunMetrics
+                var itemsUpdatedCount = await db.MondayItemMappings
                     .AsNoTracking()
-                    .Where(m => m.StartedAtUtc >= since)
-                    .SumAsync(m => m.Failed + m.BootstrapFailed, ct);
-                var persistedFailures = await db.SyncFailures
-                    .AsNoTracking()
-                    .Where(f => f.OccurredAtUtc >= since)
+                    .Where(m => m.LastSyncFromOdcanitUtc >= startUtc && m.LastSyncFromOdcanitUtc <= endUtc)
                     .CountAsync(ct);
-                var totalFailures = runFailures + persistedFailures;
 
-                // 2) Cases expected to open (today/tomorrow/day-after) — use OdcanitDb connection
-                List<UpcomingEligibleRow>? upcomingRows = null;
-                try
-                {
-                    var connStr = odcanitDb.Database.GetConnectionString();
-                    if (!string.IsNullOrWhiteSpace(connStr) && !connStr.Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase) && !connStr.Contains("__USE_SECRET__", StringComparison.Ordinal))
-                    {
-                        upcomingRows = await UpcomingEligibleSection.LoadAsync(connStr, ct);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Daily summary: Could not load upcoming eligible cases from OdcanitDb.");
-                }
+                var allFailuresInWindow = await db.SyncFailures
+                    .AsNoTracking()
+                    .Where(f => f.OccurredAtUtc >= startUtc && f.OccurredAtUtc <= endUtc)
+                    .ToListAsync(ct);
+                var realFailures = allFailuresInWindow
+                    .Where(f => FailureClassifier.IsRealFailure(f.ErrorType, f.Operation))
+                    .ToList();
+                var realFailureCount = realFailures.Count;
 
-                var subject = $"Daily Summary – {israelDate:yyyy-MM-dd}";
-                var body = BuildDailySummaryHtml(israelDate, newMappings, updatedToday, totalFailures, upcomingRows ?? new List<UpcomingEligibleRow>());
+                // Section 2 — Cases created yesterday (table)
+                var casesCreated = await db.MondayItemMappings
+                    .AsNoTracking()
+                    .Where(m => m.CreatedAtUtc >= startUtc && m.CreatedAtUtc <= endUtc)
+                    .OrderBy(m => m.CreatedAtUtc)
+                    .Select(m => new { m.TikNumber, m.CreatedAtUtc })
+                    .ToListAsync(ct);
+
+                // Section 3 — Hearings synced yesterday (proxy for hearing activity; label clearly)
+                var hearingsSynced = await (
+                    from h in db.HearingNearestSnapshots.AsNoTracking()
+                    where h.LastSyncedAtUtc >= startUtc && h.LastSyncedAtUtc <= endUtc
+                    join m in db.MondayItemMappings.AsNoTracking() on h.TikCounter equals m.TikCounter
+                    orderby h.LastSyncedAtUtc
+                    select new { m.TikNumber, h.LastSyncedAtUtc }
+                ).ToListAsync(ct);
+
+                // Section 5 — System notes (from SyncRunMetrics in window)
+                var runMetricsInWindow = await db.SyncRunMetrics
+                    .AsNoTracking()
+                    .Where(m => m.StartedAtUtc >= startUtc && m.StartedAtUtc <= endUtc)
+                    .ToListAsync(ct);
+                var circuitBreakerTripped = runMetricsInWindow.Any(m => m.CircuitBreakerTripped);
+                var totalRunFailures = runMetricsInWindow.Sum(m => m.Failed + m.BootstrapFailed);
+                var highFailureNote = realFailureCount > 10 || totalRunFailures > 15;
+
+                var subject = $"ODMON Daily Summary — {yesterdayIsrael:yyyy-MM-dd}";
+                var body = BuildDailySummaryHtml(
+                    yesterdayIsrael,
+                    casesCreatedCount,
+                    hearingsSyncedCount,
+                    itemsUpdatedCount,
+                    realFailureCount,
+                    casesCreated.Select(c => (c.TikNumber ?? "", c.CreatedAtUtc)).ToList(),
+                    hearingsSynced.Select(x => (x.TikNumber ?? "", x.LastSyncedAtUtc)).ToList(),
+                    realFailures,
+                    circuitBreakerTripped,
+                    highFailureNote);
 
                 if (_config.GetValue<bool>("Email:Enabled", false))
                 {
@@ -221,8 +246,8 @@ namespace Odmon.Worker.Workers
                 }
 
                 _logger.LogInformation(
-                    "DAILY SUMMARY SENT | Date={Date}, NewMappings={New}, Updated={Updated}, Failures={Failures}, Upcoming={Upcoming}",
-                    israelDate, newMappings, updatedToday, totalFailures, upcomingRows?.Count ?? 0);
+                    "DAILY SUMMARY SENT | Date={Date}, CasesCreated={Cases}, HearingsSynced={Hearings}, ItemsUpdated={Updated}, RealFailures={Failures}",
+                    yesterdayIsrael, casesCreatedCount, hearingsSyncedCount, itemsUpdatedCount, realFailureCount);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -230,54 +255,109 @@ namespace Odmon.Worker.Workers
             }
         }
 
+        /// <summary>Returns (startUtc, endUtc) for the given Israel date 00:00–23:59:59.999 Israel time.</summary>
+        private static (DateTime startUtc, DateTime endUtc) GetYesterdayIsraelUtcRange(TimeZoneInfo israelTz, DateOnly dateIsrael)
+        {
+            var startIsrael = dateIsrael.ToDateTime(TimeOnly.MinValue);
+            var endIsrael = dateIsrael.ToDateTime(new TimeOnly(23, 59, 59, 999));
+            var startUtc = TimeZoneInfo.ConvertTimeToUtc(startIsrael, israelTz);
+            var endUtc = TimeZoneInfo.ConvertTimeToUtc(endIsrael, israelTz);
+            return (startUtc, endUtc);
+        }
+
         private static string BuildDailySummaryHtml(
-            DateOnly date, int newMappings, int updatedToday, int totalFailures,
-            List<UpcomingEligibleRow> upcomingRows)
+            DateOnly date,
+            int casesCreatedCount,
+            int hearingsSyncedCount,
+            int itemsUpdatedCount,
+            int realFailureCount,
+            List<(string TikNumber, DateTime CreatedAtUtc)> casesCreated,
+            List<(string TikNumber, DateTime LastSyncedAtUtc)> hearingsSynced,
+            List<SyncFailure> realFailures,
+            bool circuitBreakerTripped,
+            bool highFailureNote)
         {
             static string E(string s) => System.Net.WebUtility.HtmlEncode(s ?? string.Empty);
 
             var sb = new StringBuilder();
             sb.AppendLine("<html><body style='font-family:Arial,sans-serif;'>");
             sb.AppendLine($"<h2>ODMON Daily Summary — {date:yyyy-MM-dd}</h2>");
+            sb.AppendLine("<p>Previous day (00:00–23:59 Israel time).</p>");
 
-            // 1) System Activity (business-level)
-            sb.AppendLine("<h3 style='margin:16px 0 8px;'>פעילות מערכת</h3>");
+            // Section 1 — Daily Overview
+            sb.AppendLine("<h3 style='margin:16px 0 8px;'>Daily Overview</h3>");
             sb.AppendLine("<table style='border-collapse:collapse; width:400px;'>");
-            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>פריטים חדשים ב-Monday (היום)</td><td style='padding:4px;'>{newMappings}</td></tr>");
-            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>עודכנו היום</td><td style='padding:4px;'>{updatedToday}</td></tr>");
-            var failStyle = totalFailures > 0 ? "color:red;font-weight:bold;" : "";
-            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>סך כשלונות</td><td style='padding:4px;{failStyle}'>{totalFailures}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Cases created in Monday yesterday</td><td style='padding:4px;'>{casesCreatedCount}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Hearings synced yesterday</td><td style='padding:4px;'>{hearingsSyncedCount}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Items updated yesterday</td><td style='padding:4px;'>{itemsUpdatedCount}</td></tr>");
+            var failStyle = realFailureCount > 0 ? "color:red;font-weight:bold;" : "";
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Real failures yesterday</td><td style='padding:4px;{failStyle}'>{realFailureCount}</td></tr>");
             sb.AppendLine("</table>");
 
-            // 2) Cases expected to open (today/tomorrow/day-after)
+            // Section 2 — Cases Created Yesterday
             sb.AppendLine("<hr/>");
-            sb.AppendLine("<div style='direction:rtl;text-align:right;font-family:Arial,sans-serif;'>");
-            sb.AppendLine("<h3 style='margin:16px 0 8px;'>תיקים צפויים להיפתח (היום/מחר/מחרתיים)</h3>");
-            if (upcomingRows.Count == 0)
-            {
-                sb.AppendLine("<div>אין תיקים צפויים בטווח הזה.</div>");
-            }
+            sb.AppendLine("<h3 style='margin:16px 0 8px;'>Cases Created Yesterday</h3>");
+            if (casesCreated.Count == 0)
+                sb.AppendLine("<p>None.</p>");
             else
             {
-                sb.AppendLine("<table style='border-collapse:collapse;width:100%;border:1px solid #ddd;' cellpadding='6'>");
-                sb.AppendLine("<thead><tr style='background:#f5f5f5;'>");
-                sb.AppendLine("<th style='border:1px solid #ddd;'>מספר תיק</th>");
-                sb.AppendLine("<th style='border:1px solid #ddd;'>תאריך יצירה</th>");
-                sb.AppendLine("<th style='border:1px solid #ddd;'>זמין לאחר</th>");
-                sb.AppendLine("<th style='border:1px solid #ddd;'>תקופה</th>");
-                sb.AppendLine("</tr></thead><tbody>");
-                foreach (var r in upcomingRows)
+                sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;' cellpadding='6'>");
+                sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>Case Number</th><th style='border:1px solid #ddd;'>Created Time (UTC)</th></tr>");
+                foreach (var r in casesCreated)
                 {
-                    sb.AppendLine("<tr>");
-                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{E(r.TikNumber)}</td>");
-                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{r.TsCreateDate:yyyy-MM-dd}</td>");
-                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{r.EligibleAfter:yyyy-MM-dd}</td>");
-                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{E(r.OpenBucket)}</td>");
-                    sb.AppendLine("</tr>");
+                    sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{E(r.TikNumber)}</td><td style='border:1px solid #ddd;'>{r.CreatedAtUtc:yyyy-MM-dd HH:mm} UTC</td></tr>");
                 }
-                sb.AppendLine("</tbody></table>");
+                sb.AppendLine("</table>");
             }
-            sb.AppendLine("</div>");
+
+            // Section 3 — Hearings synced yesterday (sync proxy; not "created")
+            sb.AppendLine("<hr/>");
+            sb.AppendLine("<h3 style='margin:16px 0 8px;'>Hearings Synced Yesterday</h3>");
+            sb.AppendLine("<p><small>Hearing data synced to Monday (LastSyncedAtUtc).</small></p>");
+            if (hearingsSynced.Count == 0)
+                sb.AppendLine("<p>None.</p>");
+            else
+            {
+                sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;' cellpadding='6'>");
+                sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>Case Number</th><th style='border:1px solid #ddd;'>Synced Time (UTC)</th></tr>");
+                foreach (var r in hearingsSynced)
+                {
+                    sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{E(r.TikNumber)}</td><td style='border:1px solid #ddd;'>{r.LastSyncedAtUtc:yyyy-MM-dd HH:mm} UTC</td></tr>");
+                }
+                sb.AppendLine("</table>");
+            }
+
+            // Section 4 — Failures That Require Attention (real failures only)
+            sb.AppendLine("<hr/>");
+            sb.AppendLine("<h3 style='margin:16px 0 8px;'>Failures That Require Attention</h3>");
+            if (realFailures.Count == 0)
+                sb.AppendLine("<p>None.</p>");
+            else
+            {
+                sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;' cellpadding='6'>");
+                sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>Time (UTC)</th><th style='border:1px solid #ddd;'>Case Number</th><th style='border:1px solid #ddd;'>Operation</th><th style='border:1px solid #ddd;'>Failure Reason</th></tr>");
+                foreach (var f in realFailures.OrderBy(x => x.OccurredAtUtc))
+                {
+                    var rawReason = (f.ErrorType ?? "") + ": " + (f.ErrorMessage ?? "");
+                    var reason = E(rawReason.Length > 200 ? rawReason[..200] + "…" : rawReason);
+                    sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{f.OccurredAtUtc:yyyy-MM-dd HH:mm}</td><td style='border:1px solid #ddd;'>{E(f.TikNumber ?? "")}</td><td style='border:1px solid #ddd;'>{E(f.Operation)}</td><td style='border:1px solid #ddd;'>{reason}</td></tr>");
+                }
+                sb.AppendLine("</table>");
+            }
+
+            // Section 5 — System Notes (optional)
+            var notes = new List<string>();
+            if (circuitBreakerTripped) notes.Add("Circuit breaker tripped during a sync run yesterday.");
+            if (highFailureNote) notes.Add("Unusually high failure count yesterday; review failures above.");
+            if (notes.Count > 0)
+            {
+                sb.AppendLine("<hr/>");
+                sb.AppendLine("<h3 style='margin:16px 0 8px;'>System Notes</h3>");
+                sb.AppendLine("<ul>");
+                foreach (var n in notes)
+                    sb.AppendLine($"<li>{E(n)}</li>");
+                sb.AppendLine("</ul>");
+            }
 
             sb.AppendLine("<br/><small>Generated by ODMON Worker email monitor.</small>");
             sb.AppendLine("</body></html>");
@@ -341,142 +421,5 @@ namespace Odmon.Worker.Workers
             return sb.ToString();
         }
 
-        // ================================================================
-        // NEW: Upcoming eligible cases section (OdmonIntegration/Odlight query)
-        // ================================================================
-
-        private sealed record UpcomingEligibleRow(
-            int TikCounter,
-            string TikNumber,
-            DateTime TsCreateDate,
-            DateTime EligibleAfter,
-            string OpenBucket
-        );
-
-        private static class UpcomingEligibleSection
-        {
-            private const string Sql = @"
-SET DATEFIRST 7; -- Sunday=1 ... Friday=6 Saturday=7
-
-DECLARE @TodayIsrael date =
-    CONVERT(date, SYSDATETIMEOFFSET() AT TIME ZONE 'Israel Standard Time');
-
-;WITH Src AS
-(
-    SELECT
-        f.TikCounter,
-        f.TikNumber,
-        CAST(f.tsCreateDate AS date) AS tsCreateDate
-    FROM dbo.vwExportToOuterSystems_Files f
-),
-EligibleCalc AS
-(
-    SELECT
-        s.*,
-        EligibleAfter =
-            DATEADD(day,
-                CASE DATEPART(weekday, s.tsCreateDate)
-                    WHEN 1 THEN 3
-                    WHEN 2 THEN 3
-                    WHEN 3 THEN 5
-                    WHEN 4 THEN 5
-                    WHEN 5 THEN 5
-                    WHEN 6 THEN 4
-                    WHEN 7 THEN 3
-                END,
-                s.tsCreateDate
-            )
-    FROM Src s
-)
-
-SELECT
-    TikCounter,
-    TikNumber,
-    tsCreateDate,
-    EligibleAfter,
-    CASE
-        WHEN EligibleAfter = @TodayIsrael THEN 'TODAY'
-        WHEN EligibleAfter = DATEADD(day,1,@TodayIsrael) THEN 'TOMORROW'
-        WHEN EligibleAfter = DATEADD(day,2,@TodayIsrael) THEN 'DAY_AFTER'
-    END AS OpenBucket
-FROM EligibleCalc
-WHERE EligibleAfter BETWEEN @TodayIsrael AND DATEADD(day,2,@TodayIsrael)
-ORDER BY EligibleAfter, TikCounter;";
-
-            public static async Task<List<UpcomingEligibleRow>> LoadAsync(string odcanitConnectionString, CancellationToken ct)
-            {
-                var rows = new List<UpcomingEligibleRow>();
-
-                await using var conn = new SqlConnection(odcanitConnectionString);
-                await conn.OpenAsync(ct);
-
-                await using var cmd = new SqlCommand(Sql, conn)
-                {
-                    CommandType = System.Data.CommandType.Text,
-                    CommandTimeout = 30
-                };
-
-                await using var reader = await cmd.ExecuteReaderAsync(ct);
-
-                int ordTikCounter = reader.GetOrdinal("TikCounter");
-                int ordTikNumber = reader.GetOrdinal("TikNumber");
-                int ordTsCreateDate = reader.GetOrdinal("tsCreateDate");
-                int ordEligibleAfter = reader.GetOrdinal("EligibleAfter");
-                int ordOpenBucket = reader.GetOrdinal("OpenBucket");
-
-                while (await reader.ReadAsync(ct))
-                {
-                    rows.Add(new UpcomingEligibleRow(
-                        TikCounter: reader.GetInt32(ordTikCounter),
-                        TikNumber: reader.GetString(ordTikNumber),
-                        TsCreateDate: reader.GetDateTime(ordTsCreateDate),
-                        EligibleAfter: reader.GetDateTime(ordEligibleAfter),
-                        OpenBucket: reader.GetString(ordOpenBucket)
-                    ));
-                }
-
-                return rows;
-            }
-
-            public static string ToHtml(IReadOnlyList<UpcomingEligibleRow> rows)
-            {
-                static string E(string s) => System.Net.WebUtility.HtmlEncode(s ?? string.Empty);
-
-                var sb = new StringBuilder();
-                sb.AppendLine("<div style='direction:rtl;text-align:right;font-family:Arial,sans-serif;'>");
-                sb.AppendLine("<h3 style='margin:16px 0 8px;'>תיקים צפויים להיפתח (היום/מחר/מחרתיים)</h3>");
-
-                if (rows.Count == 0)
-                {
-                    sb.AppendLine("<div>אין תיקים צפויים בטווח הזה.</div>");
-                    sb.AppendLine("</div>");
-                    return sb.ToString();
-                }
-
-                sb.AppendLine("<table style='border-collapse:collapse;width:100%;border:1px solid #ddd;' cellpadding='6'>");
-                sb.AppendLine("<thead><tr style='background:#f5f5f5;'>");
-                sb.AppendLine("<th style='border:1px solid #ddd;'>Bucket</th>");
-                sb.AppendLine("<th style='border:1px solid #ddd;'>TikCounter</th>");
-                sb.AppendLine("<th style='border:1px solid #ddd;'>TikNumber</th>");
-                sb.AppendLine("<th style='border:1px solid #ddd;'>tsCreateDate</th>");
-                sb.AppendLine("<th style='border:1px solid #ddd;'>EligibleAfter</th>");
-                sb.AppendLine("</tr></thead><tbody>");
-
-                foreach (var r in rows)
-                {
-                    sb.AppendLine("<tr>");
-                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{E(r.OpenBucket)}</td>");
-                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{r.TikCounter}</td>");
-                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{E(r.TikNumber)}</td>");
-                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{r.TsCreateDate:yyyy-MM-dd}</td>");
-                    sb.AppendLine($"<td style='border:1px solid #ddd;'>{r.EligibleAfter:yyyy-MM-dd}</td>");
-                    sb.AppendLine("</tr>");
-                }
-
-                sb.AppendLine("</tbody></table>");
-                sb.AppendLine("</div>");
-                return sb.ToString();
-            }
-        }
     }
 }

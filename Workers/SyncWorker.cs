@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
 using Odmon.Worker.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -107,6 +108,16 @@ namespace Odmon.Worker.Workers
                 {
                     _totalFailures++;
                     _logger.LogCritical(ex, "WORKER CRASH during Odcanit->Monday sync. RunId={RunId}", runId);
+
+                    if (ex is SqlException sqlEx && SqlConnectionFailureDetector.IsConnectionFailure(sqlEx))
+                    {
+                        _emailNotifier.QueueCriticalAlert(
+                            "Database connection lost during sync",
+                            ex.Message + (ex.StackTrace != null ? "\n\n" + ex.StackTrace[..Math.Min(500, ex.StackTrace.Length)] : ""),
+                            exceptionType: ex.GetType().Name,
+                            source: "SyncWorker",
+                            alertType: "Database Connection Lost");
+                    }
 
                     try
                     {

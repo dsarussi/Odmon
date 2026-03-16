@@ -1141,7 +1141,8 @@ namespace Odmon.Worker.Services
                 $"DocIngestion: {subject}",
                 body,
                 ex?.GetType().Name,
-                "DocumentIngestionService");
+                "DocumentIngestionService",
+                alertType: "Document Ingestion Failure");
         }
 
         // ───────── Accident Story → Odcanit Nispah (idempotent via CaseAnnexWriteState per TikCounter) ─────────

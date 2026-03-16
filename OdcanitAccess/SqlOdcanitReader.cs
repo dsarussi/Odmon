@@ -833,10 +833,20 @@ namespace Odmon.Worker.OdcanitAccess
                 }
             });
 
-            // Accident short circumstances: populate Notes from UserData "גרסאות תביעה"
-            Add("גרסאות תביעה", (c, row) => c.Notes = row.strData);
+            Add("גרסאות תביעה", (c, row) =>
+            {
+                c.Notes = row.strData;
+                c.ClaimVersions = row.strData;
+            });
 
             Add("גרסת לקוח - נוסח משפטי", (c, row) => c.ShortAccidentCircumstances = row.strData);
+
+            Add("זיהוי נוסף", (c, row) => c.AdditionalIdentification = row.strData);
+            Add("תאריך אחרון להגשת כתב הטענות", (c, row) => c.PleadingDeadlineDate = ExtractDate(row) ?? c.PleadingDeadlineDate);
+            Add("גרסאות הגנה", (c, row) => c.DefenseVersions = row.strData);
+            Add("חברת ביטוח 2", (c, row) => c.InsuranceCompany2 = row.strData);
+            Add("כתובת חברת ביטוח 2", (c, row) => c.InsuranceCompany2Address = row.strData);
+            Add("סוג הליך", (c, row) => c.ProceedingType = row.strData);
 
             return dict;
         }

@@ -83,6 +83,22 @@ namespace Odmon.Worker.Monday
         public string? DocumentTypeStatusColumnId { get; set; } = "color_mkxhq546";
         /// <summary>נסיבות התאונה בקצרה — short accident circumstances text column.</summary>
         public string? ShortAccidentCircumstancesColumnId { get; set; } = "text_mky1vzgg";
+        /// <summary>זיהוי נוסף — additional identification text column.</summary>
+        public string? AdditionalIdentificationColumnId { get; set; } = "text_mm1gvfd5";
+        /// <summary>גרסאות תביעה — claim versions long_text column.</summary>
+        public string? ClaimVersionsColumnId { get; set; } = "long_text_mm1gsvg0";
+        /// <summary>תאריך אחרון להגשת כתב הטענות — pleading deadline date column.</summary>
+        public string? PleadingDeadlineDateColumnId { get; set; } = "date_mm1gex5r";
+        /// <summary>גרסאות הגנה — defense versions long_text column.</summary>
+        public string? DefenseVersionsColumnId { get; set; } = "long_text_mm1gxq01";
+        /// <summary>חברת ביטוח 2 — second insurance company text column.</summary>
+        public string? InsuranceCompany2ColumnId { get; set; } = "text_mm1gy0q4";
+        /// <summary>כתובת חברת ביטוח 2 — second insurance company address text column.</summary>
+        public string? InsuranceCompany2AddressColumnId { get; set; } = "text_mm1gmta2";
+        /// <summary>סוג הליך — proceeding type text column.</summary>
+        public string? ProceedingTypeColumnId { get; set; } = "text_mm1gsp8k";
+        /// <summary>סכום לתשלום — payment due amount numeric column.</summary>
+        public string? PaymentDueAmountColumnId { get; set; } = "numeric_mm1gj81h";
 
         /// <summary>
         /// If true, inactive Monday items may be revived (new item created, mapping updated).

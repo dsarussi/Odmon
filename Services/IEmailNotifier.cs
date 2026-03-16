@@ -9,9 +9,10 @@ namespace Odmon.Worker.Services
     {
         /// <summary>
         /// Queue an immediate critical alert email (subject to dedup + rate limiting).
-        /// Only use for: worker crash, circuit breaker, BoardId==0, repeated failures.
+        /// When alertType is provided, subject becomes "ODMON ALERT — {alertType}"; otherwise "[ODMON ALERT] {subject}".
+        /// Optional environmentName and serverName are prepended to the body when provided.
         /// </summary>
-        void QueueCriticalAlert(string subject, string body, string? exceptionType = null, string? source = null);
+        void QueueCriticalAlert(string subject, string body, string? exceptionType = null, string? source = null, string? alertType = null, string? environmentName = null, string? serverName = null);
 
         /// <summary>
         /// Queue a daily summary email. Typically called once per day by the background service.

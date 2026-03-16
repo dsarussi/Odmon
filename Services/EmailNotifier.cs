@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Channels;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Odmon.Worker.Services
@@ -33,6 +34,7 @@ namespace Odmon.Worker.Services
     {
         private readonly ILogger<EmailNotifier> _logger;
         private readonly IConfiguration _config;
+        private readonly IHostEnvironment? _hostEnv;
         private readonly Channel<EmailMessage> _queue;
 
         // Rate limiting: track email timestamps in a sliding window
@@ -43,10 +45,11 @@ namespace Odmon.Worker.Services
         private readonly object _dedupLock = new();
         private readonly Dictionary<string, DedupEntry> _dedupCache = new();
 
-        public EmailNotifier(ILogger<EmailNotifier> logger, IConfiguration config)
+        public EmailNotifier(ILogger<EmailNotifier> logger, IConfiguration config, IHostEnvironment? hostEnv = null)
         {
             _logger = logger;
             _config = config;
+            _hostEnv = hostEnv;
             _queue = Channel.CreateBounded<EmailMessage>(new BoundedChannelOptions(100)
             {
                 FullMode = BoundedChannelFullMode.DropOldest
@@ -60,7 +63,7 @@ namespace Odmon.Worker.Services
         // IEmailNotifier implementation
         // ================================================================
 
-        public void QueueCriticalAlert(string subject, string body, string? exceptionType = null, string? source = null)
+        public void QueueCriticalAlert(string subject, string body, string? exceptionType = null, string? source = null, string? alertType = null, string? environmentName = null, string? serverName = null)
         {
             if (!IsEnabled()) return;
 
@@ -71,7 +74,7 @@ namespace Odmon.Worker.Services
             {
                 _logger.LogInformation(
                     "EMAIL SUPPRESSED (dedup) | Fingerprint={Fingerprint}, Subject={Subject}",
-                    fingerprint[..12], subject);
+                    fingerprint[..12], alertType ?? subject);
                 return;
             }
 
@@ -80,15 +83,32 @@ namespace Odmon.Worker.Services
             {
                 _logger.LogWarning(
                     "EMAIL SUPPRESSED (rate limit) | Subject={Subject}, MaxPerHour={MaxPerHour}",
-                    subject, GetMaxEmailsPerHour());
+                    alertType ?? subject, GetMaxEmailsPerHour());
                 IncrementSuppressed(fingerprint);
                 return;
             }
 
+            var subjectLine = !string.IsNullOrEmpty(alertType)
+                ? $"ODMON ALERT — {alertType}"
+                : $"[ODMON ALERT] {subject}";
+
+            var bodyText = body;
+            if (!string.IsNullOrEmpty(alertType))
+            {
+                var env = environmentName ?? _hostEnv?.EnvironmentName ?? "";
+                var server = serverName ?? Environment.MachineName;
+                var header = new StringBuilder();
+                header.AppendLine($"Time (UTC): {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+                if (!string.IsNullOrEmpty(env)) header.AppendLine($"Environment: {env}");
+                header.AppendLine($"Server: {server}");
+                header.AppendLine();
+                bodyText = header.ToString() + body;
+            }
+
             var msg = new EmailMessage
             {
-                Subject = $"[ODMON ALERT] {subject}",
-                Body = body,
+                Subject = subjectLine,
+                Body = bodyText,
                 IsHtml = false,
                 Fingerprint = fingerprint,
                 Type = EmailMessageType.Critical
@@ -97,13 +117,17 @@ namespace Odmon.Worker.Services
             if (_queue.Writer.TryWrite(msg))
             {
                 RecordSent(fingerprint);
+                if (!string.IsNullOrEmpty(alertType))
+                    _logger.LogWarning(
+                        "ODMON critical alert queued | InfrastructureEventType={AlertType}, Timestamp={Timestamp:O}, HostName={HostName}, Source={Source}",
+                        alertType, DateTime.UtcNow, Environment.MachineName, source ?? "");
                 _logger.LogInformation(
                     "EMAIL QUEUED | Type=Critical, Subject={Subject}, Fingerprint={Fingerprint}",
-                    subject, fingerprint[..12]);
+                    subjectLine, fingerprint[..12]);
             }
             else
             {
-                _logger.LogWarning("EMAIL DROPPED (queue full) | Subject={Subject}", subject);
+                _logger.LogWarning("EMAIL DROPPED (queue full) | Subject={Subject}", subjectLine);
             }
         }
 

@@ -26,6 +26,21 @@ Configuration is loaded in the following order (later sources override earlier o
 | `Monday:ToDoGroupId` | `Monday__ToDoGroupId` | string | No | - | Monday group ID for tasks. |
 | `Monday:TestGroupId` | `Monday__TestGroupId` | string | No | - | Monday group ID for test items. |
 
+### Monday Column ID Settings
+
+These settings map Odcanit fields to specific Monday.com column IDs. They have sensible defaults in `MondaySettings.cs` but can be overridden via configuration.
+
+| Config Key | Environment Variable | Type | Default | Description |
+|------------|---------------------|------|---------|-------------|
+| `Monday:AdditionalIdentificationColumnId` | `Monday__AdditionalIdentificationColumnId` | string | `text_mm1gvfd5` | Column for זיהוי נוסף (additional identification). |
+| `Monday:ClaimVersionsColumnId` | `Monday__ClaimVersionsColumnId` | string | `long_text_mm1gsvg0` | Column for גרסאות תביעה (claim versions). |
+| `Monday:PleadingDeadlineDateColumnId` | `Monday__PleadingDeadlineDateColumnId` | string | `date_mm1gex5r` | Column for תאריך אחרון להגשת כתב הטענות (pleading deadline date). |
+| `Monday:DefenseVersionsColumnId` | `Monday__DefenseVersionsColumnId` | string | `long_text_mm1gxq01` | Column for גרסאות הגנה (defense versions). |
+| `Monday:InsuranceCompany2ColumnId` | `Monday__InsuranceCompany2ColumnId` | string | `text_mm1gy0q4` | Column for חברת ביטוח 2 (insurance company 2). |
+| `Monday:InsuranceCompany2AddressColumnId` | `Monday__InsuranceCompany2AddressColumnId` | string | `text_mm1gmta2` | Column for כתובת חברת ביטוח 2 (insurance company 2 address). |
+| `Monday:ProceedingTypeColumnId` | `Monday__ProceedingTypeColumnId` | string | `text_mm1gsp8k` | Column for סוג הליך (proceeding type). |
+| `Monday:PaymentDueAmountColumnId` | `Monday__PaymentDueAmountColumnId` | string | `numeric_mm1gj81h` | Column for סכום לתשלום (payment due amount). |
+
 **CRITICAL**: If both `Monday:BoardId` and `Monday:CasesBoardId` are 0, the worker will throw an exception:
 
 ```

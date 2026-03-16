@@ -93,11 +93,24 @@ namespace Odmon.Worker.Workers
                     _logger.LogCritical(ex,
                         "DocumentIngestionWorker CRASH during run {RunId}", runId);
 
-                    _emailNotifier.QueueCriticalAlert(
-                        $"DocumentIngestionWorker crash (run {runId})",
-                        $"Exception: {ex.Message}\nType: {ex.GetType().Name}\nStack: {ex.StackTrace?[..Math.Min(ex.StackTrace?.Length ?? 0, 500)]}",
-                        ex.GetType().Name,
-                        "DocumentIngestionWorker");
+                    if (ex is SqlException sqlEx && SqlConnectionFailureDetector.IsConnectionFailure(sqlEx))
+                    {
+                        _emailNotifier.QueueCriticalAlert(
+                            "Database connection lost during document ingestion",
+                            ex.Message + (ex.StackTrace != null ? "\n\n" + ex.StackTrace[..Math.Min(500, ex.StackTrace.Length)] : ""),
+                            exceptionType: ex.GetType().Name,
+                            source: "DocumentIngestionWorker",
+                            alertType: "Database Connection Lost");
+                    }
+                    else
+                    {
+                        _emailNotifier.QueueCriticalAlert(
+                            $"DocumentIngestionWorker crash (run {runId})",
+                            $"Exception: {ex.Message}\nType: {ex.GetType().Name}\nStack: {ex.StackTrace?[..Math.Min(ex.StackTrace?.Length ?? 0, 500)]}",
+                            ex.GetType().Name,
+                            "DocumentIngestionWorker",
+                            alertType: "Document Ingestion Worker Crash");
+                    }
                 }
             }
 

@@ -195,6 +195,27 @@ namespace Odmon.Worker.Models
         /// <summary>Short accident circumstances from UserData "גרסת לקוח - נוסח משפטי".</summary>
         [NotMapped]
         public string? ShortAccidentCircumstances { get; set; }
+        /// <summary>UserData "זיהוי נוסף".</summary>
+        [NotMapped]
+        public string? AdditionalIdentification { get; set; }
+        /// <summary>UserData "גרסאות תביעה" — sent to dedicated Monday column.</summary>
+        [NotMapped]
+        public string? ClaimVersions { get; set; }
+        /// <summary>UserData "תאריך אחרון להגשת כתב הטענות".</summary>
+        [NotMapped]
+        public DateTime? PleadingDeadlineDate { get; set; }
+        /// <summary>UserData "גרסאות הגנה".</summary>
+        [NotMapped]
+        public string? DefenseVersions { get; set; }
+        /// <summary>UserData "חברת ביטוח 2".</summary>
+        [NotMapped]
+        public string? InsuranceCompany2 { get; set; }
+        /// <summary>UserData "כתובת חברת ביטוח 2".</summary>
+        [NotMapped]
+        public string? InsuranceCompany2Address { get; set; }
+        /// <summary>UserData "סוג הליך".</summary>
+        [NotMapped]
+        public string? ProceedingType { get; set; }
         [NotMapped]
         public DateTime? ComplaintReceivedDate { get; set; }
         [NotMapped]

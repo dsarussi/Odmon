@@ -22,6 +22,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | מספר תיק | text_mkwe19hn | `OdcanitCase.TikNumber` | Used as primary key for lookup/update |
 | מספר לקוח | dropdown_mkxjrssr | `OdcanitCase.ClientVisualID` | Dropdown column |
 | מספר תביעה | text_mkwjy5pg | `OdcanitCase.Additional ?? OdcanitCase.HozlapTikNumber` | Fallback to HozlapTikNumber if Additional is empty |
+| זיהוי נוסף | text_mm1gvfd5 | `OdcanitCase.AdditionalIdentification` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "זיהוי נוסף") |
 
 ### Dates
 
@@ -31,6 +32,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | תאריך אירוע | date_mkwj3780 | `OdcanitCase.EventDate` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "תאריך אירוע" or "Event date") |
 | תאריך סגירת תיק | date_mkweqkjf | `OdcanitCase.TikCloseDate` | Case close date |
 | מועד קבלת כתב התביעה | date_mkxeapah | `OdcanitCase.ComplaintReceivedDate` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "מועד קבלת כתב התביעה") or `HozlapOpenDate` |
+| תאריך אחרון להגשת כתב הטענות | date_mm1gex5r | `OdcanitCase.PleadingDeadlineDate` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "תאריך אחרון להגשת כתב הטענות") |
 | תאריך דיון | date_mkwjwmzq | `OdcanitCase.HearingDate` | From diary events (vwDiaryEvents) - first event with court info |
 | שעת דיון | hour_mkwjbwr | `OdcanitCase.HearingTime` | From diary events (vwDiaryEvents) - TimeOfDay from FromTime or ToTime |
 
@@ -41,6 +43,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | סכום תביעה | numeric_mkxw7s29 | `OdcanitCase.RequestedClaimAmount` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "סכום תביעה", "הסעד המבוקש ( סכום תביעה)", "Claim amount") |
 | סכום תביעה מוכח | numeric_mkwjcrwk | `OdcanitCase.ProvenClaimAmount` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "סכום תביעה מוכח") |
 | סכום פסק דין | numeric_mkwj6mnw | `OdcanitCase.JudgmentAmount` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "סכום פסק דין") |
+| סכום לתשלום | numeric_mm1gj81h | `OdcanitCase.PaymentDueAmount` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "סכום לתשלום"). Pre-existing property, now sent to Monday. |
 
 ### Client Information
 
@@ -116,6 +119,8 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | ח.פ. חברת ביטוח | text_mkwjmpex | `OdcanitCase.InsuranceCompanyId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "ח.פ. חברת ביטוח") |
 | כתובת חברת ביטוח | text_mkwjnvdr | `OdcanitCase.InsuranceCompanyAddress` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת חברת ביטוח") |
 | דוא"ל חברת ביטוח | email_mkwjv6zw | `OdcanitCase.InsuranceCompanyEmail` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת דוא\"ל חברת ביטוח") |
+| חברת ביטוח 2 | text_mm1gy0q4 | `OdcanitCase.InsuranceCompany2` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "חברת ביטוח 2") |
+| כתובת חברת ביטוח 2 | text_mm1gmta2 | `OdcanitCase.InsuranceCompany2Address` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת חברת ביטוח 2") |
 
 ### Court Information
 
@@ -134,8 +139,11 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | כתובת נתבע / מרחוב (הגנה) | text_mkxwzxcq | `OdcanitCase.DefenseStreet` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת נתבע" or "מרחוב (הגנה)") |
 | מרחוב (תביעה) | _(no live column)_ | `OdcanitCase.ClaimStreet` | From legal user data — no corresponding Monday column; not sent. |
 | folderID | text_mkxe3vhk | `OdcanitCase.CaseFolderId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "folderID") |
+| גרסאות תביעה | long_text_mm1gsvg0 | `OdcanitCase.ClaimVersions` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "גרסאות תביעה"). Also populates `OdcanitCase.Notes` → long_text_mkwe5h8v |
 | הערות | long_text_mkwe5h8v | `OdcanitCase.Notes` | From UserData "גרסאות תביעה" |
+| גרסאות הגנה | long_text_mm1gxq01 | `OdcanitCase.DefenseVersions` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "גרסאות הגנה") |
 | נסיבות התאונה בקצרה | text_mky1vzgg | `OdcanitCase.ShortAccidentCircumstances` | From UserData "גרסת לקוח - נוסח משפטי" |
+| סוג הליך | text_mm1gsp8k | `OdcanitCase.ProceedingType` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "סוג הליך") |
 | נתבעים נוספים | long_text_mkwjhngq | `OdcanitCase.AdditionalDefendants` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "נתבעים נוספים") |
 | שם עד | text_mkwjt62y | `OdcanitCase.WitnessName` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "שם עד") |
 

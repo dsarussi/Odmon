@@ -185,7 +185,8 @@ namespace Odmon.Worker.Services
                     "FATAL: BoardId is 0",
                     "ODMON worker detected BoardId=0 at runtime. Check Monday:CasesBoardId and Safety:TestBoardId configuration. The run is aborting.",
                     exceptionType: "InvalidOperationException",
-                    source: "SyncService.BoardIdValidation");
+                    source: "SyncService.BoardIdValidation",
+                    alertType: "Configuration Error");
                 throw new InvalidOperationException("FATAL: boardIdToUse is 0. Check Monday:CasesBoardId and Safety:TestBoardId configuration. Aborting run.");
             }
 
@@ -785,7 +786,8 @@ namespace Odmon.Worker.Services
                     $"Failed={totalFailed}, Updated={updated}, Duration={totalDurationMs}ms.\n" +
                     $"The remaining cases in this run were skipped. The worker will retry next cycle.",
                     exceptionType: "CircuitBreaker",
-                    source: "SyncService");
+                    source: "SyncService",
+                    alertType: "Circuit Breaker Tripped");
             }
 
             // ── Failure rate notification ──
@@ -802,7 +804,8 @@ namespace Odmon.Worker.Services
                         $"ODMON sync run {runId} had a high failure rate: {failed}/{batch.Count} cases failed ({failureRate:P0}).\n" +
                         $"Review the SyncFailures table and error logs.",
                         exceptionType: "HighFailureRate",
-                        source: "SyncService");
+                        source: "SyncService",
+                        alertType: "High Failure Rate");
                 }
                 else
             {
@@ -1114,6 +1117,14 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.DefenseStreetColumnId, c.DefenseStreet);
             TryAddStringColumn(columnValues, _mondaySettings.ClaimStreetColumnId, c.ClaimStreet);
             TryAddStringColumn(columnValues, _mondaySettings.ShortAccidentCircumstancesColumnId, c.ShortAccidentCircumstances);
+            TryAddStringColumn(columnValues, _mondaySettings.AdditionalIdentificationColumnId, c.AdditionalIdentification);
+            TryAddLongTextColumn(columnValues, _mondaySettings.ClaimVersionsColumnId, c.ClaimVersions);
+            TryAddDateColumn(columnValues, _mondaySettings.PleadingDeadlineDateColumnId, c.PleadingDeadlineDate);
+            TryAddLongTextColumn(columnValues, _mondaySettings.DefenseVersionsColumnId, c.DefenseVersions);
+            TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany2ColumnId, c.InsuranceCompany2);
+            TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany2AddressColumnId, c.InsuranceCompany2Address);
+            TryAddStringColumn(columnValues, _mondaySettings.ProceedingTypeColumnId, c.ProceedingType);
+            TryAddDecimalColumn(columnValues, _mondaySettings.PaymentDueAmountColumnId, c.PaymentDueAmount);
             TryAddStringColumn(columnValues, _mondaySettings.CaseFolderIdColumnId, c.CaseFolderId);
             TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
 
@@ -3076,6 +3087,14 @@ namespace Odmon.Worker.Services
             AppendStr(sb, c.DefenseStreet);
             AppendStr(sb, c.ClaimStreet);
             AppendStr(sb, c.ShortAccidentCircumstances);
+            AppendStr(sb, c.AdditionalIdentification);
+            AppendStr(sb, c.ClaimVersions);
+            AppendDate(sb, c.PleadingDeadlineDate);
+            AppendStr(sb, c.DefenseVersions);
+            AppendStr(sb, c.InsuranceCompany2);
+            AppendStr(sb, c.InsuranceCompany2Address);
+            AppendStr(sb, c.ProceedingType);
+            AppendDec(sb, c.PaymentDueAmount);
             AppendStr(sb, c.CaseFolderId);
             AppendStr(sb, c.StatusName);
 
@@ -3356,6 +3375,8 @@ namespace Odmon.Worker.Services
         {
             try
             {
+                var errorType = ex.GetType().Name;
+                var errorMessage = Truncate(ex.Message, 2000) ?? string.Empty;
                 _integrationDb.SyncFailures.Add(new SyncFailure
                 {
                     RunId = runId,
@@ -3363,14 +3384,18 @@ namespace Odmon.Worker.Services
                     TikNumber = tikNumber,
                     BoardId = boardId,
                     Operation = operation,
-                    ErrorType = ex.GetType().Name,
-                    ErrorMessage = Truncate(ex.Message, 2000) ?? string.Empty,
+                    ErrorType = errorType,
+                    ErrorMessage = errorMessage,
                     StackTrace = Truncate(ex.StackTrace, 4000),
                     OccurredAtUtc = DateTime.UtcNow,
                     RetryAttempts = retryAttempts,
                     Resolved = false
                 });
                 await _integrationDb.SaveChangesAsync(ct);
+                var category = FailureClassifier.Classify(errorType, operation);
+                _logger.LogWarning(
+                    "Sync failure persisted | FailureType={FailureType}, CaseNumber={CaseNumber}, Operation={Operation}, ExceptionType={ExceptionType}, Message={Message}",
+                    category.ToString(), tikNumber ?? tikCounter.ToString(), operation, errorType, errorMessage.Length > 200 ? errorMessage[..200] + "…" : errorMessage);
             }
             catch (Exception persistEx)
             {
