@@ -185,6 +185,7 @@ namespace Odmon.Worker.Models
                 InsuranceCompanyAddress = כתובת_חברת_ביטוח,
                 InsuranceCompanyEmail = כתובת_דוא_ל_חברת_ביטוח,
                 CourtName = שם_בית_משפט,
+                LegalCourtName = שם_בית_משפט,
                 CourtCity = עיר_בית_משפט,
                 CourtCaseNumber = מספר_תיק_בית_משפט ?? מספר_הליך_בית_משפט,
                 JudgeName = שם_שופט,

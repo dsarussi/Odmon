@@ -663,10 +663,10 @@ namespace Odmon.Worker.OdcanitAccess
                     defendantAddressFromUserData);
 
                 _logger.LogDebug(
-                    "Court fields for TikCounter {TikCounter}: CourtCaseNumber='{CourtCaseNumber}', CourtCity='{CourtCity}', CourtName='{CourtName}'",
+                    "Court fields for TikCounter {TikCounter}: CourtCaseNumber='{CourtCaseNumber}', LegalCourtName='{LegalCourtName}', CourtName='{CourtName}'",
                     odcanitCase.TikCounter,
                     odcanitCase.CourtCaseNumber ?? "<null>",
-                    odcanitCase.CourtCity ?? "<null>",
+                    odcanitCase.LegalCourtName ?? "<null>",
                     odcanitCase.CourtName ?? "<null>");
 
                 _logger.LogDebug(
@@ -825,11 +825,7 @@ namespace Odmon.Worker.OdcanitAccess
                 if (!string.IsNullOrWhiteSpace(name))
                 {
                     c.CourtName = name;
-                    var cityFromName = DeriveCourtCityFromCourtName(name);
-                    if (!string.IsNullOrWhiteSpace(cityFromName) && string.IsNullOrWhiteSpace(c.CourtCity))
-                    {
-                        c.CourtCity = cityFromName;
-                    }
+                    c.LegalCourtName = name;
                 }
             });
 

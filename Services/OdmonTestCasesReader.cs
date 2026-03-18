@@ -257,6 +257,7 @@ namespace Odmon.Worker.Services
                 InsuranceCompanyEmail = GetString(raw, "כתובת_דוא\"ל_חברת_ביטוח"),
                 AdditionalDefendants = GetString(raw, "נתבעים_נוספים"),
                 CourtName = GetString(raw, "שם_בית_משפט"),
+                LegalCourtName = GetString(raw, "שם_בית_משפט"),
                 CourtCity = GetString(raw, "עיר_בית_משפט"),
                 CourtCaseNumber = GetString(raw, "מספר_תיק_בית_משפט") ?? GetString(raw, "מספר_הליך_בית_משפט"),
                 JudgeName = GetString(raw, "שם_שופט"),

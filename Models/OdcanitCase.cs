@@ -147,6 +147,9 @@ namespace Odmon.Worker.Models
         public string? InsuranceCompanyEmail { get; set; }
         [NotMapped]
         public string? CourtName { get; set; }
+        /// <summary>Court name from legal UserData "שם בית משפט" only — the sole source for Monday column text_mkxez28d.</summary>
+        [NotMapped]
+        public string? LegalCourtName { get; set; }
         [NotMapped]
         public string? CourtCity { get; set; }
         [NotMapped]

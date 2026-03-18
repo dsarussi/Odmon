@@ -127,7 +127,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | Monday Column | Column ID | Odcanit Source | Notes |
 |--------------|-----------|----------------|-------|
 | שם בית משפט | ~~color_mkwj24j~~ (removed — column does not exist on board) | `OdcanitCase.CourtName` | Was status column; removed from sync payload. |
-| עיר בית משפט | text_mkxez28d | `OdcanitCase.CourtCity` | From diary events (vwDiaryEvents) - City field |
+| שם בית משפט (text) | text_mkxez28d | `OdcanitCase.LegalCourtName` | From legal UserData (vwExportToOuterSystems_UserData, FieldName: "שם בית משפט"). **Not** from diary events or CourtCity. |
 | מספר תיק בבית משפט | text_mkwj3kf4 | `OdcanitCase.CourtCaseNumber` | From vwHozlapFormsData_TikMainData - concatenation of clcCourtNum + CourtName |
 | שם שופט | text_mkwjne8v | `OdcanitCase.JudgeName` | From diary events (vwDiaryEvents) - JudgeName field |
 

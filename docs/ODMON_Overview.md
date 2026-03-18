@@ -111,7 +111,7 @@ ODMON is a .NET 8 Worker Service that synchronizes case data from the Odcanit/Od
   - Dates: Case open date, event date, close date, hearing date, complaint received date, pleading deadline date
   - Contact information: Client, policy holder, driver, plaintiff, defendant, third party (phones, emails, addresses)
   - Financial data: Requested claim amount, proven amount, judgment amount, payment due amount
-  - Court information: Court name, city, case number, judge name, hearing details
+  - Court information: Court name (from legal UserData "שם בית משפט"), case number, judge name, hearing details
   - Vehicle information: Main car number, second car, third party car
   - Insurance: Insurance company details, insurance company 2 (name, address)
   - Legal parties: Attorney name, defense street, claim street, proceeding type, claim versions, defense versions

@@ -32,7 +32,7 @@ namespace Odmon.Worker.Services
         private const string DateColumnId = "date_mkwjwmzq";
         private const string HourColumnId = "hour_mkwjbwr";
         private const string JudgeColumnId = "text_mkwjne8v";
-        private const string CourtCityColumnId = "text_mkxez28d";
+        // CourtCityColumnId removed — text_mkxez28d is now populated from legal UserData only via SyncService.
         private const string DriverPhoneColumnId = "phone_mkwj7fak";
         private const string DriverNameColumnId = "text_mkwja7cv";
         private const string TikNumberColumnId = "text_mkwe19hn";
@@ -226,8 +226,7 @@ OFFSET {0} ROWS FETCH NEXT {1} ROWS ONLY";
             if (!string.IsNullOrWhiteSpace(row.JudgeName))
                 cv[JudgeColumnId] = row.JudgeName.Trim();
 
-            if (!string.IsNullOrWhiteSpace(row.CourtName))
-                cv[CourtCityColumnId] = row.CourtName.Trim();
+            // text_mkxez28d is now populated from legal UserData "שם בית משפט" only (via SyncService), not from hearing events.
 
             if (!string.IsNullOrWhiteSpace(row.DriverPhone))
             {

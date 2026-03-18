@@ -1025,12 +1025,9 @@ namespace Odmon.Worker.Services
                 if (!string.IsNullOrWhiteSpace(_mondaySettings.JudgeNameColumnId)) hearingColumnsIncluded.Add(_mondaySettings.JudgeNameColumnId);
             }
 
-            // Court city: use EffectiveCourtCity from diary event, update independently
-            if (hasEffectiveCourtCity)
-            {
-                TryAddStringColumn(columnValues, _mondaySettings.CourtCityColumnId, effectiveCourtCity);
-                if (!string.IsNullOrWhiteSpace(_mondaySettings.CourtCityColumnId)) hearingColumnsIncluded.Add(_mondaySettings.CourtCityColumnId);
-            }
+            // Court name column (text_mkxez28d): populated exclusively from legal UserData "שם בית משפט",
+            // NOT from diary events or EffectiveCourtCity. Mapped outside the hearing gating section.
+
 
             // Hearing status column "דיון התבטל?" - independent of date/hour gating
             if (meetStatus == 1 && !string.IsNullOrWhiteSpace(_mondaySettings.HearingStatusColumnId))
@@ -1111,7 +1108,9 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerAddressColumnId, c.ThirdPartyLawyerAddress);
             TryAddPhoneColumn(columnValues, _mondaySettings.ThirdPartyLawyerPhoneColumnId, c.ThirdPartyLawyerPhone, c.TikCounter, "Third-party lawyer phone");
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerEmailColumnId, c.ThirdPartyLawyerEmail);
-            // CourtCity and JudgeName are handled above in the hearing gating section with EffectiveCourtCity logic
+            // JudgeName is handled above in the hearing gating section.
+            // Court name (text_mkxez28d) from legal UserData "שם בית משפט" only:
+            TryAddStringColumn(columnValues, _mondaySettings.CourtCityColumnId, c.LegalCourtName);
             TryAddStringColumn(columnValues, _mondaySettings.CourtCaseNumberColumnId, c.CourtCaseNumber);
             TryAddStringColumn(columnValues, _mondaySettings.AttorneyNameColumnId, c.AttorneyName);
             TryAddStringColumn(columnValues, _mondaySettings.DefenseStreetColumnId, c.DefenseStreet);
@@ -2756,11 +2755,11 @@ namespace Odmon.Worker.Services
             CancellationToken ct)
         {
             _logger.LogDebug(
-                "Court mapping for TikCounter {TikCounter}, TikNumber {TikNumber}: CourtCaseNumber -> {CourtCaseNumber}, CourtCity -> {CourtCity}",
+                "Court mapping for TikCounter {TikCounter}, TikNumber {TikNumber}: CourtCaseNumber -> {CourtCaseNumber}, LegalCourtName -> {LegalCourtName}",
                 c.TikCounter,
                 c.TikNumber ?? "<null>",
                 c.CourtCaseNumber ?? "<null>",
-                c.CourtCity ?? "<null>");
+                c.LegalCourtName ?? "<null>");
 
             // FAIL-FAST: Validate critical fields before creating Monday item
             await ValidateCriticalFieldsAsync(boardId, c, ct);
@@ -2807,11 +2806,11 @@ namespace Odmon.Worker.Services
             if (requiresDataUpdate || requiresHearingUpdate)
             {
                 _logger.LogDebug(
-                    "Court mapping for TikCounter {TikCounter}, TikNumber {TikNumber}: CourtCaseNumber -> {CourtCaseNumber}, CourtCity -> {CourtCity}",
+                    "Court mapping for TikCounter {TikCounter}, TikNumber {TikNumber}: CourtCaseNumber -> {CourtCaseNumber}, LegalCourtName -> {LegalCourtName}",
                     c.TikCounter,
                     c.TikNumber ?? "<null>",
                     c.CourtCaseNumber ?? "<null>",
-                    c.CourtCity ?? "<null>");
+                    c.LegalCourtName ?? "<null>");
 
                 // FAIL-FAST: Validate critical fields before updating Monday item
                 await ValidateCriticalFieldsAsync(boardId, c, ct);
@@ -3028,7 +3027,7 @@ namespace Odmon.Worker.Services
         /// Computes a deterministic SHA-256 hash of the hearing-relevant fields on an OdcanitCase.
         /// Used to detect hearing-only changes that should trigger a Monday update
         /// even when the main case data (tsModifyDate / OdcanitVersion) hasn't changed.
-        /// Fields: HearingDate, HearingTime, HearingJudgeName, EffectiveCourtCity (HearingCity->HearingCourtName), MeetStatus.
+        /// Fields: HearingDate, HearingTime, HearingJudgeName, HearingCity, HearingCourtName, MeetStatus.
         /// </summary>
         // ====================================================================
         // Deterministic content-based version (SHA-256)
@@ -3082,6 +3081,7 @@ namespace Odmon.Worker.Services
             AppendStr(sb, c.ThirdPartyLawyerAddress);
             AppendStr(sb, c.ThirdPartyLawyerEmail);
             AppendStr(sb, c.CourtName);
+            AppendStr(sb, c.LegalCourtName);
             AppendStr(sb, c.CourtCaseNumber);
             AppendStr(sb, c.AttorneyName);
             AppendStr(sb, c.DefenseStreet);

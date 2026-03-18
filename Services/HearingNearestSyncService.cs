@@ -399,7 +399,7 @@ namespace Odmon.Worker.Services
             CancellationToken ct)
         {
             var judgeCol = _mondaySettings.JudgeNameColumnId ?? "";
-            var cityCol = _mondaySettings.CourtCityColumnId ?? "";
+            var cityCol = ""; // text_mkxez28d is now populated from legal UserData only, not hearing events
             var dateCol = _mondaySettings.HearingDateColumnId ?? "";
             var hourCol = _mondaySettings.HearingHourColumnId ?? "";
 
