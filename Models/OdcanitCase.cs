@@ -221,6 +221,18 @@ namespace Odmon.Worker.Models
         public string? ProceedingType { get; set; }
         [NotMapped]
         public DateTime? ComplaintReceivedDate { get; set; }
+        /// <summary>UserData "סכום תביעה צד ג".</summary>
+        [NotMapped]
+        public decimal? ThirdPartyClaimAmount { get; set; }
+        /// <summary>UserData "דמי כינון".</summary>
+        [NotMapped]
+        public decimal? ReconstructionFeeAmount { get; set; }
+        /// <summary>UserData "השתתפות עצמית לנזק".</summary>
+        [NotMapped]
+        public decimal? DeductibleDamageAmount { get; set; }
+        /// <summary>UserData "תגמולי ביטוח".</summary>
+        [NotMapped]
+        public decimal? InsuranceBenefitsAmount { get; set; }
         [NotMapped]
         public string? CaseFolderId { get; set; }
         [NotMapped]

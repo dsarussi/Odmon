@@ -40,6 +40,10 @@ These settings map Odcanit fields to specific Monday.com column IDs. They have s
 | `Monday:InsuranceCompany2AddressColumnId` | `Monday__InsuranceCompany2AddressColumnId` | string | `text_mm1gmta2` | Column for כתובת חברת ביטוח 2 (insurance company 2 address). |
 | `Monday:ProceedingTypeColumnId` | `Monday__ProceedingTypeColumnId` | string | `text_mm1gsp8k` | Column for סוג הליך (proceeding type). |
 | `Monday:PaymentDueAmountColumnId` | `Monday__PaymentDueAmountColumnId` | string | `numeric_mm1gj81h` | Column for סכום לתשלום (payment due amount). |
+| `Monday:ThirdPartyClaimAmountColumnId` | `Monday__ThirdPartyClaimAmountColumnId` | string | `numeric_mky2m5a1` | Column for סכום תביעה צד ג (third-party claim amount). |
+| `Monday:ReconstructionFeeAmountColumnId` | `Monday__ReconstructionFeeAmountColumnId` | string | `numeric_mky2yr0y` | Column for דמי כינון (reconstruction fee). |
+| `Monday:DeductibleDamageAmountColumnId` | `Monday__DeductibleDamageAmountColumnId` | string | `numeric_mky2ywrf` | Column for השתתפות עצמית לנזק (deductible damage). |
+| `Monday:InsuranceBenefitsAmountColumnId` | `Monday__InsuranceBenefitsAmountColumnId` | string | `numeric_mkza3p82` | Column for תגמולי ביטוח (insurance benefits). |
 
 **CRITICAL**: If both `Monday:BoardId` and `Monday:CasesBoardId` are 0, the worker will throw an exception:
 

@@ -21,7 +21,6 @@ namespace Odmon.Worker.Monday
         public string? EventDateColumnId { get; set; } = "date_mkwj3780";
         public string? CaseCloseDateColumnId { get; set; } = "date_mkweqkjf";
         public string? RequestedClaimAmountColumnId { get; set; } = "numeric_mkxw7s29";
-        public string? ProvenClaimAmountColumnId { get; set; } = "numeric_mkwjcrwk";
         public string? JudgmentAmountColumnId { get; set; } = "numeric_mkwj6mnw";
         public string? AppraiserFeeAmountColumnId { get; set; } = "numeric_mky2n7hz";
         public string? DirectDamageAmountColumnId { get; set; } = "numeric_mky1jccw";
@@ -99,6 +98,14 @@ namespace Odmon.Worker.Monday
         public string? ProceedingTypeColumnId { get; set; } = "text_mm1gsp8k";
         /// <summary>סכום לתשלום — payment due amount numeric column.</summary>
         public string? PaymentDueAmountColumnId { get; set; } = "numeric_mm1gj81h";
+        /// <summary>סכום תביעה צד ג — third-party claim amount numeric column.</summary>
+        public string? ThirdPartyClaimAmountColumnId { get; set; } = "numeric_mky2m5a1";
+        /// <summary>דמי כינון — reconstruction fee numeric column.</summary>
+        public string? ReconstructionFeeAmountColumnId { get; set; } = "numeric_mky2yr0y";
+        /// <summary>השתתפות עצמית לנזק — deductible damage numeric column.</summary>
+        public string? DeductibleDamageAmountColumnId { get; set; } = "numeric_mky2ywrf";
+        /// <summary>תגמולי ביטוח — insurance benefits numeric column.</summary>
+        public string? InsuranceBenefitsAmountColumnId { get; set; } = "numeric_mkza3p82";
 
         /// <summary>
         /// If true, inactive Monday items may be revived (new item created, mapping updated).

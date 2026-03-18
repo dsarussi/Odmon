@@ -110,12 +110,12 @@ ODMON is a .NET 8 Worker Service that synchronizes case data from the Odcanit/Od
   - Case identification: TikNumber, ClientNumber, ClaimNumber, AdditionalIdentification
   - Dates: Case open date, event date, close date, hearing date, complaint received date, pleading deadline date
   - Contact information: Client, policy holder, driver, plaintiff, defendant, third party (phones, emails, addresses)
-  - Financial data: Requested claim amount, proven amount, judgment amount, payment due amount
+  - Financial data: Claim amount, judgment amount, payment due amount, appraiser fee, loss of value, losses, residual value, third-party claim, reconstruction fee, deductible damage, insurance benefits
   - Court information: Court name (from legal UserData "שם בית משפט"), case number, judge name, hearing details
   - Vehicle information: Main car number, second car, third party car
   - Insurance: Insurance company details, insurance company 2 (name, address)
   - Legal parties: Attorney name, defense street, claim street, proceeding type, claim versions, defense versions
-  - Status fields: Case status, task type, document type, court name
+  - Status fields: Case status, task type, document type, plaintiff side, defendant side
 - **Document Type Logic**: Determined by client number:
   - Client number = 1 → "כתב הגנה" (defense)
   - Client number in {4, 7, 9} OR ≥ 100 → "כתב תביעה" (claim)

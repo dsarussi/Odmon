@@ -663,11 +663,16 @@ namespace Odmon.Worker.OdcanitAccess
                     defendantAddressFromUserData);
 
                 _logger.LogDebug(
-                    "Court fields for TikCounter {TikCounter}: CourtCaseNumber='{CourtCaseNumber}', LegalCourtName='{LegalCourtName}', CourtName='{CourtName}'",
+                    "Legal fields for TikCounter {TikCounter}: LegalCourtName='{LegalCourtName}', " +
+                    "MainCarNumber='{MainCarNumber}', ThirdPartyLawyerName='{ThirdPartyLawyerName}', " +
+                    "PolicyHolderName='{PolicyHolderName}', ComplaintReceivedDate={ComplaintReceivedDate}, PleadingDeadlineDate={PleadingDeadlineDate}",
                     odcanitCase.TikCounter,
-                    odcanitCase.CourtCaseNumber ?? "<null>",
                     odcanitCase.LegalCourtName ?? "<null>",
-                    odcanitCase.CourtName ?? "<null>");
+                    odcanitCase.MainCarNumber ?? "<null>",
+                    odcanitCase.ThirdPartyLawyerName ?? "<null>",
+                    odcanitCase.PolicyHolderName ?? "<null>",
+                    odcanitCase.ComplaintReceivedDate?.ToString("yyyy-MM-dd") ?? "<null>",
+                    odcanitCase.PleadingDeadlineDate?.ToString("yyyy-MM-dd") ?? "<null>");
 
                 _logger.LogDebug(
                     "ADDRESS MAPPING | TikCounter={TikCounter} | PolicyHolderAddress='{PolicyHolderAddress}' | PlaintiffAddress='{PlaintiffAddress}' | DefenseStreet='{DefenseStreet}' | PlaintiffAddressFromUserData={FromUserData}",
@@ -706,7 +711,12 @@ namespace Odmon.Worker.OdcanitAccess
                 }
             }
 
-            Add("מספר רישוי", (c, row) => c.MainCarNumber = row.strData);
+            Add("מספר רישוי", (c, row) => c.MainCarNumber = row.strData?.Trim());
+            Add("מספר רישוי.", (c, row) =>
+            {
+                if (string.IsNullOrWhiteSpace(c.MainCarNumber))
+                    c.MainCarNumber = row.strData?.Trim();
+            });
             Add("Main car number", (c, row) => c.MainCarNumber = row.strData);
             Add("Driver: main car number", (c, row) => c.MainCarNumber = row.strData);
             Add("מספר רישוי נוסף", (c, row) => c.SecondCarNumber = row.strData);
@@ -750,17 +760,19 @@ namespace Odmon.Worker.OdcanitAccess
             Add("סלולרי בעל פוליסה", (c, row) => c.PolicyHolderPhone = row.strData);
             Add("Policy holder: phone", (c, row) => c.PolicyHolderPhone = row.strData);
             Add("כתובת דוא\"ל בעל פוליסה", (c, row) => c.PolicyHolderEmail = row.strData);
+            Add("כתובת מייל מבוטח", (c, row) => c.PolicyHolderEmail = row.strData);
             Add("Policy holder: email", (c, row) => c.PolicyHolderEmail = row.strData);
             Add("שם נהג צד ג'", (c, row) => c.ThirdPartyDriverName = row.strData);
             Add("Third-party driver: name", (c, row) => c.ThirdPartyDriverName = row.strData);
             Add("ת.ז. נהג צד ג'", (c, row) => c.ThirdPartyDriverId = row.strData);
             Add("Third-party driver: id", (c, row) => c.ThirdPartyDriverId = row.strData);
             Add("נייד צד ג'", (c, row) => c.ThirdPartyPhone = row.strData);
+            Add("נייד צד ג", (c, row) => c.ThirdPartyPhone = row.strData);
             Add("Third-party driver: phone", (c, row) => c.ThirdPartyPhone = row.strData);
             Add("שם מעסיק צד ג'", (c, row) => c.ThirdPartyEmployerName = row.strData);
             Add("מספר זהות מעסיק צד ג'", (c, row) => c.ThirdPartyEmployerId = row.strData);
             Add("כתובת מעסיק צד ג'", (c, row) => c.ThirdPartyEmployerAddress = row.strData);
-            Add("מיוצג על ידי עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerName = row.strData);
+            Add("עו\"ד צד ג", (c, row) => c.ThirdPartyLawyerName = row.strData);
             Add("כתובת עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerAddress = row.strData);
             Add("טלפון עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerPhone = row.strData);
             Add("כתובת דוא\"ל עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerEmail = row.strData);
@@ -797,11 +809,15 @@ namespace Odmon.Worker.OdcanitAccess
             });
             Add("Event date", (c, row) => c.EventDate = ExtractDate(row) ?? c.EventDate);
             Add("תאריך אירוע", (c, row) => c.EventDate = ExtractDate(row) ?? c.EventDate);
-            Add("מועד קבלת כתב התביעה", (c, row) => c.ComplaintReceivedDate = row.dateData ?? c.ComplaintReceivedDate);
+            Add("תאריך קבלת התביעה אצל הלקוח", (c, row) => c.ComplaintReceivedDate = ExtractDate(row) ?? c.ComplaintReceivedDate);
             Add("folderID", (c, row) => c.CaseFolderId = row.strData);
             Add("שם עורך דין", (c, row) => c.AttorneyName = row.strData);
             Add("פקס", (c, row) => c.DefendantFax = row.strData);
             Add("שווי שרידים", (c, row) => c.ResidualValueAmount = ExtractDecimal(row) ?? c.ResidualValueAmount);
+            Add("סכום תביעה צד ג", (c, row) => c.ThirdPartyClaimAmount = ExtractDecimal(row) ?? c.ThirdPartyClaimAmount);
+            Add("דמי כינון", (c, row) => c.ReconstructionFeeAmount = ExtractDecimal(row) ?? c.ReconstructionFeeAmount);
+            Add("השתתפות עצמית לנזק", (c, row) => c.DeductibleDamageAmount = ExtractDecimal(row) ?? c.DeductibleDamageAmount);
+            Add("תגמולי ביטוח", (c, row) => c.InsuranceBenefitsAmount = ExtractDecimal(row) ?? c.InsuranceBenefitsAmount);
 
             // Court fields from UserData
             Add("מספר הליך בית משפט", (c, row) =>

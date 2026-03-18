@@ -145,7 +145,7 @@ namespace Odmon.Worker.Services
                         ThirdPartyEmployerName = GetString(raw, "שם מעסיק צד ג'"),
                         ThirdPartyEmployerId = GetString(raw, "מספר זהות מעסיק צד ג'"),
                         ThirdPartyEmployerAddress = GetString(raw, "כתובת מעסיק צד ג'"),
-                        ThirdPartyLawyerName = GetString(raw, "מיוצג על ידי עו\"ד צד ג'"),
+                        ThirdPartyLawyerName = GetString(raw, "עו\"ד צד ג"),
                         ThirdPartyLawyerAddress = GetString(raw, "כתובת עו\"ד צד ג'"),
                         ThirdPartyLawyerPhone = GetString(raw, "טלפון עו\"ד צד ג'"),
                         ThirdPartyLawyerEmail = GetString(raw, "כתובת דוא\"ל עו\"ד צד ג'"),

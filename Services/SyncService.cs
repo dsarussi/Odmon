@@ -1062,7 +1062,6 @@ namespace Odmon.Worker.Services
             }
 
             TryAddDecimalColumn(columnValues, _mondaySettings.RequestedClaimAmountColumnId, c.RequestedClaimAmount);
-            TryAddDecimalColumn(columnValues, _mondaySettings.ProvenClaimAmountColumnId, c.ProvenClaimAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.JudgmentAmountColumnId, c.JudgmentAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.AppraiserFeeAmountColumnId, c.AppraiserFeeAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.DirectDamageAmountColumnId, c.DirectDamageAmount);
@@ -1108,7 +1107,6 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerAddressColumnId, c.ThirdPartyLawyerAddress);
             TryAddPhoneColumn(columnValues, _mondaySettings.ThirdPartyLawyerPhoneColumnId, c.ThirdPartyLawyerPhone, c.TikCounter, "Third-party lawyer phone");
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerEmailColumnId, c.ThirdPartyLawyerEmail);
-            // JudgeName is handled above in the hearing gating section.
             // Court name (text_mkxez28d) from legal UserData "שם בית משפט" only:
             TryAddStringColumn(columnValues, _mondaySettings.CourtCityColumnId, c.LegalCourtName);
             TryAddStringColumn(columnValues, _mondaySettings.CourtCaseNumberColumnId, c.CourtCaseNumber);
@@ -1124,6 +1122,10 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany2AddressColumnId, c.InsuranceCompany2Address);
             TryAddStringColumn(columnValues, _mondaySettings.ProceedingTypeColumnId, c.ProceedingType);
             TryAddDecimalColumn(columnValues, _mondaySettings.PaymentDueAmountColumnId, c.PaymentDueAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.ThirdPartyClaimAmountColumnId, c.ThirdPartyClaimAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.ReconstructionFeeAmountColumnId, c.ReconstructionFeeAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.DeductibleDamageAmountColumnId, c.DeductibleDamageAmount);
+            TryAddDecimalColumn(columnValues, _mondaySettings.InsuranceBenefitsAmountColumnId, c.InsuranceBenefitsAmount);
             TryAddStringColumn(columnValues, _mondaySettings.CaseFolderIdColumnId, c.CaseFolderId);
             TryAddStatusLabelColumn(columnValues, _mondaySettings.TaskTypeStatusColumnId, MapTaskTypeLabel(c.TikType));
 
@@ -3113,13 +3115,16 @@ namespace Odmon.Worker.Services
 
             // ── Decimal columns ──
             AppendDec(sb, c.RequestedClaimAmount);
-            AppendDec(sb, c.ProvenClaimAmount);
             AppendDec(sb, c.JudgmentAmount);
             AppendDec(sb, c.AppraiserFeeAmount);
             AppendDec(sb, c.DirectDamageAmount);
             AppendDec(sb, c.OtherLossesAmount);
             AppendDec(sb, c.LossOfValueAmount);
             AppendDec(sb, c.ResidualValueAmount);
+            AppendDec(sb, c.ThirdPartyClaimAmount);
+            AppendDec(sb, c.ReconstructionFeeAmount);
+            AppendDec(sb, c.DeductibleDamageAmount);
+            AppendDec(sb, c.InsuranceBenefitsAmount);
 
             // ── Hearing fields ──
             AppendDate(sb, c.HearingDate);
