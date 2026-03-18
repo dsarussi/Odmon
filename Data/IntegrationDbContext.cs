@@ -195,7 +195,7 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.ClientPhone);
                 b.Property(x => x.ClientEmail);
                 b.Property(x => x.EventDate);
-                b.Property(x => x.RequestedClaimAmount);
+                b.Property(x => x.RequestedClaimAmount).HasPrecision(18, 2);
             });
 
             modelBuilder.Entity<HearingBackfillApr2026>(b =>

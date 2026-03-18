@@ -962,7 +962,7 @@ namespace Odmon.Worker.Services
 
             var mainPhoneColumnId = ResolveClientPhoneColumnId();
             TryAddPhoneColumn(columnValues, mainPhoneColumnId, normalizedPolicyHolderPhone, c.TikCounter, "Policy holder phone (טלפון column)");
-            TryAddStringColumn(columnValues, ResolveClientEmailColumnId(), c.ClientEmail);
+            TryAddEmailColumn(columnValues, ResolveClientEmailColumnId(), c.ClientEmail);
 
             TryAddDateColumn(columnValues, _mondaySettings.CaseOpenDateColumnId, c.tsCreateDate);
             TryAddDateColumn(columnValues, _mondaySettings.EventDateColumnId, c.EventDate);
@@ -1077,7 +1077,7 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderIdColumnId, c.PolicyHolderId);
             TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderAddressColumnId, c.PolicyHolderAddress);
             TryAddPhoneColumn(columnValues, _mondaySettings.PolicyHolderPhoneColumnId, normalizedPolicyHolderPhone, c.TikCounter, "Policy holder phone");
-            TryAddStringColumn(columnValues, _mondaySettings.PolicyHolderEmailColumnId, c.PolicyHolderEmail);
+            TryAddEmailColumn(columnValues, _mondaySettings.PolicyHolderEmailColumnId, c.PolicyHolderEmail);
             TryAddStringColumn(columnValues, _mondaySettings.MainCarNumberColumnId, c.MainCarNumber);
             TryAddStringColumn(columnValues, _mondaySettings.DriverNameColumnId, c.DriverName);
             TryAddStringColumn(columnValues, _mondaySettings.DriverIdColumnId, c.DriverId);
@@ -1088,7 +1088,7 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.PlaintiffIdColumnId, c.PlaintiffId);
             TryAddStringColumn(columnValues, _mondaySettings.PlaintiffAddressColumnId, c.PlaintiffAddress);
             TryAddPhoneColumn(columnValues, _mondaySettings.PlaintiffPhoneColumnId, c.PlaintiffPhone, c.TikCounter, "Plaintiff phone");
-            TryAddStringColumn(columnValues, _mondaySettings.PlaintiffEmailColumnId, c.PlaintiffEmail);
+            TryAddEmailColumn(columnValues, _mondaySettings.PlaintiffEmailColumnId, c.PlaintiffEmail);
             TryAddStringColumn(columnValues, _mondaySettings.DefendantNameColumnId, c.DefendantName);
             TryAddStringColumn(columnValues, _mondaySettings.DefendantFaxColumnId, c.DefendantFax);
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyDriverNameColumnId, c.ThirdPartyDriverName);
@@ -1099,14 +1099,14 @@ namespace Odmon.Worker.Services
             TryAddStatusLabelColumn(columnValues, _mondaySettings.ThirdPartyInsurerStatusColumnId, c.ThirdPartyInsurerName);
             TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompanyIdColumnId, c.InsuranceCompanyId);
             TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompanyAddressColumnId, c.InsuranceCompanyAddress);
-            TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompanyEmailColumnId, c.InsuranceCompanyEmail);
+            TryAddEmailColumn(columnValues, _mondaySettings.InsuranceCompanyEmailColumnId, c.InsuranceCompanyEmail);
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyEmployerNameColumnId, c.ThirdPartyEmployerName);
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyEmployerIdColumnId, c.ThirdPartyEmployerId);
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyEmployerAddressColumnId, c.ThirdPartyEmployerAddress);
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerNameColumnId, c.ThirdPartyLawyerName);
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerAddressColumnId, c.ThirdPartyLawyerAddress);
             TryAddPhoneColumn(columnValues, _mondaySettings.ThirdPartyLawyerPhoneColumnId, c.ThirdPartyLawyerPhone, c.TikCounter, "Third-party lawyer phone");
-            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerEmailColumnId, c.ThirdPartyLawyerEmail);
+            TryAddEmailColumn(columnValues, _mondaySettings.ThirdPartyLawyerEmailColumnId, c.ThirdPartyLawyerEmail);
             // Court name (text_mkxez28d) from legal UserData "שם בית משפט" only:
             TryAddStringColumn(columnValues, _mondaySettings.CourtCityColumnId, c.LegalCourtName);
             TryAddStringColumn(columnValues, _mondaySettings.CourtCaseNumberColumnId, c.CourtCaseNumber);
@@ -1389,6 +1389,22 @@ namespace Odmon.Worker.Services
         {
             public string phone { get; set; } = string.Empty;
             public string countryShortName { get; set; } = "IL";
+        }
+
+        private static void TryAddEmailColumn(Dictionary<string, object> columnValues, string? columnId, string? emailAddress)
+        {
+            if (string.IsNullOrWhiteSpace(columnId) || string.IsNullOrWhiteSpace(emailAddress))
+            {
+                return;
+            }
+
+            columnValues[columnId] = new EmailColumnValue { email = emailAddress.Trim(), text = emailAddress.Trim() };
+        }
+
+        private sealed class EmailColumnValue
+        {
+            public string email { get; set; } = string.Empty;
+            public string text { get; set; } = string.Empty;
         }
 
         private static string? NormalizeIsraeliPhoneForDocument(string? raw)

@@ -126,7 +126,7 @@ namespace Odmon.Worker.Workers
             {
                 using var scope = _scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<IntegrationDbContext>();
-                await db.NispahDeduplications.AsNoTracking().Take(0).CountAsync(ct);
+                await db.NispahDeduplications.AsNoTracking().OrderBy(x => x.Id).Take(0).CountAsync(ct);
                 _logger.LogInformation("HEALTHCHECK | NispahDeduplications table exists in IntegrationDb — dedup is active.");
             }
             catch (SqlException sqlEx) when (sqlEx.Number == 208)
