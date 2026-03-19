@@ -199,7 +199,12 @@ namespace Odmon.Worker.Workers
                 var realFailures = allFailuresInWindow
                     .Where(f => FailureClassifier.IsRealFailure(f.ErrorType, f.Operation))
                     .ToList();
-                var realFailureCount = realFailures.Count;
+                var groupedFailures = realFailures
+                    .GroupBy(f => (CaseNumber: f.TikNumber ?? "", Operation: f.Operation ?? "", RootCause: f.ErrorType ?? "Unknown"))
+                    .Select(g => (g.Key.CaseNumber, g.Key.Operation, g.Key.RootCause, Count: g.Count(), FirstOccurrence: g.Min(x => x.OccurredAtUtc)))
+                    .OrderBy(x => x.FirstOccurrence)
+                    .ToList();
+                var realFailureCount = groupedFailures.Count;
 
                 // Section 2 — Cases created yesterday (table)
                 var casesCreated = await db.MondayItemMappings
@@ -236,7 +241,7 @@ namespace Odmon.Worker.Workers
                     realFailureCount,
                     casesCreated.Select(c => (c.TikNumber ?? "", c.CreatedAtUtc)).ToList(),
                     hearingsSynced.Select(x => (x.TikNumber ?? "", x.LastSyncedAtUtc)).ToList(),
-                    realFailures,
+                    groupedFailures,
                     circuitBreakerTripped,
                     highFailureNote);
 
@@ -273,7 +278,7 @@ namespace Odmon.Worker.Workers
             int realFailureCount,
             List<(string TikNumber, DateTime CreatedAtUtc)> casesCreated,
             List<(string TikNumber, DateTime LastSyncedAtUtc)> hearingsSynced,
-            List<SyncFailure> realFailures,
+            List<(string CaseNumber, string Operation, string RootCause, int Count, DateTime FirstOccurrence)> groupedFailures,
             bool circuitBreakerTripped,
             bool highFailureNote)
         {
@@ -327,20 +332,18 @@ namespace Odmon.Worker.Workers
                 sb.AppendLine("</table>");
             }
 
-            // Section 4 — Failures That Require Attention (real failures only)
+            // Section 4 — Failures That Require Attention (real failures only, grouped by Case+Operation+RootCause)
             sb.AppendLine("<hr/>");
             sb.AppendLine("<h3 style='margin:16px 0 8px;'>Failures That Require Attention</h3>");
-            if (realFailures.Count == 0)
+            if (groupedFailures.Count == 0)
                 sb.AppendLine("<p>None.</p>");
             else
             {
                 sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;' cellpadding='6'>");
-                sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>Time (UTC)</th><th style='border:1px solid #ddd;'>Case Number</th><th style='border:1px solid #ddd;'>Operation</th><th style='border:1px solid #ddd;'>Failure Reason</th></tr>");
-                foreach (var f in realFailures.OrderBy(x => x.OccurredAtUtc))
+                sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>Case Number</th><th style='border:1px solid #ddd;'>Operation</th><th style='border:1px solid #ddd;'>Root Cause</th><th style='border:1px solid #ddd;'>Count</th><th style='border:1px solid #ddd;'>First (UTC)</th></tr>");
+                foreach (var g in groupedFailures)
                 {
-                    var rawReason = (f.ErrorType ?? "") + ": " + (f.ErrorMessage ?? "");
-                    var reason = E(rawReason.Length > 200 ? rawReason[..200] + "…" : rawReason);
-                    sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{f.OccurredAtUtc:yyyy-MM-dd HH:mm}</td><td style='border:1px solid #ddd;'>{E(f.TikNumber ?? "")}</td><td style='border:1px solid #ddd;'>{E(f.Operation)}</td><td style='border:1px solid #ddd;'>{reason}</td></tr>");
+                    sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{E(g.CaseNumber)}</td><td style='border:1px solid #ddd;'>{E(g.Operation)}</td><td style='border:1px solid #ddd;'>{E(g.RootCause)}</td><td style='border:1px solid #ddd;'>{g.Count}</td><td style='border:1px solid #ddd;'>{g.FirstOccurrence:yyyy-MM-dd HH:mm}</td></tr>");
                 }
                 sb.AppendLine("</table>");
             }

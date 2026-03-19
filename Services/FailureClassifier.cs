@@ -12,7 +12,10 @@ namespace Odmon.Worker.Services
         /// <summary>Operations that are expected skips; do not show in daily summary or alert.</summary>
         private static readonly HashSet<string> IgnoredOperations = new(StringComparer.Ordinal)
         {
-            "update_skipped_inactive"
+            "update_skipped_inactive",
+            "hearing_update_skipped_inactive",
+            "hearing_update_skipped_not_ready_or_inactive",
+            "update_skipped_not_ready"
         };
 
         /// <summary>Exception types that indicate infrastructure/system failure; trigger immediate alerts.</summary>

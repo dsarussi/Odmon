@@ -326,6 +326,17 @@ namespace Odmon.Worker.Services
                 }
             }
 
+            // ── ReadyForMonday gating: cases not ready are out-of-scope for Monday sync ──
+            var beforeReadyFilter = newOrUpdatedCases.Count;
+            newOrUpdatedCases = newOrUpdatedCases.Where(c => c.IsReadyForMonday).ToList();
+            var readyFilteredCount = beforeReadyFilter - newOrUpdatedCases.Count;
+            if (readyFilteredCount > 0)
+            {
+                _logger.LogInformation(
+                    "ReadyForMonday gating: filtered {Filtered} case(s) not ready for Monday. Remaining={Remaining}",
+                    readyFilteredCount, newOrUpdatedCases.Count);
+            }
+
             // ── Stage: Derive DocumentType ──
             stageTimer.Restart();
             foreach (var c in newOrUpdatedCases)

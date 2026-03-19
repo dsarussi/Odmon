@@ -121,6 +121,31 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            // ── ReadyForMonday gating: skip hearing sync for cases not ready for Monday ──
+            var tikCountersForReadyCheck = mappings.Select(m => m.TikCounter).Distinct().ToList();
+            var casesForReadyCheck = await _odcanitReader.GetCasesByTikCountersAsync(tikCountersForReadyCheck, ct);
+            var readyTikCounters = new HashSet<int>(casesForReadyCheck.Where(c => c.IsReadyForMonday).Select(c => c.TikCounter));
+            var beforeReadyFilter = mappings.Count;
+            mappings = mappings.Where(m => readyTikCounters.Contains(m.TikCounter)).ToList();
+            var readyFilteredCount = beforeReadyFilter - mappings.Count;
+            if (readyFilteredCount > 0)
+            {
+                var skippedTikNumbers = tikCountersForReadyCheck
+                    .Where(tc => !readyTikCounters.Contains(tc))
+                    .Select(tc => casesForReadyCheck.FirstOrDefault(c => c.TikCounter == tc)?.TikNumber ?? tc.ToString())
+                    .Take(10)
+                    .ToList();
+                _logger.LogInformation(
+                    "Hearing sync ReadyForMonday gating: filtered {Filtered} mapping(s) (case not ready). Remaining={Remaining}, BoardId={BoardId}, SampleSkipped={Sample}",
+                    readyFilteredCount, mappings.Count, boardId, string.Join(", ", skippedTikNumbers));
+            }
+
+            if (mappings.Count == 0)
+            {
+                _logger.LogDebug("No mappings remain after ReadyForMonday filter; skipping hearing sync. BoardId={BoardId}", boardId);
+                return;
+            }
+
             var tikCounters = mappings.Select(m => m.TikCounter).Distinct().ToList();
             var diaryRows = await _odcanitReader.GetDiaryEventsByTikCountersAsync(tikCounters, ct);
             var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, IsraelTimeZone);
@@ -305,11 +330,11 @@ namespace Odmon.Worker.Services
                 catch (MondayApiException apiEx) when (apiEx.IsInactiveItemError())
                 {
                     // ── Monday item is inactive — skip, do NOT revive or create new item ──
-                    _logger.LogWarning(
-                        "Monday item inactive; skipping update (NO revive). TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, Operation=hearing_sync",
-                        mapping.TikCounter, mapping.TikNumber ?? "<null>", boardId, effectiveItemId);
+                    _logger.LogInformation(
+                        "Hearing sync skipped: TikCounter={TikCounter}, TikNumber={TikNumber}, Reason=MondayItemInactive, MondayItemId={MondayItemId}, BoardId={BoardId} (no revive policy)",
+                        mapping.TikCounter, mapping.TikNumber ?? "<null>", effectiveItemId, boardId);
 
-                    // Persist as SyncFailure for tracking
+                    // Persist as SyncFailure for tracking (classified as Ignored, not Real failure)
                     try
                     {
                         _integrationDb.SyncFailures.Add(new SyncFailure
@@ -318,7 +343,7 @@ namespace Odmon.Worker.Services
                             TikCounter = mapping.TikCounter,
                             TikNumber = mapping.TikNumber,
                             BoardId = boardId,
-                            Operation = "hearing_update_skipped_inactive",
+                            Operation = "hearing_update_skipped_not_ready_or_inactive",
                             ErrorType = "InactiveMondayItem",
                             ErrorMessage = $"Monday item {effectiveItemId} is inactive. Skipped hearing update; no revive. Error: {apiEx.Message}",
                             OccurredAtUtc = DateTime.UtcNow,

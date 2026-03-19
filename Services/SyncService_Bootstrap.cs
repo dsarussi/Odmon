@@ -267,6 +267,9 @@ namespace Odmon.Worker.Services
             if (!c.tsCreateDate.HasValue)
                 return (false, "NullDate");
 
+            if (!c.IsReadyForMonday)
+                return (false, "ReadyForMondayFiltered");
+
             var openDateIsrael = DateOnly.FromDateTime(c.tsCreateDate.Value);
 
             if (openDateIsrael <= LegacyCoolingCutoffDate)
