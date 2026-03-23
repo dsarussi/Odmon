@@ -210,6 +210,12 @@ namespace Odmon.Worker.Models
         /// <summary>UserData "גרסאות הגנה".</summary>
         [NotMapped]
         public string? DefenseVersions { get; set; }
+        /// <summary>UserData "חברות ביטוח 1" — insurance company 1 name.</summary>
+        [NotMapped]
+        public string? InsuranceCompany1Name { get; set; }
+        /// <summary>UserData "כתובת חברת ביטוח 1" — insurance company 1 address.</summary>
+        [NotMapped]
+        public string? InsuranceCompany1Address { get; set; }
         /// <summary>UserData "חברת ביטוח 2".</summary>
         [NotMapped]
         public string? InsuranceCompany2 { get; set; }

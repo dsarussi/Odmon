@@ -90,6 +90,10 @@ namespace Odmon.Worker.Monday
         public string? PleadingDeadlineDateColumnId { get; set; } = "date_mm1gex5r";
         /// <summary>גרסאות הגנה — defense versions long_text column.</summary>
         public string? DefenseVersionsColumnId { get; set; } = "long_text_mm1gxq01";
+        /// <summary>חברות ביטוח 1 — first insurance company name text column.</summary>
+        public string? InsuranceCompany1ColumnId { get; set; } = "text_mm1qnbwn";
+        /// <summary>כתובת חברת ביטוח 1 — first insurance company address text column.</summary>
+        public string? InsuranceCompany1AddressColumnId { get; set; } = "text_mm1q8a83";
         /// <summary>חברת ביטוח 2 — second insurance company text column.</summary>
         public string? InsuranceCompany2ColumnId { get; set; } = "text_mm1gy0q4";
         /// <summary>כתובת חברת ביטוח 2 — second insurance company address text column.</summary>

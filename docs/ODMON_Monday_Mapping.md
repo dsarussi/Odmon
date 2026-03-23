@@ -107,8 +107,8 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 
 | Monday Column | Column ID | Odcanit Source | Notes |
 |--------------|-----------|----------------|-------|
-| שם נהג צד ג' | text_mkwj9bvj | `OdcanitCase.ThirdPartyDriverName` | From vwSides (SideTypeName = ThirdParty) or legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "שם נהג צד ג'", "Third-party driver: name") |
-| תעודת זהות נהג צד ג' | text_mkwjmad2 | `OdcanitCase.ThirdPartyDriverId` | From vwSides (ID field) or legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "ת.ז. נהג צד ג'", "Third-party driver: id") |
+| שם נהג צד ג' | text_mkwj9bvj | `OdcanitCase.ThirdPartyDriverName` | From vwSides (SideTypeName = ThirdParty) or legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "שם נהג צד ג'", "שם נהג ג", "Third-party driver: name") |
+| תעודת זהות נהג צד ג' | text_mkwjmad2 | `OdcanitCase.ThirdPartyDriverId` | From vwSides (ID field) or legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "ת.ז. נהג צד ג'", "תז נהג ג", "Third-party driver: id") |
 | טלפון צד ג' | phone_mkwj9a3a | `OdcanitCase.ThirdPartyPhone` (normalized) | From legal user data (FieldName: "נייד צד ג'", "נייד צד ג", "Third-party driver: phone"). Normalized to E.164 format |
 | שם מעסיק צד ג' | text_mkwj6b | `OdcanitCase.ThirdPartyEmployerName` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "שם מעסיק צד ג'") |
 | מספר זהות מעסיק צד ג' | text_mkwjfkbm | `OdcanitCase.ThirdPartyEmployerId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "מספר זהות מעסיק צד ג'") |
@@ -126,6 +126,8 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | ח.פ. חברת ביטוח | text_mkwjmpex | `OdcanitCase.InsuranceCompanyId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "ח.פ. חברת ביטוח") |
 | כתובת חברת ביטוח | text_mkwjnvdr | `OdcanitCase.InsuranceCompanyAddress` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת חברת ביטוח") |
 | דוא"ל חברת ביטוח | email_mkwjv6zw | `OdcanitCase.InsuranceCompanyEmail` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת דוא\"ל חברת ביטוח") |
+| חברות ביטוח 1 | text_mm1qnbwn | `OdcanitCase.InsuranceCompany1Name` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "חברות ביטוח 1") |
+| כתובת חברת ביטוח 1 | text_mm1q8a83 | `OdcanitCase.InsuranceCompany1Address` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת חברת ביטוח 1") |
 | חברת ביטוח 2 | text_mm1gy0q4 | `OdcanitCase.InsuranceCompany2` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "חברת ביטוח 2") |
 | כתובת חברת ביטוח 2 | text_mm1gmta2 | `OdcanitCase.InsuranceCompany2Address` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת חברת ביטוח 2") |
 
@@ -146,9 +148,9 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | כתובת נתבע / מרחוב (הגנה) | text_mkxwzxcq | `OdcanitCase.DefenseStreet` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת נתבע" or "מרחוב (הגנה)") |
 | מרחוב (תביעה) | _(no live column)_ | `OdcanitCase.ClaimStreet` | From legal user data — no corresponding Monday column; not sent. |
 | folderID | text_mkxe3vhk | `OdcanitCase.CaseFolderId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "folderID") |
-| גרסאות תביעה | long_text_mm1gsvg0 | `OdcanitCase.ClaimVersions` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "גרסאות תביעה"). Also populates `OdcanitCase.Notes` → long_text_mkwe5h8v |
+| גרסאות תביעה | ~~long_text_mm1gsvg0~~ | `OdcanitCase.ClaimVersions` | **NOT sent to Monday** (read into model only). From legal user data (FieldName: "גרסאות תביעה"). Also populates `OdcanitCase.Notes` → long_text_mkwe5h8v |
 | הערות | long_text_mkwe5h8v | `OdcanitCase.Notes` | From UserData "גרסאות תביעה" |
-| גרסאות הגנה | long_text_mm1gxq01 | `OdcanitCase.DefenseVersions` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "גרסאות הגנה") |
+| גרסאות הגנה | ~~long_text_mm1gxq01~~ | `OdcanitCase.DefenseVersions` | **NOT sent to Monday** (read into model only). From legal user data (FieldName: "גרסאות הגנה") |
 | נסיבות התאונה בקצרה | text_mky1vzgg | `OdcanitCase.ShortAccidentCircumstances` | From UserData "גרסת לקוח - נוסח משפטי" |
 | סוג הליך | text_mm1gsp8k | `OdcanitCase.ProceedingType` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "סוג הליך") |
 | נתבעים נוספים | long_text_mkwjhngq | `OdcanitCase.AdditionalDefendants` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "נתבעים נוספים") |

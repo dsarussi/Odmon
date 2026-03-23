@@ -675,6 +675,16 @@ namespace Odmon.Worker.OdcanitAccess
                     odcanitCase.PleadingDeadlineDate?.ToString("yyyy-MM-dd") ?? "<null>");
 
                 _logger.LogDebug(
+                    "Insurance/mapping fields for TikCounter {TikCounter}: InsuranceCompany1Name='{InsuranceCompany1Name}', " +
+                    "InsuranceCompany1Address='{InsuranceCompany1Address}', ShortAccidentCircumstances='{ShortAccidentCircumstances}', " +
+                    "DriverPhone='{DriverPhone}'",
+                    odcanitCase.TikCounter,
+                    odcanitCase.InsuranceCompany1Name ?? "<null>",
+                    odcanitCase.InsuranceCompany1Address ?? "<null>",
+                    odcanitCase.ShortAccidentCircumstances ?? "<null>",
+                    odcanitCase.DriverPhone ?? "<null>");
+
+                _logger.LogDebug(
                     "ADDRESS MAPPING | TikCounter={TikCounter} | PolicyHolderAddress='{PolicyHolderAddress}' | PlaintiffAddress='{PlaintiffAddress}' | DefenseStreet='{DefenseStreet}' | PlaintiffAddressFromUserData={FromUserData}",
                     odcanitCase.TikCounter,
                     odcanitCase.PolicyHolderAddress ?? "<null>",
@@ -763,8 +773,10 @@ namespace Odmon.Worker.OdcanitAccess
             Add("כתובת מייל מבוטח", (c, row) => c.PolicyHolderEmail = row.strData);
             Add("Policy holder: email", (c, row) => c.PolicyHolderEmail = row.strData);
             Add("שם נהג צד ג'", (c, row) => c.ThirdPartyDriverName = row.strData);
+            Add("שם נהג ג", (c, row) => c.ThirdPartyDriverName = row.strData);
             Add("Third-party driver: name", (c, row) => c.ThirdPartyDriverName = row.strData);
             Add("ת.ז. נהג צד ג'", (c, row) => c.ThirdPartyDriverId = row.strData);
+            Add("תז נהג ג", (c, row) => c.ThirdPartyDriverId = row.strData);
             Add("Third-party driver: id", (c, row) => c.ThirdPartyDriverId = row.strData);
             Add("נייד צד ג'", (c, row) => c.ThirdPartyPhone = row.strData);
             Add("נייד צד ג", (c, row) => c.ThirdPartyPhone = row.strData);
@@ -856,6 +868,8 @@ namespace Odmon.Worker.OdcanitAccess
             Add("זיהוי נוסף", (c, row) => c.AdditionalIdentification = row.strData);
             Add("תאריך אחרון להגשת כתב הטענות", (c, row) => c.PleadingDeadlineDate = ExtractDate(row) ?? c.PleadingDeadlineDate);
             Add("גרסאות הגנה", (c, row) => c.DefenseVersions = row.strData);
+            Add("חברות ביטוח 1", (c, row) => c.InsuranceCompany1Name = row.strData);
+            Add("כתובת חברת ביטוח 1", (c, row) => c.InsuranceCompany1Address = row.strData);
             Add("חברת ביטוח 2", (c, row) => c.InsuranceCompany2 = row.strData);
             Add("כתובת חברת ביטוח 2", (c, row) => c.InsuranceCompany2Address = row.strData);
             Add("סוג הליך", (c, row) => c.ProceedingType = row.strData);

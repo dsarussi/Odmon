@@ -36,6 +36,8 @@ These settings map Odcanit fields to specific Monday.com column IDs. They have s
 | `Monday:ClaimVersionsColumnId` | `Monday__ClaimVersionsColumnId` | string | `long_text_mm1gsvg0` | Column for גרסאות תביעה (claim versions). |
 | `Monday:PleadingDeadlineDateColumnId` | `Monday__PleadingDeadlineDateColumnId` | string | `date_mm1gex5r` | Column for תאריך אחרון להגשת כתב הטענות (pleading deadline date). |
 | `Monday:DefenseVersionsColumnId` | `Monday__DefenseVersionsColumnId` | string | `long_text_mm1gxq01` | Column for גרסאות הגנה (defense versions). |
+| `Monday:InsuranceCompany1ColumnId` | `Monday__InsuranceCompany1ColumnId` | string | `text_mm1qnbwn` | Column for חברות ביטוח 1 (insurance company 1 name). |
+| `Monday:InsuranceCompany1AddressColumnId` | `Monday__InsuranceCompany1AddressColumnId` | string | `text_mm1q8a83` | Column for כתובת חברת ביטוח 1 (insurance company 1 address). |
 | `Monday:InsuranceCompany2ColumnId` | `Monday__InsuranceCompany2ColumnId` | string | `text_mm1gy0q4` | Column for חברת ביטוח 2 (insurance company 2). |
 | `Monday:InsuranceCompany2AddressColumnId` | `Monday__InsuranceCompany2AddressColumnId` | string | `text_mm1gmta2` | Column for כתובת חברת ביטוח 2 (insurance company 2 address). |
 | `Monday:ProceedingTypeColumnId` | `Monday__ProceedingTypeColumnId` | string | `text_mm1gsp8k` | Column for סוג הליך (proceeding type). |

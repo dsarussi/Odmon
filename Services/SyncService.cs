@@ -1126,9 +1126,10 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.ClaimStreetColumnId, c.ClaimStreet);
             TryAddStringColumn(columnValues, _mondaySettings.ShortAccidentCircumstancesColumnId, c.ShortAccidentCircumstances);
             TryAddStringColumn(columnValues, _mondaySettings.AdditionalIdentificationColumnId, c.AdditionalIdentification);
-            TryAddLongTextColumn(columnValues, _mondaySettings.ClaimVersionsColumnId, c.ClaimVersions);
+            // "גרסאות תביעה" and "גרסאות הגנה" are intentionally NOT sent to Monday
             TryAddDateColumn(columnValues, _mondaySettings.PleadingDeadlineDateColumnId, c.PleadingDeadlineDate);
-            TryAddLongTextColumn(columnValues, _mondaySettings.DefenseVersionsColumnId, c.DefenseVersions);
+            TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany1ColumnId, c.InsuranceCompany1Name);
+            TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany1AddressColumnId, c.InsuranceCompany1Address);
             TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany2ColumnId, c.InsuranceCompany2);
             TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany2AddressColumnId, c.InsuranceCompany2Address);
             TryAddStringColumn(columnValues, _mondaySettings.ProceedingTypeColumnId, c.ProceedingType);
@@ -3117,9 +3118,9 @@ namespace Odmon.Worker.Services
             AppendStr(sb, c.ClaimStreet);
             AppendStr(sb, c.ShortAccidentCircumstances);
             AppendStr(sb, c.AdditionalIdentification);
-            AppendStr(sb, c.ClaimVersions);
             AppendDate(sb, c.PleadingDeadlineDate);
-            AppendStr(sb, c.DefenseVersions);
+            AppendStr(sb, c.InsuranceCompany1Name);
+            AppendStr(sb, c.InsuranceCompany1Address);
             AppendStr(sb, c.InsuranceCompany2);
             AppendStr(sb, c.InsuranceCompany2Address);
             AppendStr(sb, c.ProceedingType);
