@@ -32,6 +32,8 @@ These settings map Odcanit fields to specific Monday.com column IDs. They have s
 
 | Config Key | Environment Variable | Type | Default | Description |
 |------------|---------------------|------|---------|-------------|
+| `Monday:ThirdPartyLawyerEmailColumnId` | `Monday__ThirdPartyLawyerEmailColumnId` | string | `email_mky2vqm3` | Column for דוא"ל עו"ד צד ג' (third-party lawyer email). |
+| `Monday:ThirdPartyLawyerFaxColumnId` | `Monday__ThirdPartyLawyerFaxColumnId` | string | `text_mkxe2zay` | Column for פקס עו"ד צד ג' (third-party lawyer fax). |
 | `Monday:AdditionalIdentificationColumnId` | `Monday__AdditionalIdentificationColumnId` | string | `text_mm1gvfd5` | Column for זיהוי נוסף (additional identification). |
 | `Monday:ClaimVersionsColumnId` | `Monday__ClaimVersionsColumnId` | string | `long_text_mm1gsvg0` | Column for גרסאות תביעה (claim versions). |
 | `Monday:PleadingDeadlineDateColumnId` | `Monday__PleadingDeadlineDateColumnId` | string | `date_mm1gex5r` | Column for תאריך אחרון להגשת כתב הטענות (pleading deadline date). |

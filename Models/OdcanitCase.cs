@@ -138,6 +138,8 @@ namespace Odmon.Worker.Models
         [NotMapped]
         public string? ThirdPartyLawyerEmail { get; set; }
         [NotMapped]
+        public string? ThirdPartyLawyerFax { get; set; }
+        [NotMapped]
         public string? ThirdPartyInsurerName { get; set; }
         [NotMapped]
         public string? InsuranceCompanyId { get; set; }
@@ -147,7 +149,7 @@ namespace Odmon.Worker.Models
         public string? InsuranceCompanyEmail { get; set; }
         [NotMapped]
         public string? CourtName { get; set; }
-        /// <summary>Court name from legal UserData "שם בית משפט" only — the sole source for Monday column text_mkxez28d.</summary>
+        /// <summary>Court city from legal UserData "עיר בית משפט" — the sole source for Monday column text_mkxez28d.</summary>
         [NotMapped]
         public string? LegalCourtName { get; set; }
         [NotMapped]

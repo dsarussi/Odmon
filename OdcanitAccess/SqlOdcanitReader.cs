@@ -685,6 +685,14 @@ namespace Odmon.Worker.OdcanitAccess
                     odcanitCase.DriverPhone ?? "<null>");
 
                 _logger.LogDebug(
+                    "Mapped ThirdPartyLawyerEmail='{Email}', ThirdPartyLawyerFax='{Fax}', ThirdPartyLawyerAddress='{Address}', CourtName from 'עיר בית משפט'='{LegalCourtName}' for TikCounter {TikCounter}",
+                    odcanitCase.ThirdPartyLawyerEmail ?? "<null>",
+                    odcanitCase.ThirdPartyLawyerFax ?? "<null>",
+                    odcanitCase.ThirdPartyLawyerAddress ?? "<null>",
+                    odcanitCase.LegalCourtName ?? "<null>",
+                    odcanitCase.TikCounter);
+
+                _logger.LogDebug(
                     "ADDRESS MAPPING | TikCounter={TikCounter} | PolicyHolderAddress='{PolicyHolderAddress}' | PlaintiffAddress='{PlaintiffAddress}' | DefenseStreet='{DefenseStreet}' | PlaintiffAddressFromUserData={FromUserData}",
                     odcanitCase.TikCounter,
                     odcanitCase.PolicyHolderAddress ?? "<null>",
@@ -786,8 +794,13 @@ namespace Odmon.Worker.OdcanitAccess
             Add("כתובת מעסיק צד ג'", (c, row) => c.ThirdPartyEmployerAddress = row.strData);
             Add("עו\"ד צד ג", (c, row) => c.ThirdPartyLawyerName = row.strData);
             Add("כתובת עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerAddress = row.strData);
+            Add("כתובת עו\"ד צד ג", (c, row) => c.ThirdPartyLawyerAddress = row.strData);
             Add("טלפון עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerPhone = row.strData);
             Add("כתובת דוא\"ל עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerEmail = row.strData);
+            Add("כתובת מייל עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerEmail = row.strData);
+            Add("כתובת מייל עו\"ד צד ג", (c, row) => c.ThirdPartyLawyerEmail = row.strData);
+            Add("פקס עו\"ד צד ג'", (c, row) => c.ThirdPartyLawyerFax = row.strData);
+            Add("פקס עו\"ד צד ג", (c, row) => c.ThirdPartyLawyerFax = row.strData);
             Add("חברה מבטחת צד ג'", (c, row) => c.ThirdPartyInsurerName = row.strData);
             Add("Third-party driver: insurer name", (c, row) => c.ThirdPartyInsurerName = row.strData);
             Add("מוכן למאנדיי", (c, row) => c.IsReadyForMonday = string.Equals(row.strData?.Trim(), "כן", StringComparison.Ordinal));
@@ -847,12 +860,11 @@ namespace Odmon.Worker.OdcanitAccess
                 }
             });
 
-            Add("שם בית משפט", (c, row) =>
+            Add("עיר בית משפט", (c, row) =>
             {
                 var name = row.strData?.Trim();
                 if (!string.IsNullOrWhiteSpace(name))
                 {
-                    c.CourtName = name;
                     c.LegalCourtName = name;
                 }
             });

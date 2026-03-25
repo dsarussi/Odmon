@@ -114,9 +114,10 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | מספר זהות מעסיק צד ג' | text_mkwjfkbm | `OdcanitCase.ThirdPartyEmployerId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "מספר זהות מעסיק צד ג'") |
 | כתובת מעסיק צד ג' | text_mkwjgpd2 | `OdcanitCase.ThirdPartyEmployerAddress` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת מעסיק צד ג'") |
 | עו"ד צד ג | text_mkwj1w08 | `OdcanitCase.ThirdPartyLawyerName` | From legal user data (FieldName: "עו\"ד צד ג" only). |
-| כתובת עו"ד צד ג' | text_mkwjdzdg | `OdcanitCase.ThirdPartyLawyerAddress` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת עו\"ד צד ג'") |
+| כתובת עו"ד צד ג' | text_mkwjdzdg | `OdcanitCase.ThirdPartyLawyerAddress` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת עו\"ד צד ג'", "כתובת עו\"ד צד ג") |
 | טלפון עו"ד צד ג' | phone_mkwjfge2 | `OdcanitCase.ThirdPartyLawyerPhone` (normalized) | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "טלפון עו\"ד צד ג'"). Normalized to E.164 format |
-| דוא"ל עו"ד צד ג' | email_mkwj4mmk | `OdcanitCase.ThirdPartyLawyerEmail` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת דוא\"ל עו\"ד צד ג'") |
+| דוא"ל עו"ד צד ג' | email_mky2vqm3 | `OdcanitCase.ThirdPartyLawyerEmail` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת דוא\"ל עו\"ד צד ג'", "כתובת מייל עו\"ד צד ג'", "כתובת מייל עו\"ד צד ג") |
+| פקס עו"ד צד ג' | text_mkxe2zay | `OdcanitCase.ThirdPartyLawyerFax` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "פקס עו\"ד צד ג'", "פקס עו\"ד צד ג") |
 
 ### Insurance Company Information
 
@@ -136,7 +137,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | Monday Column | Column ID | Odcanit Source | Notes |
 |--------------|-----------|----------------|-------|
 | שם בית משפט | ~~color_mkwj24j~~ (removed — column does not exist on board) | `OdcanitCase.CourtName` | Was status column; removed from sync payload. |
-| שם בית משפט (text) | text_mkxez28d | `OdcanitCase.LegalCourtName` | From legal UserData (vwExportToOuterSystems_UserData, FieldName: "שם בית משפט"). **Not** from diary events or CourtCity. |
+| עיר בית משפט | text_mkxez28d | `OdcanitCase.LegalCourtName` | From legal UserData (vwExportToOuterSystems_UserData, FieldName: "עיר בית משפט"). **Not** from diary events, Hozlap, or any other source. Replaced previous "שם בית משפט" source. |
 | מספר הליך בית משפט | text_mkwj3kf4 | `OdcanitCase.CourtCaseNumber` | From legal user data (FieldName: "מספר הליך בית משפט") or Hozlap data |
 | שם שופט | text_mkwjne8v | `OdcanitCase.HearingJudgeName` | From hearing diary events only (vwDiaryEvents). Not populated from legal UserData. |
 

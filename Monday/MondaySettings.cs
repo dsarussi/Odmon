@@ -63,7 +63,9 @@ namespace Odmon.Worker.Monday
         public string? ThirdPartyLawyerNameColumnId { get; set; } = "text_mkwj1w08";
         public string? ThirdPartyLawyerAddressColumnId { get; set; } = "text_mkwjdzdg";
         public string? ThirdPartyLawyerPhoneColumnId { get; set; } = "phone_mkwjfge2";
-        public string? ThirdPartyLawyerEmailColumnId { get; set; } = "email_mkwj4mmk";
+        public string? ThirdPartyLawyerEmailColumnId { get; set; } = "email_mky2vqm3";
+        /// <summary>פקס עו"ד צד ג' — third-party lawyer fax text column.</summary>
+        public string? ThirdPartyLawyerFaxColumnId { get; set; } = "text_mkxe2zay";
         public string? CourtNameStatusColumnId { get; set; }
         public string? CourtCityColumnId { get; set; } = "text_mkxez28d";
         public string? CourtCaseNumberColumnId { get; set; } = "text_mkwj3kf4";

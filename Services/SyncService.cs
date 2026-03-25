@@ -1118,7 +1118,8 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerAddressColumnId, c.ThirdPartyLawyerAddress);
             TryAddPhoneColumn(columnValues, _mondaySettings.ThirdPartyLawyerPhoneColumnId, c.ThirdPartyLawyerPhone, c.TikCounter, "Third-party lawyer phone");
             TryAddEmailColumn(columnValues, _mondaySettings.ThirdPartyLawyerEmailColumnId, c.ThirdPartyLawyerEmail);
-            // Court name (text_mkxez28d) from legal UserData "שם בית משפט" only:
+            TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyLawyerFaxColumnId, c.ThirdPartyLawyerFax);
+            // Court city (text_mkxez28d) from legal UserData "עיר בית משפט" only:
             TryAddStringColumn(columnValues, _mondaySettings.CourtCityColumnId, c.LegalCourtName);
             TryAddStringColumn(columnValues, _mondaySettings.CourtCaseNumberColumnId, c.CourtCaseNumber);
             TryAddStringColumn(columnValues, _mondaySettings.AttorneyNameColumnId, c.AttorneyName);
@@ -3110,6 +3111,7 @@ namespace Odmon.Worker.Services
             AppendStr(sb, c.ThirdPartyLawyerName);
             AppendStr(sb, c.ThirdPartyLawyerAddress);
             AppendStr(sb, c.ThirdPartyLawyerEmail);
+            AppendStr(sb, c.ThirdPartyLawyerFax);
             AppendStr(sb, c.CourtName);
             AppendStr(sb, c.LegalCourtName);
             AppendStr(sb, c.CourtCaseNumber);
