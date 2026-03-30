@@ -95,12 +95,20 @@ namespace Odmon.Worker.Workers
 
                     if (ex is SqlException sqlEx && SqlConnectionFailureDetector.IsConnectionFailure(sqlEx))
                     {
+                        var isTimeout = SqlConnectionFailureDetector.IsQueryTimeout(sqlEx);
+                        var alertType = isTimeout
+                            ? "IntegrationDb Query Timeout"
+                            : "Database Connection Lost";
+                        var alertSubject = isTimeout
+                            ? $"IntegrationDb query timeout during document ingestion (SqlError={sqlEx.Number})"
+                            : "Database connection lost during document ingestion";
+
                         _emailNotifier.QueueCriticalAlert(
-                            "Database connection lost during document ingestion",
+                            alertSubject,
                             ex.Message + (ex.StackTrace != null ? "\n\n" + ex.StackTrace[..Math.Min(500, ex.StackTrace.Length)] : ""),
                             exceptionType: ex.GetType().Name,
                             source: "DocumentIngestionWorker",
-                            alertType: "Database Connection Lost");
+                            alertType: alertType);
                     }
                     else
                     {

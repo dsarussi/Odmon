@@ -111,12 +111,24 @@ namespace Odmon.Worker.Workers
 
                     if (ex is SqlException sqlEx && SqlConnectionFailureDetector.IsConnectionFailure(sqlEx))
                     {
+                        var isTimeout = SqlConnectionFailureDetector.IsQueryTimeout(sqlEx);
+                        var alertType = isTimeout
+                            ? "IntegrationDb Query Timeout"
+                            : "Database Connection Lost";
+                        var alertSubject = isTimeout
+                            ? $"IntegrationDb query timeout during sync (SqlError={sqlEx.Number})"
+                            : "Database connection lost during sync";
+
+                        _logger.LogError(
+                            "SQL failure classified as {AlertType}: SqlErrorNumber={SqlErrorNumber}, Message={Message}",
+                            alertType, sqlEx.Number, sqlEx.Message);
+
                         _emailNotifier.QueueCriticalAlert(
-                            "Database connection lost during sync",
+                            alertSubject,
                             ex.Message + (ex.StackTrace != null ? "\n\n" + ex.StackTrace[..Math.Min(500, ex.StackTrace.Length)] : ""),
                             exceptionType: ex.GetType().Name,
                             source: "SyncWorker",
-                            alertType: "Database Connection Lost");
+                            alertType: alertType);
                     }
 
                     try

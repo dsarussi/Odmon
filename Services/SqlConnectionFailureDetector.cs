@@ -3,16 +3,19 @@ using Microsoft.Data.SqlClient;
 namespace Odmon.Worker.Services
 {
     /// <summary>
-    /// Deterministic check for SQL connection-related failures (for critical alerts).
+    /// Deterministic check for SQL failure classification (for critical alerts).
     /// Uses explicit error numbers only; no free-text matching.
     /// </summary>
     public static class SqlConnectionFailureDetector
     {
-        /// <summary>SQL Server error numbers that indicate connection/timeout/network failure.</summary>
-        private static readonly HashSet<int> ConnectionErrorNumbers = new()
+        private static readonly HashSet<int> TimeoutErrorNumbers = new()
         {
-            -1,    // Timeout
-            -2,    // Timeout
+            -1,    // General timeout / transport-level
+            -2,    // Command execution timeout (CommandTimeout exceeded)
+        };
+
+        private static readonly HashSet<int> NetworkErrorNumbers = new()
+        {
             2,     // Network-related
             53,    // Network path not found
             64,    // Network error
@@ -23,10 +26,25 @@ namespace Odmon.Worker.Services
             20     // Fatal connection
         };
 
+        /// <summary>True for query/command timeouts (error -1, -2).</summary>
+        public static bool IsQueryTimeout(SqlException ex)
+        {
+            if (ex == null) return false;
+            return TimeoutErrorNumbers.Contains(ex.Number);
+        }
+
+        /// <summary>True for network/connection failures (does NOT include query timeouts).</summary>
+        public static bool IsNetworkFailure(SqlException ex)
+        {
+            if (ex == null) return false;
+            return NetworkErrorNumbers.Contains(ex.Number);
+        }
+
+        /// <summary>True for either timeout or network failure (backward-compatible).</summary>
         public static bool IsConnectionFailure(SqlException ex)
         {
             if (ex == null) return false;
-            return ConnectionErrorNumbers.Contains(ex.Number);
+            return IsQueryTimeout(ex) || IsNetworkFailure(ex);
         }
     }
 }

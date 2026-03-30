@@ -54,14 +54,9 @@ namespace Odmon.Worker.Services
             var odcanitTikCounters = await _odcanitReader.GetTikCountersSinceCutoffAsync(cutoffDate, ct);
             result.TotalFromOdcanit = odcanitTikCounters.Count;
 
-            // 2) Query IntegrationDb: all TikCounters already mapped for this board
-            var mappedTikCounters = await _integrationDb.MondayItemMappings
-                .AsNoTracking()
-                .Where(m => m.BoardId == boardId)
-                .Select(m => m.TikCounter)
-                .Distinct()
-                .ToListAsync(ct);
-            var mappedSet = new HashSet<int>(mappedTikCounters);
+            // 2) Query IntegrationDb: which of these candidates are already mapped?
+            //    Uses candidate-scoped batched lookup (never board-wide DISTINCT).
+            var mappedSet = await LoadMappedTikCountersForCandidatesAsync(boardId, odcanitTikCounters, ct);
             result.AlreadyMapped = mappedSet.Count;
 
             // 3) Compute: eligible = odcanitTikCounters EXCEPT mappedTikCounters

@@ -260,15 +260,10 @@ namespace Odmon.Worker.Services
                 eligibleFromOdcanitCount = eligibleFromOdcanit.Count;
                 var eligibleOdcanitSet = new HashSet<int>(eligibleFromOdcanit);
 
-                // B) mapped: all TikCounters with a mapping for this board
-                var mappedTikCounters = await _integrationDb.MondayItemMappings
-                    .AsNoTracking()
-                    .Where(m => m.BoardId == boardIdToUse)
-                    .Select(m => m.TikCounter)
-                    .Distinct()
-                    .ToListAsync(ct);
-                mappedCount = mappedTikCounters.Count;
-                var mappedSet = new HashSet<int>(mappedTikCounters);
+                // B) mapped: which of the eligible candidates have a mapping for this board?
+                //    Uses candidate-scoped batched lookup (never board-wide DISTINCT).
+                var mappedSet = await LoadMappedTikCountersForCandidatesAsync(boardIdToUse, eligibleFromOdcanit, ct);
+                mappedCount = mappedSet.Count;
 
                 // C) eligibleMapped = INTERSECT
                 var eligibleMappedSet = new HashSet<int>(eligibleOdcanitSet);
@@ -3401,6 +3396,96 @@ namespace Odmon.Worker.Services
             }
 
             return false;
+        }
+
+        // ====================================================================
+        // Candidate-scoped mapping lookup (replaces board-wide DISTINCT preload)
+        // ====================================================================
+
+        /// <summary>
+        /// Loads mapped TikCounters from IntegrationDb scoped to the given candidates.
+        /// Uses batched queries with progressive retry and per-case fallback.
+        /// Never throws — returns partial results on persistent failure.
+        /// </summary>
+        private async Task<HashSet<int>> LoadMappedTikCountersForCandidatesAsync(
+            long boardId,
+            IReadOnlyList<int> candidateTikCounters,
+            CancellationToken ct)
+        {
+            if (candidateTikCounters.Count == 0)
+                return new HashSet<int>();
+
+            var result = new HashSet<int>();
+            const int initialBatchSize = 100;
+            var sw = Stopwatch.StartNew();
+
+            _logger.LogInformation(
+                "MAPPING_LOOKUP | Starting candidate-scoped lookup: CandidateCount={CandidateCount}, BoardId={BoardId}, BatchSize={BatchSize}",
+                candidateTikCounters.Count, boardId, initialBatchSize);
+
+            var pending = new List<int>(candidateTikCounters);
+            int batchSize = initialBatchSize;
+            int totalAttempts = 0;
+
+            while (pending.Count > 0 && batchSize >= 1)
+            {
+                var failedItems = new List<int>();
+
+                for (int i = 0; i < pending.Count; i += batchSize)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    var batch = pending.Skip(i).Take(batchSize).ToList();
+                    totalAttempts++;
+
+                    try
+                    {
+                        var mapped = await _integrationDb.MondayItemMappings
+                            .AsNoTracking()
+                            .Where(m => m.BoardId == boardId && batch.Contains(m.TikCounter))
+                            .Select(m => m.TikCounter)
+                            .Distinct()
+                            .ToListAsync(ct);
+
+                        foreach (var tc in mapped)
+                            result.Add(tc);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(
+                            "MAPPING_LOOKUP | Batch query failed: Attempt={Attempt}, BatchSize={BatchSize}, BoardId={BoardId}, ItemCount={ItemCount}, Error={Error}",
+                            totalAttempts, batch.Count, boardId, batch.Count, ex.Message);
+                        failedItems.AddRange(batch);
+                    }
+                }
+
+                if (failedItems.Count == 0)
+                    break;
+
+                if (batchSize <= 1)
+                {
+                    _logger.LogWarning(
+                        "MAPPING_LOOKUP | Per-case fallback exhausted. SkippedCount={SkippedCount}, BoardId={BoardId}. " +
+                        "These TikCounters will be treated as unmapped (safe: per-case race check prevents duplicates).",
+                        failedItems.Count, boardId);
+                    break;
+                }
+
+                batchSize = Math.Max(1, batchSize / 2);
+                pending = failedItems;
+
+                _logger.LogWarning(
+                    "MAPPING_LOOKUP | Retrying failed items with smaller batches: NewBatchSize={NewBatchSize}, RemainingCount={Remaining}, BoardId={BoardId}",
+                    batchSize, pending.Count, boardId);
+            }
+
+            sw.Stop();
+            _logger.LogInformation(
+                "MAPPING_LOOKUP | Completed: MappedCount={MappedCount}, CandidateCount={CandidateCount}, Attempts={Attempts}, BoardId={BoardId}, Duration={DurationMs}ms",
+                result.Count, candidateTikCounters.Count, totalAttempts, boardId, sw.ElapsedMilliseconds);
+
+            return result;
         }
 
         /// <summary>
