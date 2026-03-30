@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -177,20 +178,22 @@ namespace Odmon.Worker.Workers
                 var (startUtc, endUtc) = GetYesterdayIsraelUtcRange(israelTz, yesterdayIsrael);
 
                 // Section 1 — Overview counts (yesterday Israel time)
-                var casesCreatedCount = await db.MondayItemMappings
-                    .AsNoTracking()
-                    .Where(m => m.CreatedAtUtc >= startUtc && m.CreatedAtUtc <= endUtc)
-                    .CountAsync(ct);
+                // MondayItemMappings counts use NOLOCK to avoid lock-wait timeout
+                // during concurrent sync writes (same rationale as SyncService bulk lookup).
+                var casesCreatedCount = (await db.Database.SqlQueryRaw<int>(
+                    @"SELECT COUNT(*) AS [Value] FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE CreatedAtUtc >= @start AND CreatedAtUtc <= @end",
+                    new SqlParameter("@start", startUtc),
+                    new SqlParameter("@end", endUtc)).ToListAsync(ct)).FirstOrDefault();
 
                 var hearingsSyncedCount = await db.HearingNearestSnapshots
                     .AsNoTracking()
                     .Where(h => h.LastSyncedAtUtc >= startUtc && h.LastSyncedAtUtc <= endUtc)
                     .CountAsync(ct);
 
-                var itemsUpdatedCount = await db.MondayItemMappings
-                    .AsNoTracking()
-                    .Where(m => m.LastSyncFromOdcanitUtc >= startUtc && m.LastSyncFromOdcanitUtc <= endUtc)
-                    .CountAsync(ct);
+                var itemsUpdatedCount = (await db.Database.SqlQueryRaw<int>(
+                    @"SELECT COUNT(*) AS [Value] FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE LastSyncFromOdcanitUtc >= @start AND LastSyncFromOdcanitUtc <= @end",
+                    new SqlParameter("@start", startUtc),
+                    new SqlParameter("@end", endUtc)).ToListAsync(ct)).FirstOrDefault();
 
                 var allFailuresInWindow = await db.SyncFailures
                     .AsNoTracking()
@@ -206,19 +209,22 @@ namespace Odmon.Worker.Workers
                     .ToList();
                 var realFailureCount = groupedFailures.Count;
 
-                // Section 2 — Cases created yesterday (table)
+                // Section 2 — Cases created yesterday (table, NOLOCK)
                 var casesCreated = await db.MondayItemMappings
+                    .FromSqlRaw("SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK)")
                     .AsNoTracking()
                     .Where(m => m.CreatedAtUtc >= startUtc && m.CreatedAtUtc <= endUtc)
                     .OrderBy(m => m.CreatedAtUtc)
                     .Select(m => new { m.TikNumber, m.CreatedAtUtc })
                     .ToListAsync(ct);
 
-                // Section 3 — Hearings synced yesterday (proxy for hearing activity; label clearly)
+                // Section 3 — Hearings synced yesterday (proxy for hearing activity; NOLOCK on mappings)
+                var mappingsNolock = db.MondayItemMappings
+                    .FromSqlRaw("SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK)");
                 var hearingsSynced = await (
                     from h in db.HearingNearestSnapshots.AsNoTracking()
                     where h.LastSyncedAtUtc >= startUtc && h.LastSyncedAtUtc <= endUtc
-                    join m in db.MondayItemMappings.AsNoTracking() on h.TikCounter equals m.TikCounter
+                    join m in mappingsNolock on h.TikCounter equals m.TikCounter
                     orderby h.LastSyncedAtUtc
                     select new { m.TikNumber, h.LastSyncedAtUtc }
                 ).ToListAsync(ct);

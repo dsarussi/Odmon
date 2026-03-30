@@ -87,9 +87,11 @@ namespace Odmon.Worker.Services
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.Id == 1, ct);
 
+            // NOLOCK: same rationale as SyncService bulk lookup — avoids lock-wait
+            // timeout from concurrent sync writes to MondayItemMappings.
             var allMappings = await _integrationDb.MondayItemMappings
+                .FromSqlRaw("SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE BoardId = {0}", boardId)
                 .AsNoTracking()
-                .Where(m => m.BoardId == boardId)
                 .ToListAsync(ct);
 
             List<MondayItemMapping> mappings;
