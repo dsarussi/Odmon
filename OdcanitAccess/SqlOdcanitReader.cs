@@ -812,6 +812,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("שם מוסך", (c, row) => c.GarageName = row.strData);
             Add("שם תובע", (c, row) => c.PlaintiffName = row.strData);
             Add("ת.ז. תובע", (c, row) => c.PlaintiffId = row.strData);
+            Add("ת.ז תובע", (c, row) => c.PlaintiffId = row.strData);
             Add("כתובת תובע", (c, row) =>
             {
                 if (!string.IsNullOrWhiteSpace(row.strData))
@@ -820,6 +821,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("סלולרי תובע", (c, row) => c.PlaintiffPhone = row.strData);
             Add("כתובת דוא\"ל תובע", (c, row) => c.PlaintiffEmail = row.strData);
             Add("שם נתבע", (c, row) => c.DefendantName = row.strData);
+            Add("ת.ז נתבע", (c, row) => c.DefendantId = row.strData);
             Add("פקס", (c, row) => c.DefendantFax = row.strData);
             Add("צד תובע", (c, row) => c.PlaintiffSideRaw = row.strData);
             Add("צד נתבע", (c, row) => c.DefendantSideRaw = row.strData);

@@ -1101,6 +1101,7 @@ namespace Odmon.Worker.Services
             TryAddPhoneColumn(columnValues, _mondaySettings.PlaintiffPhoneColumnId, c.PlaintiffPhone, c.TikCounter, "Plaintiff phone");
             TryAddEmailColumn(columnValues, _mondaySettings.PlaintiffEmailColumnId, c.PlaintiffEmail);
             TryAddStringColumn(columnValues, _mondaySettings.DefendantNameColumnId, c.DefendantName);
+            TryAddStringColumn(columnValues, _mondaySettings.DefendantIdColumnId, c.DefendantId);
             TryAddStringColumn(columnValues, _mondaySettings.DefendantFaxColumnId, c.DefendantFax);
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyDriverNameColumnId, c.ThirdPartyDriverName);
             TryAddStringColumn(columnValues, _mondaySettings.ThirdPartyDriverIdColumnId, c.ThirdPartyDriverId);
@@ -3097,6 +3098,7 @@ namespace Odmon.Worker.Services
             AppendStr(sb, c.PlaintiffAddress);
             AppendStr(sb, c.PlaintiffEmail);
             AppendStr(sb, c.DefendantName);
+            AppendStr(sb, c.DefendantId);
             AppendStr(sb, c.DefendantFax);
             AppendStr(sb, c.ThirdPartyDriverName);
             AppendStr(sb, c.ThirdPartyDriverId);

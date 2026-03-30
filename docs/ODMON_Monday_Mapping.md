@@ -91,7 +91,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | Monday Column | Column ID | Odcanit Source | Notes |
 |--------------|-----------|----------------|-------|
 | שם תובע | text_mkwj5k8e | `OdcanitCase.PlaintiffName` | From vwSides where SideTypeName indicates Plaintiff role |
-| תעודת זהות תובע | text_mkwj82zd | `OdcanitCase.PlaintiffId` | From vwSides (ID field) |
+| ת.ז תובע | text_mm1sq8bs | `OdcanitCase.PlaintiffId` | From vwSides (ID field) or legal user data (FieldName: "ת.ז. תובע", "ת.ז תובע") |
 | כתובת תובע | text_mm1b2eaz | `OdcanitCase.PlaintiffAddress` | From vwSides (FullAddress field) |
 | טלפון תובע | phone_mkwjm44s | `OdcanitCase.PlaintiffPhone` (normalized) | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "סלולרי תובע"). Normalized to E.164 format |
 | דוא"ל תובע | email_mkwjy4rs | `OdcanitCase.PlaintiffEmail` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת דוא\"ל תובע") |
@@ -101,7 +101,8 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | Monday Column | Column ID | Odcanit Source | Notes |
 |--------------|-----------|----------------|-------|
 | שם נתבע | text_mkxeabj2 | `OdcanitCase.DefendantName` | From vwSides where SideTypeName indicates Defendant role |
-| פקס | text_mkxe2zay | `OdcanitCase.DefendantFax` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "פקס") |
+| ת.ז נתבע | text_mm1ye90m | `OdcanitCase.DefendantId` | From vwSides (ID) or legal user data (FieldName: "ת.ז נתבע") |
+| ~~פקס~~ | ~~text_mkxe2zay~~ | `OdcanitCase.DefendantFax` | **No longer sent to Monday** — column text_mkxe2zay is now used exclusively by ThirdPartyLawyerFax. DefendantFax is still read into the model. |
 
 ### Third Party Information
 
@@ -116,7 +117,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | עו"ד צד ג | text_mkwj1w08 | `OdcanitCase.ThirdPartyLawyerName` | From legal user data (FieldName: "עו\"ד צד ג" only). |
 | כתובת עו"ד צד ג' | text_mkwjdzdg | `OdcanitCase.ThirdPartyLawyerAddress` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת עו\"ד צד ג'", "כתובת עו\"ד צד ג") |
 | טלפון עו"ד צד ג' | phone_mkwjfge2 | `OdcanitCase.ThirdPartyLawyerPhone` (normalized) | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "טלפון עו\"ד צד ג'"). Normalized to E.164 format |
-| דוא"ל עו"ד צד ג' | email_mky2vqm3 | `OdcanitCase.ThirdPartyLawyerEmail` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת דוא\"ל עו\"ד צד ג'", "כתובת מייל עו\"ד צד ג'", "כתובת מייל עו\"ד צד ג") |
+| דוא"ל עו"ד צד ג' | email_mkwj4mmk | `OdcanitCase.ThirdPartyLawyerEmail` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "כתובת דוא\"ל עו\"ד צד ג'", "כתובת מייל עו\"ד צד ג'", "כתובת מייל עו\"ד צד ג") |
 | פקס עו"ד צד ג' | text_mkxe2zay | `OdcanitCase.ThirdPartyLawyerFax` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "פקס עו\"ד צד ג'", "פקס עו\"ד צד ג") |
 
 ### Insurance Company Information

@@ -43,12 +43,15 @@ namespace Odmon.Worker.Monday
         public string? WitnessNameColumnId { get; set; } = "text_mkwjt62y";
         public string? AdditionalDefendantsColumnId { get; set; } = "long_text_mkwjhngq";
         public string? PlaintiffNameColumnId { get; set; } = "text_mkwj5k8e";
-        public string? PlaintiffIdColumnId { get; set; } = "text_mkwj82zd";
+        public string? PlaintiffIdColumnId { get; set; } = "text_mm1sq8bs";
         public string? PlaintiffAddressColumnId { get; set; } = "text_mm1b2eaz";
         public string? PlaintiffPhoneColumnId { get; set; } = "phone_mkwe10tx";
         public string? PlaintiffEmailColumnId { get; set; } = "email_mkwjy4rs";
         public string? DefendantNameColumnId { get; set; } = "text_mkxeabj2";
-        public string? DefendantFaxColumnId { get; set; } = "text_mkxe2zay";
+        /// <summary>ת.ז נתבע — defendant ID text column.</summary>
+        public string? DefendantIdColumnId { get; set; } = "text_mm1ye90m";
+        /// <summary>Defendant fax — no dedicated Monday column; set null to avoid conflict with ThirdPartyLawyerFaxColumnId (text_mkxe2zay).</summary>
+        public string? DefendantFaxColumnId { get; set; }
         public string? ThirdPartyDriverNameColumnId { get; set; } = "text_mkwj9bvj";
         public string? ThirdPartyDriverIdColumnId { get; set; } = "text_mkwjmad2";
         public string? ThirdPartyCarNumberColumnId { get; set; } = "text_mky2df4d";
@@ -63,7 +66,7 @@ namespace Odmon.Worker.Monday
         public string? ThirdPartyLawyerNameColumnId { get; set; } = "text_mkwj1w08";
         public string? ThirdPartyLawyerAddressColumnId { get; set; } = "text_mkwjdzdg";
         public string? ThirdPartyLawyerPhoneColumnId { get; set; } = "phone_mkwjfge2";
-        public string? ThirdPartyLawyerEmailColumnId { get; set; } = "email_mky2vqm3";
+        public string? ThirdPartyLawyerEmailColumnId { get; set; } = "email_mkwj4mmk";
         /// <summary>פקס עו"ד צד ג' — third-party lawyer fax text column.</summary>
         public string? ThirdPartyLawyerFaxColumnId { get; set; } = "text_mkxe2zay";
         public string? CourtNameStatusColumnId { get; set; }
