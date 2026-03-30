@@ -32,6 +32,9 @@ These settings map Odcanit fields to specific Monday.com column IDs. They have s
 
 | Config Key | Environment Variable | Type | Default | Description |
 |------------|---------------------|------|---------|-------------|
+| `Monday:PlaintiffIdColumnId` | `Monday__PlaintiffIdColumnId` | string | `text_mm1sq8bs` | Column for ת.ז תובע (plaintiff ID). |
+| `Monday:DefendantIdColumnId` | `Monday__DefendantIdColumnId` | string | `text_mm1ye90m` | Column for ת.ז נתבע (defendant ID). |
+| `Monday:DefendantFaxColumnId` | `Monday__DefendantFaxColumnId` | string | `null` | Defendant fax — no dedicated Monday column. Set null to avoid conflict with ThirdPartyLawyerFaxColumnId. |
 | `Monday:ThirdPartyLawyerEmailColumnId` | `Monday__ThirdPartyLawyerEmailColumnId` | string | `email_mkwj4mmk` | Column for דוא"ל עו"ד צד ג' (third-party lawyer email). |
 | `Monday:ThirdPartyLawyerFaxColumnId` | `Monday__ThirdPartyLawyerFaxColumnId` | string | `text_mkxe2zay` | Column for פקס עו"ד צד ג' (third-party lawyer fax). |
 | `Monday:AdditionalIdentificationColumnId` | `Monday__AdditionalIdentificationColumnId` | string | `text_mm1gvfd5` | Column for זיהוי נוסף (additional identification). |

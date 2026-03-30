@@ -9,6 +9,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Globalization;
+using Microsoft.Data.SqlClient;
 using Odmon.Worker.OdcanitAccess;
 using Odmon.Worker.Data;
 using Odmon.Worker.Monday;
@@ -3399,13 +3400,32 @@ namespace Odmon.Worker.Services
         }
 
         // ====================================================================
-        // Candidate-scoped mapping lookup (replaces board-wide DISTINCT preload)
+        // Candidate-scoped mapping lookup — READ UNCOMMITTED (NOLOCK)
+        //
+        // WHY: MondayItemMappings rows are written during sync (INSERT on
+        //      bootstrap create, UPDATE on reconcile).  Under the default
+        //      READ COMMITTED isolation the reader blocks behind those row/
+        //      page locks, reliably timing out the 30 s CommandTimeout even
+        //      on a 431-row table.  Confirmed: the same query succeeds
+        //      immediately under READ UNCOMMITTED.
+        //
+        // SAFETY: This lookup is used only to *partition* candidates into
+        //      "already-mapped" vs "unmapped".  Both paths have per-case
+        //      race-safety checks (FirstOrDefaultAsync) that run under
+        //      normal isolation before any write, so a dirty read here
+        //      cannot cause duplicate creation or missed updates.
+        //
+        // SCOPE: The NOLOCK hint is applied only to this single query via
+        //      a raw SQL statement; no global isolation-level change.
         // ====================================================================
 
         /// <summary>
-        /// Loads mapped TikCounters from IntegrationDb scoped to the given candidates.
-        /// Uses batched queries with progressive retry and per-case fallback.
-        /// Never throws — returns partial results on persistent failure.
+        /// Queries MondayItemMappings WITH (NOLOCK) for a set of candidate
+        /// TikCounters, returning those that already have a mapping for the
+        /// given board.  Uses batched parameterized SQL with progressive
+        /// retry and per-case fallback.  Never throws — returns partial
+        /// results on persistent failure (safe: per-case race check
+        /// prevents duplicates).
         /// </summary>
         private async Task<HashSet<int>> LoadMappedTikCountersForCandidatesAsync(
             long boardId,
@@ -3420,7 +3440,7 @@ namespace Odmon.Worker.Services
             var sw = Stopwatch.StartNew();
 
             _logger.LogInformation(
-                "MAPPING_LOOKUP | Starting candidate-scoped lookup: CandidateCount={CandidateCount}, BoardId={BoardId}, BatchSize={BatchSize}",
+                "MAPPING_LOOKUP | Starting candidate-scoped NOLOCK lookup: CandidateCount={CandidateCount}, BoardId={BoardId}, InitialBatchSize={BatchSize}",
                 candidateTikCounters.Count, boardId, initialBatchSize);
 
             var pending = new List<int>(candidateTikCounters);
@@ -3440,13 +3460,7 @@ namespace Odmon.Worker.Services
 
                     try
                     {
-                        var mapped = await _integrationDb.MondayItemMappings
-                            .AsNoTracking()
-                            .Where(m => m.BoardId == boardId && batch.Contains(m.TikCounter))
-                            .Select(m => m.TikCounter)
-                            .Distinct()
-                            .ToListAsync(ct);
-
+                        var mapped = await QueryMappedTikCountersNolockAsync(boardId, batch, ct);
                         foreach (var tc in mapped)
                             result.Add(tc);
                     }
@@ -3486,6 +3500,36 @@ namespace Odmon.Worker.Services
                 result.Count, candidateTikCounters.Count, totalAttempts, boardId, sw.ElapsedMilliseconds);
 
             return result;
+        }
+
+        /// <summary>
+        /// Executes a parameterized raw SQL query against MondayItemMappings
+        /// WITH (NOLOCK) for a single batch of TikCounters.
+        /// Returns the distinct TikCounters that have a mapping row.
+        /// </summary>
+        private async Task<List<int>> QueryMappedTikCountersNolockAsync(
+            long boardId,
+            IReadOnlyList<int> tikCounterBatch,
+            CancellationToken ct)
+        {
+            var paramNames = new string[tikCounterBatch.Count];
+            var sqlParams = new SqlParameter[tikCounterBatch.Count + 1];
+            sqlParams[0] = new SqlParameter("@boardId", boardId);
+
+            for (int i = 0; i < tikCounterBatch.Count; i++)
+            {
+                paramNames[i] = $"@tc{i}";
+                sqlParams[i + 1] = new SqlParameter(paramNames[i], tikCounterBatch[i]);
+            }
+
+            var sql = $@"SELECT DISTINCT m.TikCounter
+FROM dbo.MondayItemMappings m WITH (NOLOCK)
+WHERE m.BoardId = @boardId
+  AND m.TikCounter IN ({string.Join(",", paramNames)})";
+
+            return await _integrationDb.Database
+                .SqlQueryRaw<int>(sql, sqlParams)
+                .ToListAsync(ct);
         }
 
         /// <summary>
