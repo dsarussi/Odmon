@@ -2527,13 +2527,18 @@ namespace Odmon.Worker.Services
             string lookupMethod = "none";
 
             // Priority 1: Find mapping by TikCounter + BoardId (source of truth)
-                mapping = await _integrationDb.MondayItemMappings
-                .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter && m.BoardId == boardId, ct);
-                
-                if (mapping != null)
-                {
+            // Uses NOLOCK via FromSqlRaw to avoid lock-wait timeout from concurrent
+            // sync writes.  Entity is still change-tracked for subsequent mutations.
+            mapping = await _integrationDb.MondayItemMappings
+                .FromSqlRaw(
+                    "SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE TikCounter = {0} AND BoardId = {1}",
+                    c.TikCounter, boardId)
+                .FirstOrDefaultAsync(ct);
+
+            if (mapping != null)
+            {
                 lookupMethod = "mapping_by_tikcounter_boardid";
-                    _logger.LogDebug(
+                _logger.LogDebug(
                     "Found mapping by TikCounter+BoardId: TikCounter={TikCounter}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikNumber={TikNumber}",
                     c.TikCounter, boardId, mapping.MondayItemId, mapping.TikNumber ?? "<null>");
             }
@@ -2542,7 +2547,10 @@ namespace Odmon.Worker.Services
             if (mapping == null)
             {
                 mapping = await _integrationDb.MondayItemMappings
-                    .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter, ct);
+                    .FromSqlRaw(
+                        "SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE TikCounter = {0}",
+                        c.TikCounter)
+                    .FirstOrDefaultAsync(ct);
                 
                 if (mapping != null)
                 {
