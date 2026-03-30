@@ -72,11 +72,13 @@ namespace Odmon.Worker.Services
                 }
 
                 // Only items with an existing mapping on the cases board
+                // NOLOCK: avoids lock-wait timeout from concurrent sync writes.
                 var mapping = await _integrationDb.MondayItemMappings
+                    .FromSqlRaw(
+                        "SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE TikCounter = {0} AND BoardId = {1}",
+                        c.TikCounter, casesBoardId)
                     .AsNoTracking()
-                    .FirstOrDefaultAsync(
-                        m => m.TikCounter == c.TikCounter && m.BoardId == casesBoardId,
-                        ct);
+                    .FirstOrDefaultAsync(ct);
 
                 if (mapping == null)
                 {
