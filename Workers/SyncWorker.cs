@@ -18,6 +18,7 @@ namespace Odmon.Worker.Workers
         private readonly IErrorNotifier _errorNotifier;
         private readonly IEmailNotifier _emailNotifier;
         private readonly IHostEnvironment _hostEnv;
+        private readonly WorkerCoordinator _coordinator;
 
         // Heartbeat state
         private DateTime _workerStartedAtUtc;
@@ -31,7 +32,8 @@ namespace Odmon.Worker.Workers
             IConfiguration config,
             IErrorNotifier errorNotifier,
             IEmailNotifier emailNotifier,
-            IHostEnvironment hostEnv)
+            IHostEnvironment hostEnv,
+            WorkerCoordinator coordinator)
         {
             _scopeFactory = scopeFactory;
             _logger = logger;
@@ -39,6 +41,7 @@ namespace Odmon.Worker.Workers
             _errorNotifier = errorNotifier;
             _emailNotifier = emailNotifier;
             _hostEnv = hostEnv;
+            _coordinator = coordinator;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -91,6 +94,15 @@ namespace Odmon.Worker.Workers
                 var runId = Guid.NewGuid().ToString("N")[..12];
                 try
                 {
+                    using var lease = await _coordinator.TryAcquireAsync("SyncWorker", stoppingToken);
+                    if (lease == null)
+                    {
+                        _logger.LogInformation(
+                            "COORDINATION | SyncWorker skipping run {RunId} — {ActiveWorker} is active",
+                            runId, _coordinator.ActiveWorker ?? "unknown");
+                        continue;
+                    }
+
                     using var scope = _scopeFactory.CreateScope();
                     var syncService = scope.ServiceProvider.GetRequiredService<SyncService>();
 
@@ -107,8 +119,8 @@ namespace Odmon.Worker.Workers
                 catch (Exception ex)
                 {
                     _totalFailures++;
-                    _logger.LogCritical(ex, "WORKER CRASH during Odcanit->Monday sync. RunId={RunId}", runId);
 
+                    // Classify: query timeout vs network vs general crash
                     if (ex is SqlException sqlEx && SqlConnectionFailureDetector.IsConnectionFailure(sqlEx))
                     {
                         var isTimeout = SqlConnectionFailureDetector.IsQueryTimeout(sqlEx);
@@ -119,9 +131,9 @@ namespace Odmon.Worker.Workers
                             ? $"IntegrationDb query timeout during sync (SqlError={sqlEx.Number})"
                             : "Database connection lost during sync";
 
-                        _logger.LogError(
-                            "SQL failure classified as {AlertType}: SqlErrorNumber={SqlErrorNumber}, Message={Message}",
-                            alertType, sqlEx.Number, sqlEx.Message);
+                        _logger.LogError(ex,
+                            "SQL failure classified as {AlertType}: SqlErrorNumber={SqlErrorNumber}, RunId={RunId}",
+                            alertType, sqlEx.Number, runId);
 
                         _emailNotifier.QueueCriticalAlert(
                             alertSubject,
@@ -129,6 +141,10 @@ namespace Odmon.Worker.Workers
                             exceptionType: ex.GetType().Name,
                             source: "SyncWorker",
                             alertType: alertType);
+                    }
+                    else
+                    {
+                        _logger.LogCritical(ex, "WORKER CRASH during Odcanit->Monday sync. RunId={RunId}", runId);
                     }
 
                     try

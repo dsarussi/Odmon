@@ -15,6 +15,7 @@ namespace Odmon.Worker.Workers
         private readonly ILogger<DocumentIngestionWorker> _logger;
         private readonly IConfiguration _config;
         private readonly IEmailNotifier _emailNotifier;
+        private readonly WorkerCoordinator _coordinator;
 
         private DateTime _workerStartedAtUtc;
         private int _totalRunsCompleted;
@@ -24,12 +25,14 @@ namespace Odmon.Worker.Workers
             IServiceScopeFactory scopeFactory,
             ILogger<DocumentIngestionWorker> logger,
             IConfiguration config,
-            IEmailNotifier emailNotifier)
+            IEmailNotifier emailNotifier,
+            WorkerCoordinator coordinator)
         {
             _scopeFactory = scopeFactory;
             _logger = logger;
             _config = config;
             _emailNotifier = emailNotifier;
+            _coordinator = coordinator;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -73,6 +76,15 @@ namespace Odmon.Worker.Workers
                 var runId = Guid.NewGuid().ToString("N")[..12];
                 try
                 {
+                    using var lease = await _coordinator.TryAcquireAsync("DocumentIngestionWorker", stoppingToken);
+                    if (lease == null)
+                    {
+                        _logger.LogInformation(
+                            "COORDINATION | DocumentIngestionWorker skipping run {RunId} — {ActiveWorker} is active",
+                            runId, _coordinator.ActiveWorker ?? "unknown");
+                        continue;
+                    }
+
                     _logger.LogInformation("DocumentIngestionWorker run {RunId} starting", runId);
 
                     using var scope = _scopeFactory.CreateScope();
@@ -90,8 +102,6 @@ namespace Odmon.Worker.Workers
                 catch (Exception ex)
                 {
                     _totalFailures++;
-                    _logger.LogCritical(ex,
-                        "DocumentIngestionWorker CRASH during run {RunId}", runId);
 
                     if (ex is SqlException sqlEx && SqlConnectionFailureDetector.IsConnectionFailure(sqlEx))
                     {
@@ -103,6 +113,10 @@ namespace Odmon.Worker.Workers
                             ? $"IntegrationDb query timeout during document ingestion (SqlError={sqlEx.Number})"
                             : "Database connection lost during document ingestion";
 
+                        _logger.LogError(ex,
+                            "SQL failure classified as {AlertType}: SqlErrorNumber={SqlErrorNumber}, RunId={RunId}",
+                            alertType, sqlEx.Number, runId);
+
                         _emailNotifier.QueueCriticalAlert(
                             alertSubject,
                             ex.Message + (ex.StackTrace != null ? "\n\n" + ex.StackTrace[..Math.Min(500, ex.StackTrace.Length)] : ""),
@@ -112,6 +126,9 @@ namespace Odmon.Worker.Workers
                     }
                     else
                     {
+                        _logger.LogCritical(ex,
+                            "DocumentIngestionWorker CRASH during run {RunId}", runId);
+
                         _emailNotifier.QueueCriticalAlert(
                             $"DocumentIngestionWorker crash (run {runId})",
                             $"Exception: {ex.Message}\nType: {ex.GetType().Name}\nStack: {ex.StackTrace?[..Math.Min(ex.StackTrace?.Length ?? 0, 500)]}",

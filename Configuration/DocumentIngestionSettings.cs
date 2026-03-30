@@ -112,6 +112,9 @@ namespace Odmon.Worker.Configuration
         public int CommandTimeoutSeconds { get; set; } = 60;
         public int ItemsPageLimit { get; set; } = 50;
 
+        /// <summary>Delay in ms between processing individual items to reduce DB pressure. 0 = no delay.</summary>
+        public int ItemProcessingDelayMs { get; set; } = 300;
+
         public AccidentStorySettings AccidentStory { get; set; } = new();
 
         /// <summary>Backward compat: if set and AccidentStory.Columns is empty, treated as single-column config.</summary>

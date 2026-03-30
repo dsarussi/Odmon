@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Odmon.Worker.Data;
 using Odmon.Worker.Models;
 using Odmon.Worker.Services;
@@ -24,7 +25,7 @@ namespace Odmon.Worker.Tests
         public async Task GetOrCreateStateAsync_NoRow_CreatesAndReturnsUnwritten()
         {
             await using var db = CreateInMemoryContext();
-            var repo = new CaseAnnexWriteStateRepository(db);
+            var repo = new CaseAnnexWriteStateRepository(db, NullLogger<CaseAnnexWriteStateRepository>.Instance);
 
             var state = await repo.GetOrCreateStateAsync(39283, default);
 
@@ -38,7 +39,7 @@ namespace Odmon.Worker.Tests
         public async Task MarkAccidentStoryWrittenAsync_ThenGetOrCreate_ReturnsWrittenTrue()
         {
             await using var db = CreateInMemoryContext();
-            var repo = new CaseAnnexWriteStateRepository(db);
+            var repo = new CaseAnnexWriteStateRepository(db, NullLogger<CaseAnnexWriteStateRepository>.Instance);
 
             await repo.GetOrCreateStateAsync(39283, default);
             await repo.MarkAccidentStoryWrittenAsync(39283, "run-abc", default);
@@ -53,7 +54,7 @@ namespace Odmon.Worker.Tests
         public async Task GetOrCreateStateAsync_AlreadyWritten_ReturnsSameState()
         {
             await using var db = CreateInMemoryContext();
-            var repo = new CaseAnnexWriteStateRepository(db);
+            var repo = new CaseAnnexWriteStateRepository(db, NullLogger<CaseAnnexWriteStateRepository>.Instance);
             await repo.GetOrCreateStateAsync(1, default);
             await repo.MarkAccidentStoryWrittenAsync(1, "run-1", default);
 
@@ -70,7 +71,7 @@ namespace Odmon.Worker.Tests
         public async Task DedupHit_MarkWritten_SetsFlagAndStopsReprocessing()
         {
             await using var db = CreateInMemoryContext();
-            var repo = new CaseAnnexWriteStateRepository(db);
+            var repo = new CaseAnnexWriteStateRepository(db, NullLogger<CaseAnnexWriteStateRepository>.Instance);
             await repo.GetOrCreateStateAsync(39283, default);
 
             // Simulate what DocumentIngestionService does on dedup hit (2601/2627): mark written so next run skips.
@@ -101,7 +102,7 @@ namespace Odmon.Worker.Tests
         public async Task SuccessPath_MarkAccidentStoryWrittenAsync_CalledOnce_StatePersisted()
         {
             await using var db = CreateInMemoryContext();
-            var repo = new CaseAnnexWriteStateRepository(db);
+            var repo = new CaseAnnexWriteStateRepository(db, NullLogger<CaseAnnexWriteStateRepository>.Instance);
             await repo.GetOrCreateStateAsync(39283, default);
 
             await repo.MarkAccidentStoryWrittenAsync(39283, "run-success", default);

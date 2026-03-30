@@ -103,6 +103,9 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            _logger.LogInformation("DOCINGESTION | Processing {ItemCount} questionnaire items, DelayMs={DelayMs}",
+                items.Count, _settings.ItemProcessingDelayMs);
+
             foreach (var item in items)
             {
                 if (ct.IsCancellationRequested) break;
@@ -115,11 +118,14 @@ namespace Odmon.Worker.Services
                 {
                     _logger.LogError(ex, "DOCINGESTION unhandled error processing questionnaire item {ItemId}", item.ItemId);
                 }
+
+                if (_settings.ItemProcessingDelayMs > 0)
+                    await Task.Delay(_settings.ItemProcessingDelayMs, ct);
             }
 
             sourceSw.Stop();
-            _logger.LogInformation("DOCINGESTION SOURCE COMPLETE | Source=Questionnaire, BoardId={BoardId}, Elapsed={ElapsedMs}ms",
-                boardId, sourceSw.ElapsedMilliseconds);
+            _logger.LogInformation("DOCINGESTION SOURCE COMPLETE | Source=Questionnaire, BoardId={BoardId}, Items={ItemCount}, Elapsed={ElapsedMs}ms",
+                boardId, items.Count, sourceSw.ElapsedMilliseconds);
         }
 
         private async Task ProcessTasksSourceAsync(CancellationToken ct)
@@ -184,6 +190,9 @@ namespace Odmon.Worker.Services
                     {
                         _logger.LogError(ex, "TASKDOC unhandled error | ItemId={ItemId}", taskItem.ItemId);
                     }
+
+                    if (_settings.ItemProcessingDelayMs > 0)
+                        await Task.Delay(_settings.ItemProcessingDelayMs, ct);
                 }
             }
             catch (Exception ex)

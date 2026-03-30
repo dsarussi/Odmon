@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Odmon.Worker.Data;
 using Odmon.Worker.Models;
 
@@ -7,15 +9,28 @@ namespace Odmon.Worker.Services
     public class CaseAnnexWriteStateRepository : ICaseAnnexWriteStateRepository
     {
         private readonly IntegrationDbContext _db;
+        private readonly ILogger<CaseAnnexWriteStateRepository> _logger;
 
-        public CaseAnnexWriteStateRepository(IntegrationDbContext db)
+        private const int SlowQueryThresholdMs = 5000;
+
+        public CaseAnnexWriteStateRepository(IntegrationDbContext db, ILogger<CaseAnnexWriteStateRepository> logger)
         {
             _db = db;
+            _logger = logger;
         }
 
         public async Task<CaseAnnexWriteState> GetOrCreateStateAsync(int tikCounter, CancellationToken ct = default)
         {
-            var state = await _db.CaseAnnexWriteStates.AsNoTracking().FirstOrDefaultAsync(s => s.TikCounter == tikCounter, ct);
+            var sw = Stopwatch.StartNew();
+            var state = await _db.CaseAnnexWriteStates
+                .AsNoTracking()
+                .FirstOrDefaultAsync(s => s.TikCounter == tikCounter, ct);
+            sw.Stop();
+
+            if (sw.ElapsedMilliseconds >= SlowQueryThresholdMs)
+                _logger.LogWarning("SLOW_QUERY | CaseAnnexWriteState lookup: {ElapsedMs}ms, TikCounter={TikCounter}",
+                    sw.ElapsedMilliseconds, tikCounter);
+
             if (state != null)
                 return state;
 

@@ -735,15 +735,37 @@ namespace Odmon.Worker.Services
 
             // Phase-2: hearing approval write-back runs even when main sync skips/no-change
             stageTimer.Restart();
-            await _hearingApprovalSyncService.SyncAsync(batch, ct);
-            stageTimer.Stop();
-            _logger.LogInformation("Stage: HearingApprovalSync completed in {ElapsedMs}ms", stageTimer.ElapsedMilliseconds);
+            try
+            {
+                await _hearingApprovalSyncService.SyncAsync(batch, ct);
+                stageTimer.Stop();
+                _logger.LogInformation("Stage: HearingApprovalSync completed in {ElapsedMs}ms", stageTimer.ElapsedMilliseconds);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (IsMondayApiFailure(ex))
+            {
+                stageTimer.Stop();
+                _logger.LogWarning(ex,
+                    "MONDAY_API_FAILURE | HearingApprovalSync skipped — Monday returned a server error. Duration={ElapsedMs}ms",
+                    stageTimer.ElapsedMilliseconds);
+            }
 
             // Nearest hearing sync: update Monday hearing date/judge/city/status from vwExportToOuterSystems_YomanData
             stageTimer.Restart();
-            await _hearingNearestSyncService.SyncNearestHearingsAsync(boardIdToUse, ct);
-            stageTimer.Stop();
-            _logger.LogInformation("Stage: HearingNearestSync completed in {ElapsedMs}ms", stageTimer.ElapsedMilliseconds);
+            try
+            {
+                await _hearingNearestSyncService.SyncNearestHearingsAsync(boardIdToUse, ct);
+                stageTimer.Stop();
+                _logger.LogInformation("Stage: HearingNearestSync completed in {ElapsedMs}ms", stageTimer.ElapsedMilliseconds);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (IsMondayApiFailure(ex))
+            {
+                stageTimer.Stop();
+                _logger.LogWarning(ex,
+                    "MONDAY_API_FAILURE | HearingNearestSync skipped — Monday returned a server error. Duration={ElapsedMs}ms",
+                    stageTimer.ElapsedMilliseconds);
+            }
 
             // ── SYNC RUN SUMMARY ──
             _logger.LogInformation(
@@ -3365,6 +3387,28 @@ namespace Odmon.Worker.Services
                     "CIRCUIT BREAKER TRIPPED – {ConsecutiveFailures} consecutive Monday API failures reached threshold {Threshold}",
                     _consecutiveMondayFailures, threshold);
             }
+        }
+
+        /// <summary>
+        /// Returns true if the exception is caused by a Monday API server failure
+        /// (5xx, HttpRequestException wrapping a server error, etc.).
+        /// Used to skip optional sync phases without crashing the worker.
+        /// </summary>
+        private static bool IsMondayApiFailure(Exception ex)
+        {
+            if (ex is HttpRequestException) return true;
+            if (ex is Monday.MondayApiException mondayEx)
+            {
+                if (mondayEx.InnerException is HttpRequestException) return true;
+                var msg = mondayEx.Message ?? "";
+                if (msg.Contains("500", StringComparison.Ordinal)
+                    || msg.Contains("502", StringComparison.Ordinal)
+                    || msg.Contains("503", StringComparison.Ordinal)
+                    || msg.Contains("504", StringComparison.Ordinal)
+                    || msg.Contains("server error", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>
