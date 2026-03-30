@@ -3533,6 +3533,29 @@ WHERE m.BoardId = @boardId
         }
 
         /// <summary>
+        /// Per-case existence check against MondayItemMappings WITH (NOLOCK).
+        /// Used as the pre-INSERT race-safety guard in bootstrap; same NOLOCK
+        /// rationale as <see cref="QueryMappedTikCountersNolockAsync"/>:
+        /// the unique index on TikCounter is the true duplicate barrier,
+        /// this check is an optimization to avoid unnecessary Monday API calls.
+        /// </summary>
+        private async Task<bool> MappingExistsNolockAsync(
+            int tikCounter, long boardId, CancellationToken ct)
+        {
+            const string sql = @"SELECT TOP(1) 1
+FROM dbo.MondayItemMappings WITH (NOLOCK)
+WHERE TikCounter = @tikCounter AND BoardId = @boardId";
+
+            var result = await _integrationDb.Database
+                .SqlQueryRaw<int>(sql,
+                    new SqlParameter("@tikCounter", tikCounter),
+                    new SqlParameter("@boardId", boardId))
+                .ToListAsync(ct);
+
+            return result.Count > 0;
+        }
+
+        /// <summary>
         /// Persists a failed case to the SyncFailures table for later inspection and reprocessing.
         /// </summary>
         private async Task PersistSyncFailureAsync(

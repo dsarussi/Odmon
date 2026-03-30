@@ -180,10 +180,10 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
-                // Check again that no mapping was created between the initial check and now (race safety)
-                var existingMapping = await _integrationDb.MondayItemMappings
-                    .FirstOrDefaultAsync(m => m.TikCounter == c.TikCounter && m.BoardId == boardId, ct);
-                if (existingMapping != null)
+                // Race-safety: re-check with NOLOCK (same pattern as bulk lookup;
+                // unique index on TikCounter is the true duplicate barrier).
+                var alreadyMapped = await MappingExistsNolockAsync(c.TikCounter, boardId, ct);
+                if (alreadyMapped)
                 {
                     result.AlreadyMapped++;
                     _logger.LogDebug(
