@@ -55,8 +55,8 @@ namespace Odmon.Worker.Services
             result.TotalFromOdcanit = odcanitTikCounters.Count;
 
             // 2) Query IntegrationDb: which of these candidates are already mapped?
-            //    Uses candidate-scoped batched lookup (never board-wide DISTINCT).
-            var mappedSet = await LoadMappedTikCountersForCandidatesAsync(boardId, odcanitTikCounters, ct);
+            //    Uses candidate-scoped batched NOLOCK lookup (never board-wide DISTINCT).
+            var mappedSet = await _mappingReader.GetMappedTikCountersForCandidatesAsync(boardId, odcanitTikCounters, ct);
             result.AlreadyMapped = mappedSet.Count;
 
             // 3) Compute: eligible = odcanitTikCounters EXCEPT mappedTikCounters
@@ -182,7 +182,7 @@ namespace Odmon.Worker.Services
 
                 // Race-safety: re-check with NOLOCK (same pattern as bulk lookup;
                 // unique index on TikCounter is the true duplicate barrier).
-                var alreadyMapped = await MappingExistsNolockAsync(c.TikCounter, boardId, ct);
+                var alreadyMapped = await _mappingReader.ExistsAsync(c.TikCounter, boardId, ct);
                 if (alreadyMapped)
                 {
                     result.AlreadyMapped++;

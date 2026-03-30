@@ -39,6 +39,7 @@ namespace Odmon.Worker.Services
         private readonly MondaySettings _mondaySettings;
         private readonly ILogger<HearingNearestSyncService> _logger;
         private readonly ISkipLogger _skipLogger;
+        private readonly MondayMappingReadService _mappingReader;
 
         public HearingNearestSyncService(
             IOdcanitReader odcanitReader,
@@ -48,7 +49,8 @@ namespace Odmon.Worker.Services
             IConfiguration config,
             IOptions<MondaySettings> mondayOptions,
             ILogger<HearingNearestSyncService> logger,
-            ISkipLogger skipLogger)
+            ISkipLogger skipLogger,
+            MondayMappingReadService mappingReader)
         {
             _odcanitReader = odcanitReader;
             _integrationDb = integrationDb;
@@ -58,6 +60,7 @@ namespace Odmon.Worker.Services
             _mondaySettings = mondayOptions.Value ?? new MondaySettings();
             _logger = logger;
             _skipLogger = skipLogger;
+            _mappingReader = mappingReader;
         }
 
         /// <summary>
@@ -87,12 +90,7 @@ namespace Odmon.Worker.Services
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.Id == 1, ct);
 
-            // NOLOCK: same rationale as SyncService bulk lookup — avoids lock-wait
-            // timeout from concurrent sync writes to MondayItemMappings.
-            var allMappings = await _integrationDb.MondayItemMappings
-                .FromSqlRaw("SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE BoardId = {0}", boardId)
-                .AsNoTracking()
-                .ToListAsync(ct);
+            var allMappings = await _mappingReader.GetAllByBoardReadOnlyAsync(boardId, ct);
 
             List<MondayItemMapping> mappings;
             if (listenerState != null)

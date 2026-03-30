@@ -26,6 +26,7 @@ namespace Odmon.Worker.Services
         private readonly IConfiguration _config;
         private readonly MondaySettings _mondaySettings;
         private readonly ILogger<HearingApprovalSyncService> _logger;
+        private readonly MondayMappingReadService _mappingReader;
 
         public HearingApprovalSyncService(
             IntegrationDbContext integrationDb,
@@ -33,7 +34,8 @@ namespace Odmon.Worker.Services
             IOdcanitWriter odcanitWriter,
             IConfiguration config,
             IOptions<MondaySettings> mondayOptions,
-            ILogger<HearingApprovalSyncService> logger)
+            ILogger<HearingApprovalSyncService> logger,
+            MondayMappingReadService mappingReader)
         {
             _integrationDb = integrationDb;
             _mondayClient = mondayClient;
@@ -41,6 +43,7 @@ namespace Odmon.Worker.Services
             _config = config;
             _mondaySettings = mondayOptions.Value;
             _logger = logger;
+            _mappingReader = mappingReader;
         }
 
         public async Task SyncAsync(IEnumerable<OdcanitCase> cases, CancellationToken ct)
@@ -72,13 +75,7 @@ namespace Odmon.Worker.Services
                 }
 
                 // Only items with an existing mapping on the cases board
-                // NOLOCK: avoids lock-wait timeout from concurrent sync writes.
-                var mapping = await _integrationDb.MondayItemMappings
-                    .FromSqlRaw(
-                        "SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE TikCounter = {0} AND BoardId = {1}",
-                        c.TikCounter, casesBoardId)
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(ct);
+                var mapping = await _mappingReader.FindReadOnlyAsync(c.TikCounter, casesBoardId, ct);
 
                 if (mapping == null)
                 {

@@ -138,6 +138,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddScoped<IOdcanitWriter, SqlOdcanitWriter>();
     services.AddScoped<ISkipLogger, SkipLogger>();
     services.AddSingleton<IErrorNotifier, LogOnlyErrorNotifier>();
+    services.AddScoped<MondayMappingReadService>();
     services.AddScoped<HearingApprovalSyncService>();
     services.AddScoped<HearingNearestSyncService>();
     services.AddScoped<TokenResolverService>();

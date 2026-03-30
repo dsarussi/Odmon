@@ -26,6 +26,7 @@ namespace Odmon.Worker.Services
         private readonly IMondayMetadataProvider _metadataProvider;
         private readonly HearingBackfillSettings _settings;
         private readonly ILogger<HearingBackfillService> _logger;
+        private readonly MondayMappingReadService _mappingReader;
 
         private const string StatusLabel = "תיק נמצא באמצע תהליך";
 
@@ -44,13 +45,15 @@ namespace Odmon.Worker.Services
             IMondayClient mondayClient,
             IMondayMetadataProvider metadataProvider,
             IOptions<HearingBackfillSettings> settings,
-            ILogger<HearingBackfillService> logger)
+            ILogger<HearingBackfillService> logger,
+            MondayMappingReadService mappingReader)
         {
             _db = db;
             _mondayClient = mondayClient;
             _metadataProvider = metadataProvider;
             _settings = settings.Value;
             _logger = logger;
+            _mappingReader = mappingReader;
         }
 
         public async Task<HearingBackfillResult> RunAsync(CancellationToken ct = default)
@@ -106,11 +109,7 @@ OFFSET {0} ROWS FETCH NEXT {1} ROWS ONLY";
                 var alreadyMapped = new HashSet<string>(StringComparer.Ordinal);
                 if (tikNumbers.Count > 0)
                 {
-                    var mapped = await _db.MondayItemMappings
-                        .AsNoTracking()
-                        .Where(m => m.BoardId == boardId && tikNumbers.Contains(m.TikNumber ?? ""))
-                        .Select(m => m.TikNumber!)
-                        .ToListAsync(ct);
+                    var mapped = await _mappingReader.GetMappedTikNumbersAsync(boardId, tikNumbers, ct);
                     foreach (var t in mapped)
                         alreadyMapped.Add(t);
                 }
@@ -179,10 +178,7 @@ OFFSET {0} ROWS FETCH NEXT {1} ROWS ONLY";
 
         private async Task<int> GetNextBackfillTikCounterAsync(long boardId, CancellationToken ct)
         {
-            var min = await _db.MondayItemMappings
-                .Where(m => m.BoardId == boardId && m.TikCounter < 0)
-                .Select(m => (int?)m.TikCounter)
-                .MinAsync(ct);
+            var min = await _mappingReader.GetMinNegativeTikCounterAsync(boardId, ct);
             return (min ?? 0) - 1;
         }
 
