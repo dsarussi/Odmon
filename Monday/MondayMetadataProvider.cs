@@ -19,6 +19,16 @@ namespace Odmon.Worker.Monday
         private readonly HttpClient _httpClient;
         private readonly ILogger<MondayMetadataProvider> _logger;
         private readonly Dictionary<long, BoardMetadataCacheEntry> _boardMetadataCache = new();
+        private readonly object _allowedLabelsCacheLock = new();
+        private readonly Dictionary<AllowedLabelsCacheKey, HashSet<string>> _allowedLabelsCache = new();
+
+        private enum AllowedLabelsKind
+        {
+            Dropdown = 0,
+            Status = 1
+        }
+
+        private readonly record struct AllowedLabelsCacheKey(long BoardId, string ColumnId, AllowedLabelsKind Kind);
 
         public MondayMetadataProvider(
             HttpClient httpClient,
@@ -183,9 +193,10 @@ namespace Odmon.Worker.Monday
                 };
             }
 
-            // Cache on success only
+            // Cache on success only; drop parsed label cache so it matches fresh settings_str
             lock (_boardMetadataCache)
             {
+                InvalidateAllowedLabelsForBoardUnsafe(boardId);
                 _boardMetadataCache[boardId] = new BoardMetadataCacheEntry
                 {
                     Columns = result,
@@ -227,6 +238,10 @@ namespace Odmon.Worker.Monday
 
         public async Task<HashSet<string>> GetAllowedDropdownLabelsAsync(long boardId, string columnId, CancellationToken ct = default)
         {
+            var cacheKey = new AllowedLabelsCacheKey(boardId, columnId, AllowedLabelsKind.Dropdown);
+            if (TryGetCachedAllowedLabels(cacheKey, "dropdown", out var cachedCopy))
+                return cachedCopy;
+
             try
             {
                 var columns = await GetBoardColumnsMetadataAsync(boardId, ct);
@@ -294,23 +309,16 @@ namespace Odmon.Worker.Monday
 
                 if (labels.Count > 0)
                 {
-                    _logger.LogInformation(
-                        "Resolved {Count} allowed label(s) for column {ColumnId} on board {BoardId}: [{Labels}]",
-                        labels.Count, columnId, boardId,
-                        string.Join(", ", labels));
-                }
-                else
-                {
-                    _logger.LogError(
-                        "No labels found for DROPDOWN column {ColumnId} on board {BoardId}. Settings parsed but labels array was empty or invalid. This should not happen for a valid dropdown column.",
-                        columnId, boardId);
-
-                    throw new InvalidOperationException(
-                        $"No labels found for dropdown column {columnId} on board {boardId}. " +
-                        $"Settings parsed but labels array was empty or invalid.");
+                    return RememberAllowedLabels(cacheKey, labels, columnId, boardId, isStatus: false);
                 }
 
-                return labels;
+                _logger.LogError(
+                    "No labels found for DROPDOWN column {ColumnId} on board {BoardId}. Settings parsed but labels array was empty or invalid. This should not happen for a valid dropdown column.",
+                    columnId, boardId);
+
+                throw new InvalidOperationException(
+                    $"No labels found for dropdown column {columnId} on board {boardId}. " +
+                    $"Settings parsed but labels array was empty or invalid.");
             }
             catch (Exception ex)
             {
@@ -335,6 +343,10 @@ namespace Odmon.Worker.Monday
 
         public async Task<HashSet<string>> GetAllowedStatusLabelsAsync(long boardId, string columnId, CancellationToken ct = default)
         {
+            var cacheKey = new AllowedLabelsCacheKey(boardId, columnId, AllowedLabelsKind.Status);
+            if (TryGetCachedAllowedLabels(cacheKey, "status", out var cachedCopy))
+                return cachedCopy;
+
             try
             {
                 var columns = await GetBoardColumnsMetadataAsync(boardId, ct);
@@ -371,12 +383,15 @@ namespace Odmon.Worker.Monday
                 var settingsRoot = settingsDoc.RootElement;
 
                 var labels = new HashSet<string>(StringComparer.Ordinal);
+                JsonElement labelsElement = default;
+                var hasLabelsElement = false;
 
                 // STATUS columns: labels is a DICTIONARY where values are the label strings
                 // Example: {"labels": {"0": "כתב תביעה", "1": "כתב הגנה", "11": "תצהיר עד ראשי"}}
-                if (settingsRoot.TryGetProperty("labels", out var labelsElement) &&
+                if (settingsRoot.TryGetProperty("labels", out labelsElement) &&
                     labelsElement.ValueKind == JsonValueKind.Object)
                 {
+                    hasLabelsElement = true;
                     foreach (var labelProperty in labelsElement.EnumerateObject())
                     {
                         var labelValue = labelProperty.Value.GetString();
@@ -391,32 +406,26 @@ namespace Odmon.Worker.Monday
                 }
                 else
                 {
+                    hasLabelsElement = settingsRoot.TryGetProperty("labels", out labelsElement);
                     _logger.LogWarning(
                         "Status column {ColumnId} on board {BoardId} has settings_str but 'labels' is not an object. ValueKind: {ValueKind}, SettingsStr keys: {SettingsKeys}",
                         columnId, boardId,
-                        labelsElement.ValueKind,
+                        hasLabelsElement ? labelsElement.ValueKind : JsonValueKind.Undefined,
                         string.Join(", ", settingsRoot.EnumerateObject().Select(p => p.Name)));
                 }
 
                 if (labels.Count > 0)
                 {
-                    _logger.LogInformation(
-                        "Resolved {Count} allowed STATUS label(s) for column {ColumnId} on board {BoardId}: [{Labels}]",
-                        labels.Count, columnId, boardId,
-                        string.Join(", ", labels));
-                }
-                else
-                {
-                    _logger.LogError(
-                        "No labels found for STATUS column {ColumnId} on board {BoardId}. Settings parsed but labels object was empty or invalid. This should not happen for a valid status column.",
-                        columnId, boardId);
-
-                    throw new InvalidOperationException(
-                        $"No labels found for status column {columnId} on board {boardId}. " +
-                        $"Settings parsed but labels object was empty or invalid.");
+                    return RememberAllowedLabels(cacheKey, labels, columnId, boardId, isStatus: true);
                 }
 
-                return labels;
+                _logger.LogError(
+                    "No labels found for STATUS column {ColumnId} on board {BoardId}. Settings parsed but labels object was empty or invalid. This should not happen for a valid status column.",
+                    columnId, boardId);
+
+                throw new InvalidOperationException(
+                    $"No labels found for status column {columnId} on board {boardId}. " +
+                    $"Settings parsed but labels object was empty or invalid.");
             }
             catch (Exception ex)
             {
@@ -433,6 +442,79 @@ namespace Odmon.Worker.Monday
                     $"This is likely an infrastructure issue (auth/network/config). Exception: {ex.Message}",
                     ex);
             }
+        }
+
+        private void InvalidateAllowedLabelsForBoardUnsafe(long boardId)
+        {
+            lock (_allowedLabelsCacheLock)
+            {
+                var toRemove = new List<AllowedLabelsCacheKey>();
+                foreach (var key in _allowedLabelsCache.Keys)
+                {
+                    if (key.BoardId == boardId)
+                        toRemove.Add(key);
+                }
+
+                foreach (var key in toRemove)
+                    _allowedLabelsCache.Remove(key);
+            }
+        }
+
+        private bool TryGetCachedAllowedLabels(AllowedLabelsCacheKey key, string kindLabel, out HashSet<string> clone)
+        {
+            lock (_allowedLabelsCacheLock)
+            {
+                if (_allowedLabelsCache.TryGetValue(key, out var stored))
+                {
+                    _logger.LogDebug(
+                        "Using cached allowed {Kind} labels for column {ColumnId} on board {BoardId} ({Count} label(s))",
+                        kindLabel, key.ColumnId, key.BoardId, stored.Count);
+                    clone = new HashSet<string>(stored, StringComparer.Ordinal);
+                    return true;
+                }
+            }
+
+            clone = null!;
+            return false;
+        }
+
+        private HashSet<string> RememberAllowedLabels(
+            AllowedLabelsCacheKey key,
+            HashSet<string> labels,
+            string columnId,
+            long boardId,
+            bool isStatus)
+        {
+            var stored = new HashSet<string>(labels, StringComparer.Ordinal);
+            lock (_allowedLabelsCacheLock)
+            {
+                if (_allowedLabelsCache.TryGetValue(key, out var existing))
+                {
+                    _logger.LogDebug(
+                        "Using cached allowed {Kind} labels for column {ColumnId} on board {BoardId} ({Count} label(s)) [after concurrent resolve]",
+                        isStatus ? "status" : "dropdown", columnId, boardId, existing.Count);
+                    return new HashSet<string>(existing, StringComparer.Ordinal);
+                }
+
+                _allowedLabelsCache[key] = stored;
+            }
+
+            if (isStatus)
+            {
+                _logger.LogInformation(
+                    "Resolved {Count} allowed STATUS label(s) for column {ColumnId} on board {BoardId}: [{Labels}]",
+                    stored.Count, columnId, boardId,
+                    string.Join(", ", stored));
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Resolved {Count} allowed label(s) for column {ColumnId} on board {BoardId}: [{Labels}]",
+                    stored.Count, columnId, boardId,
+                    string.Join(", ", stored));
+            }
+
+            return new HashSet<string>(stored, StringComparer.Ordinal);
         }
 
         // ================================================================
