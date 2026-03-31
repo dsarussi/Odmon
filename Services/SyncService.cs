@@ -55,6 +55,7 @@ namespace Odmon.Worker.Services
         private int _consecutiveMondayFailures;
         private bool _circuitBreakerTripped;
         private HashSet<long> _updatedItemIdsThisRun = new();
+        private int _casesSinceIntegrationFlush;
 
         public SyncService(
             ICaseSource caseSource,
@@ -106,6 +107,7 @@ namespace Odmon.Worker.Services
             _consecutiveMondayFailures = 0;
             _circuitBreakerTripped = false;
             _updatedItemIdsThisRun = new HashSet<long>();
+            _casesSinceIntegrationFlush = 0;
 
             var enabled = _config.GetValue<bool>("Sync:Enabled", true);
             if (!enabled)
@@ -266,8 +268,16 @@ namespace Odmon.Worker.Services
 
                 // B) mapped: which of the eligible candidates have a mapping for this board?
                 //    Uses candidate-scoped batched NOLOCK lookup (never board-wide DISTINCT).
-                var mappedSet = await _mappingReader.GetMappedTikCountersForCandidatesAsync(boardIdToUse, eligibleFromOdcanit, ct);
+                var lookup = await _mappingReader.GetMappedTikCountersForCandidatesAsync(boardIdToUse, eligibleFromOdcanit, ct);
+                var mappedSet = lookup.MappedTikCounters;
                 mappedCount = mappedSet.Count;
+
+                if (lookup.UnresolvedTikCounters.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "RECONCILE | Mapping lookup unresolved for {UnresolvedCount} candidate(s); excluding them from reconcile this run. BoardId={BoardId}, TikCounters=[{TikCounters}]",
+                        lookup.UnresolvedTikCounters.Count, boardIdToUse, string.Join(",", lookup.UnresolvedTikCounters.OrderBy(x => x)));
+                }
 
                 // C) eligibleMapped = INTERSECT
                 var eligibleMappedSet = new HashSet<int>(eligibleOdcanitSet);
@@ -375,6 +385,7 @@ namespace Odmon.Worker.Services
             bool circuitBreakerStopped = false;
 
             var circuitBreakerThreshold = _config.GetValue<int>("Monday:CircuitBreakerFailureThreshold", 10);
+            var mappingSaveBatchSize = Math.Clamp(_config.GetValue<int>("Sync:MappingSaveBatchSize", 35), 1, 500);
 
             foreach (var c in batch)
             {
@@ -667,7 +678,14 @@ namespace Odmon.Worker.Services
                 finally
                 {
                     caseStopwatch.Stop();
-                    _logger.LogDebug("Case TikCounter={TikCounter} processed in {ElapsedMs}ms", c.TikCounter, caseStopwatch.ElapsedMilliseconds);
+                    if (caseStopwatch.ElapsedMilliseconds > 3000)
+                    {
+                        _logger.LogWarning(
+                            "SLOW_ITEM | Worker=SyncWorker | Operation=ProcessCase | TikCounter={TikCounter} | TikNumber={TikNumber} | ElapsedMs={ElapsedMs}",
+                            c.TikCounter, c.TikNumber ?? "<null>", caseStopwatch.ElapsedMilliseconds);
+                    }
+
+                    await MaybeFlushIntegrationTrackedBatchAsync(runId, ct, mappingSaveBatchSize);
                 }
             }
 
@@ -731,7 +749,17 @@ namespace Odmon.Worker.Services
                 Details = JsonSerializer.Serialize(runSummary)
             });
 
-            await _integrationDb.SaveChangesAsync(ct);
+            {
+                var saveSw = Stopwatch.StartNew();
+                await _integrationDb.SaveChangesAsync(ct);
+                saveSw.Stop();
+                if (saveSw.ElapsedMilliseconds > 1000)
+                {
+                    _logger.LogWarning(
+                        "SLOW_DB | Worker=SyncWorker | Operation=SaveChanges(SyncLogs+Tracked) | RunId={RunId} | ElapsedMs={ElapsedMs}",
+                        runId, saveSw.ElapsedMilliseconds);
+                }
+            }
 
             // Phase-2: hearing approval write-back runs even when main sync skips/no-change
             stageTimer.Restart();
@@ -801,7 +829,15 @@ namespace Odmon.Worker.Services
                     CircuitBreakerTripped = circuitBreakerStopped,
                     DataSource = dataSource
                 });
+                var saveSw = Stopwatch.StartNew();
                 await _integrationDb.SaveChangesAsync(ct);
+                saveSw.Stop();
+                if (saveSw.ElapsedMilliseconds > 1000)
+                {
+                    _logger.LogWarning(
+                        "SLOW_DB | Worker=SyncWorker | Operation=SaveChanges(SyncRunMetrics) | RunId={RunId} | ElapsedMs={ElapsedMs}",
+                        runId, saveSw.ElapsedMilliseconds);
+                }
             }
             catch (Exception ex)
             {
@@ -2682,7 +2718,15 @@ namespace Odmon.Worker.Services
                             IsTest = testMode
                         };
                         _integrationDb.MondayItemMappings.Add(mapping);
+                        var saveSw = Stopwatch.StartNew();
                         await _integrationDb.SaveChangesAsync(ct);
+                        saveSw.Stop();
+                        if (saveSw.ElapsedMilliseconds > 1000)
+                        {
+                            _logger.LogWarning(
+                                "SLOW_DB | Worker=SyncWorker | Operation=SaveChanges(CreateMappingFromApiLookup) | TikCounter={TikCounter} | TikNumber={TikNumber} | ElapsedMs={ElapsedMs}",
+                                c.TikCounter, c.TikNumber ?? "<null>", saveSw.ElapsedMilliseconds);
+                        }
                         lookupMethod = "api_lookup_created_mapping";
                         _logger.LogInformation(
                             "Found existing Monday item via API lookup and created mapping: TikNumber={TikNumber}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikCounter={TikCounter}",
@@ -3444,6 +3488,32 @@ namespace Odmon.Worker.Services
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// After each processed case, increments a counter and flushes tracked Integration DB changes
+        /// every <paramref name="batchSize"/> cases so mapping updates are not held until SyncLogs.
+        /// </summary>
+        private async Task MaybeFlushIntegrationTrackedBatchAsync(
+            string runId, CancellationToken ct, int batchSize)
+        {
+            _casesSinceIntegrationFlush++;
+            if (_casesSinceIntegrationFlush < batchSize)
+                return;
+
+            _casesSinceIntegrationFlush = 0;
+            if (!_integrationDb.ChangeTracker.HasChanges())
+                return;
+
+            var saveSw = Stopwatch.StartNew();
+            await _integrationDb.SaveChangesAsync(ct);
+            saveSw.Stop();
+            if (saveSw.ElapsedMilliseconds > 1000)
+            {
+                _logger.LogWarning(
+                    "SLOW_DB | Worker=SyncWorker | Operation=SaveChanges(MappingBatchFlush) | RunId={RunId} | ElapsedMs={ElapsedMs}",
+                    runId, saveSw.ElapsedMilliseconds);
+            }
         }
 
         /// <summary>

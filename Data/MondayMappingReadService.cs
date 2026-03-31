@@ -61,23 +61,31 @@ WHERE TikCounter = @tikCounter AND BoardId = @boardId";
         // Bulk candidate lookup (with batching + progressive retry)
         // ================================================================
 
+        public sealed record MappingLookupResult(
+            HashSet<int> MappedTikCounters,
+            HashSet<int> UnresolvedTikCounters);
+
         /// <summary>
         /// Returns the subset of <paramref name="candidates"/> that already
-        /// have a mapping row for <paramref name="boardId"/>.  Batches into
+        /// have a mapping row for <paramref name="boardId"/>. Batches into
         /// chunks of <paramref name="batchSize"/> with progressive retry on
-        /// failure (halves batch, retries failed items).  Never throws —
-        /// returns partial results on persistent failure.
+        /// failure (halves batch, retries failed items).
+        ///
+        /// IMPORTANT: on DB failure this method does NOT classify TikCounters as
+        /// mapped or unmapped. It returns only confirmed mapped values and
+        /// reports unresolved TikCounters separately for safe caller handling.
         /// </summary>
-        public async Task<HashSet<int>> GetMappedTikCountersForCandidatesAsync(
+        public async Task<MappingLookupResult> GetMappedTikCountersForCandidatesAsync(
             long boardId,
             IReadOnlyList<int> candidates,
             CancellationToken ct,
             int batchSize = DefaultBatchSize)
         {
             if (candidates.Count == 0)
-                return new HashSet<int>();
+                return new MappingLookupResult(new HashSet<int>(), new HashSet<int>());
 
-            var result = new HashSet<int>();
+            var mappedResult = new HashSet<int>();
+            var unresolved = new HashSet<int>();
             var sw = Stopwatch.StartNew();
 
             _logger.LogInformation(
@@ -102,14 +110,14 @@ WHERE TikCounter = @tikCounter AND BoardId = @boardId";
                     {
                         var mapped = await QueryBatchNolockAsync(boardId, batch, ct);
                         foreach (var tc in mapped)
-                            result.Add(tc);
+                            mappedResult.Add(tc);
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(
-                            "MAPPING_LOOKUP | Batch failed: Attempt={Attempt}, BatchSize={BatchSize}, BoardId={BoardId}, Error={Error}",
-                            totalAttempts, batch.Count, boardId, ex.Message);
+                            "MAPPING_LOOKUP | Batch failed: Attempt={Attempt}, BatchSize={BatchSize}, BoardId={BoardId}, Error={Error}, TikCounters=[{TikCounters}]",
+                            totalAttempts, batch.Count, boardId, ex.Message, string.Join(",", batch));
                         failedItems.AddRange(batch);
                     }
                 }
@@ -120,9 +128,12 @@ WHERE TikCounter = @tikCounter AND BoardId = @boardId";
                 if (batchSize <= 1)
                 {
                     _logger.LogWarning(
-                        "MAPPING_LOOKUP | Per-case fallback exhausted. SkippedCount={SkippedCount}, BoardId={BoardId}. " +
-                        "Skipped TikCounters treated as unmapped (safe: per-case race check prevents duplicates).",
+                        "MAPPING_LOOKUP | Lookup unresolved after progressive retry. UnresolvedCount={UnresolvedCount}, BoardId={BoardId}. " +
+                        "These TikCounters will be excluded from decision-making this run (no mapped/unmapped classification).",
                         failedItems.Count, boardId);
+
+                    foreach (var tc in failedItems)
+                        unresolved.Add(tc);
                     break;
                 }
 
@@ -136,10 +147,10 @@ WHERE TikCounter = @tikCounter AND BoardId = @boardId";
 
             sw.Stop();
             _logger.LogInformation(
-                "MAPPING_LOOKUP | Completed: MappedCount={MappedCount}, CandidateCount={CandidateCount}, Attempts={Attempts}, FinalBatchSize={FinalBatchSize}, BoardId={BoardId}, Duration={DurationMs}ms",
-                result.Count, candidates.Count, totalAttempts, batchSize, boardId, sw.ElapsedMilliseconds);
+                "MAPPING_LOOKUP | Completed: MappedCount={MappedCount}, UnresolvedCount={UnresolvedCount}, CandidateCount={CandidateCount}, Attempts={Attempts}, FinalBatchSize={FinalBatchSize}, BoardId={BoardId}, Duration={DurationMs}ms",
+                mappedResult.Count, unresolved.Count, candidates.Count, totalAttempts, batchSize, boardId, sw.ElapsedMilliseconds);
 
-            return result;
+            return new MappingLookupResult(mappedResult, unresolved);
         }
 
         private async Task<List<int>> QueryBatchNolockAsync(

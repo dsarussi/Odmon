@@ -623,7 +623,7 @@ namespace Odmon.Worker.Services
                             record.UpdatedAtUtc = DateTime.UtcNow;
                             await SaveRecordAsync(record);
                             _totalSkipped++;
-                            _logger.LogWarning(
+                                _logger.LogWarning(
                                 "DOCINGESTION SKIP validation failed | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, Reason=EmptyFile",
                                 assetIdStr, questionnaireItemId, tikCounter);
                             if (linkedCaseItemId == 0)
@@ -657,6 +657,7 @@ namespace Odmon.Worker.Services
                         "DOCINGESTION STAGE=UPLOAD | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}",
                         assetIdStr, questionnaireItemId, tikCounter, tikVisualID, attemptLabel);
                     await CreateDocumentRowAsync(record, tikCounter, tikVisualID, columnId, ct, documentType);
+                    await SaveRecordAsync(record);
                     await CopyToDestPathAsync(record, ct);
                     _logger.LogDebug(
                         "DOCINGESTION STAGE=UPLOAD SUCCESS | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, DocCounter={DocCounter}, DestPath={DestPath}",
@@ -681,14 +682,13 @@ namespace Odmon.Worker.Services
                     VerifyCopy(record);
                 }
 
-                // Step 5: Clean up inbox file
-                CleanupInboxFile(record);
-
-                // Mark success
+                // Success persisted before inbox delete
                 record.Status = DocumentImportStatus.Success;
                 record.ErrorMessage = null;
                 record.UpdatedAtUtc = DateTime.UtcNow;
                 await SaveRecordAsync(record);
+
+                CleanupInboxFile(record);
 
                 assetSw.Stop();
                 _totalSucceeded++;
@@ -725,7 +725,6 @@ namespace Odmon.Worker.Services
                 record.Status = DocumentImportStatus.Failed;
                 record.ErrorMessage = ex.Message.Length > 2000 ? ex.Message[..2000] : ex.Message;
                 record.UpdatedAtUtc = DateTime.UtcNow;
-                await SaveRecordAsync(record);
 
                 _logger.LogError(ex,
                     "DOCINGESTION FAILED | STAGE={Stage}, AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, {Attempt}, Error={Error}, Elapsed={ElapsedMs}ms",
@@ -741,8 +740,9 @@ namespace Odmon.Worker.Services
                         $"Document ingestion failed: AssetId={assetIdStr}, TikCounter={tikCounter}, Stage={currentStage}",
                         record, ex);
                     record.AlertSent = true;
-                    await SaveRecordAsync(record);
                 }
+
+                await SaveRecordAsync(record);
             }
         }
 
@@ -880,7 +880,6 @@ namespace Odmon.Worker.Services
             record.FileSizeBytes = fileInfo.Length;
             record.Status = DocumentImportStatus.Downloaded;
             record.UpdatedAtUtc = DateTime.UtcNow;
-            await SaveRecordAsync(record);
 
             dlSw.Stop();
             _logger.LogDebug(
@@ -929,7 +928,6 @@ namespace Odmon.Worker.Services
             record.OdcanitDestPath = result.DestPath;
             record.Status = DocumentImportStatus.SpCreated;
             record.UpdatedAtUtc = DateTime.UtcNow;
-            await SaveRecordAsync(record);
 
             spSw.Stop();
             _logger.LogDebug(
@@ -957,7 +955,6 @@ namespace Odmon.Worker.Services
 
             record.Status = DocumentImportStatus.Copied;
             record.UpdatedAtUtc = DateTime.UtcNow;
-            await SaveRecordAsync(record);
 
             copySw.Stop();
             _logger.LogDebug(
@@ -1046,7 +1043,15 @@ namespace Odmon.Worker.Services
             };
 
             _integrationDb.MondayDocumentImports.Add(record);
+            var saveSw = Stopwatch.StartNew();
             await _integrationDb.SaveChangesAsync();
+            saveSw.Stop();
+            if (saveSw.ElapsedMilliseconds > 1000)
+            {
+                _logger.LogWarning(
+                    "SLOW_DB | Worker=DocumentIngestionWorker | Operation=SaveChanges(CreateTrackingRecord) | TikCounter={TikCounter} | TikNumber={TikNumber} | ElapsedMs={ElapsedMs}",
+                    tikCounter, tikVisualID, saveSw.ElapsedMilliseconds);
+            }
             return record;
         }
 
@@ -1086,7 +1091,17 @@ namespace Odmon.Worker.Services
                 _integrationDb.MondayDocumentImports.Add(record);
             }
 
-            await _integrationDb.SaveChangesAsync();
+            {
+                var saveSw = Stopwatch.StartNew();
+                await _integrationDb.SaveChangesAsync();
+                saveSw.Stop();
+                if (saveSw.ElapsedMilliseconds > 1000)
+                {
+                    _logger.LogWarning(
+                        "SLOW_DB | Worker=DocumentIngestionWorker | Operation=SaveChanges(MarkMissingTikFailure) | TikCounter=<null> | TikNumber={TikNumber} | ElapsedMs={ElapsedMs}",
+                        tikVisualID, saveSw.ElapsedMilliseconds);
+                }
+            }
 
             if (existing == null || !existing.AlertSent)
             {
@@ -1096,7 +1111,15 @@ namespace Odmon.Worker.Services
                 if (existing != null)
                 {
                     existing.AlertSent = true;
+                    var saveSw = Stopwatch.StartNew();
                     await _integrationDb.SaveChangesAsync();
+                    saveSw.Stop();
+                    if (saveSw.ElapsedMilliseconds > 1000)
+                    {
+                        _logger.LogWarning(
+                            "SLOW_DB | Worker=DocumentIngestionWorker | Operation=SaveChanges(MarkMissingTikFailure.AlertSent) | TikCounter={TikCounter} | TikNumber={TikNumber} | ElapsedMs={ElapsedMs}",
+                            existing.TikCounter?.ToString() ?? "<null>", tikVisualID, saveSw.ElapsedMilliseconds);
+                    }
                 }
             }
         }
@@ -1105,7 +1128,15 @@ namespace Odmon.Worker.Services
         {
             try
             {
+                var saveSw = Stopwatch.StartNew();
                 await _integrationDb.SaveChangesAsync();
+                saveSw.Stop();
+                if (saveSw.ElapsedMilliseconds > 1000)
+                {
+                    _logger.LogWarning(
+                        "SLOW_DB | Worker=DocumentIngestionWorker | Operation=SaveChanges(SaveRecord) | TikCounter={TikCounter} | TikNumber={TikNumber} | ElapsedMs={ElapsedMs}",
+                        record.TikCounter?.ToString() ?? "<null>", record.TikVisualID ?? "<null>", saveSw.ElapsedMilliseconds);
+                }
             }
             catch (Exception ex)
             {

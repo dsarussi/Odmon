@@ -56,11 +56,25 @@ namespace Odmon.Worker.Services
 
             // 2) Query IntegrationDb: which of these candidates are already mapped?
             //    Uses candidate-scoped batched NOLOCK lookup (never board-wide DISTINCT).
-            var mappedSet = await _mappingReader.GetMappedTikCountersForCandidatesAsync(boardId, odcanitTikCounters, ct);
+            var lookup = await _mappingReader.GetMappedTikCountersForCandidatesAsync(boardId, odcanitTikCounters, ct);
+            var mappedSet = lookup.MappedTikCounters;
             result.AlreadyMapped = mappedSet.Count;
 
             // 3) Compute: eligible = odcanitTikCounters EXCEPT mappedTikCounters
-            var unmappedEligible = odcanitTikCounters
+            // IMPORTANT: do not treat unresolved TikCounters as unmapped.
+            // Skip decision-making for those TikCounters in this run; they will be retried next cycle.
+            var resolvedCandidates = odcanitTikCounters
+                .Where(tc => !lookup.UnresolvedTikCounters.Contains(tc))
+                .ToList();
+
+            if (lookup.UnresolvedTikCounters.Count > 0)
+            {
+                _logger.LogWarning(
+                    "BOOTSTRAP | Mapping lookup unresolved for {UnresolvedCount} candidate(s); skipping them this run. BoardId={BoardId}, TikCounters=[{TikCounters}]",
+                    lookup.UnresolvedTikCounters.Count, boardId, string.Join(",", lookup.UnresolvedTikCounters.OrderBy(x => x)));
+            }
+
+            var unmappedEligible = resolvedCandidates
                 .Where(tc => !mappedSet.Contains(tc))
                 .Distinct()
                 .ToList();
