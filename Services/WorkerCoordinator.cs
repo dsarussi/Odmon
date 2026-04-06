@@ -5,9 +5,10 @@ using System.Threading.Tasks;
 namespace Odmon.Worker.Services
 {
     /// <summary>
-    /// In-process coordination gate that prevents SyncWorker,
-    /// DocumentIngestionWorker and EmailBackgroundService from
-    /// running their DB-heavy work concurrently.  Uses a
+    /// In-process coordination gate that prevents SyncWorker and
+    /// DocumentIngestionWorker from running their DB-heavy work concurrently.
+    /// Daily summary email is not gated here (would starve if doc ingestion
+    /// runs continuously). Uses a
     /// <see cref="SemaphoreSlim(1,1)"/> — zero DB overhead,
     /// which is essential because lock-contention on the
     /// integration DB is the root cause of the timeout crashes.

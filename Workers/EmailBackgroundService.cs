@@ -22,7 +22,6 @@ namespace Odmon.Worker.Workers
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly ILogger<EmailBackgroundService> _logger;
         private readonly IConfiguration _config;
-        private readonly WorkerCoordinator _coordinator;
 
         private DateTime _lastDigestUtc = DateTime.MinValue;
         private DateOnly _lastDailySummaryIsraelDate = DateOnly.MinValue;
@@ -31,14 +30,12 @@ namespace Odmon.Worker.Workers
             EmailNotifier emailNotifier,
             IServiceScopeFactory scopeFactory,
             ILogger<EmailBackgroundService> logger,
-            IConfiguration config,
-            WorkerCoordinator coordinator)
+            IConfiguration config)
         {
             _emailNotifier = emailNotifier;
             _scopeFactory = scopeFactory;
             _logger = logger;
             _config = config;
-            _coordinator = coordinator;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -155,23 +152,13 @@ namespace Odmon.Worker.Workers
 
                 var nowTime = TimeOnly.FromDateTime(nowIsrael);
 
-                // Send if: past target time today AND haven't sent for today yet
+                // Send if: past target time today AND haven't sent for today yet.
+                // Do not gate on WorkerCoordinator: DocumentIngestionWorker can hold the
+                // lease for long runs and would starve the daily summary indefinitely.
                 if (todayIsrael > _lastDailySummaryIsraelDate && nowTime >= targetTime)
                 {
-                    // Check if another worker is running — the daily summary hits
-                    // the DB and can add to lock contention if sync or doc ingestion
-                    // is active.  If so, defer to the next 60-second cycle.
-                    if (_coordinator.ActiveWorker != null)
-                    {
-                        _logger.LogInformation(
-                            "COORDINATION | Daily summary deferred — {ActiveWorker} is active",
-                            _coordinator.ActiveWorker);
-                    }
-                    else
-                    {
-                        _lastDailySummaryIsraelDate = todayIsrael;
-                        await SendDailySummaryEmailAsync(todayIsrael, ct);
-                    }
+                    _lastDailySummaryIsraelDate = todayIsrael;
+                    await SendDailySummaryEmailAsync(todayIsrael, ct);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
