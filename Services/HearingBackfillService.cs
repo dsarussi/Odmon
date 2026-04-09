@@ -16,7 +16,7 @@ using Odmon.Worker.Models;
 namespace Odmon.Worker.Services
 {
     /// <summary>
-    /// One-time April 2026 hearings backfill from IntegrationDb into Monday board 5035534500.
+    /// Hearings backfill from IntegrationDb (HearingBackfill:SourceTable, same shape as April 2026) into Monday.
     /// Runs only when HearingBackfill:Enable=true. No tracking columns; dedup via MondayItemMappings.
     /// </summary>
     public class HearingBackfillService
@@ -61,13 +61,18 @@ namespace Odmon.Worker.Services
             var result = new HearingBackfillResult();
             var sw = Stopwatch.StartNew();
             var boardId = _settings.BoardId;
+            var fromQualified = HearingBackfillSettings.BuildBracketedQualifiedTable(_settings.SourceTable);
 
-            // Use raw SQL for OFFSET/FETCH since we have no Id
-            var rawSql = @"
+            _logger.LogInformation(
+                "HEARING BACKFILL | Run starting | SourceTable={SourceTable}, BoardId={BoardId}, BatchSize={BatchSize}",
+                _settings.SourceTable, boardId, _settings.BatchSize);
+
+            // Use raw SQL for OFFSET/FETCH since we have no Id (table from config; identifiers validated)
+            var rawSql = $@"
 SELECT [תאריך דיון], [שעת דיון], [שם שופט], [שם ביהמש], [טלפון נהג], [שם נהג], [מספר תיק], [מספר לקוח], [תאריך אירוע]
-FROM [dbo].[HearingBackfill_Apr2026]
+FROM {fromQualified}
 ORDER BY [תאריך דיון], [שעת דיון], [מספר תיק]
-OFFSET {0} ROWS FETCH NEXT {1} ROWS ONLY";
+OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
 
             var batchSize = _settings.BatchSize;
             var offset = 0;

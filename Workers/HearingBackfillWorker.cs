@@ -11,7 +11,7 @@ using Odmon.Worker.Services;
 namespace Odmon.Worker.Workers
 {
     /// <summary>
-    /// Runs the April 2026 hearings backfill when HearingBackfill:Enable=true.
+    /// Runs the hearings backfill when HearingBackfill:Enable=true (source table from HearingBackfill:SourceTable).
     /// Processes batches until no pending rows remain.
     /// </summary>
     public class HearingBackfillWorker : BackgroundService
@@ -38,7 +38,9 @@ namespace Odmon.Worker.Workers
                 return;
             }
 
-            _logger.LogInformation("HearingBackfillWorker: Enabled. Starting backfill loop (BoardId={BoardId}, BatchSize={BatchSize}).", _settings.BoardId, _settings.BatchSize);
+            _logger.LogInformation(
+                "HearingBackfillWorker: Enabled. Starting backfill loop (SourceTable={SourceTable}, BoardId={BoardId}, BatchSize={BatchSize}).",
+                _settings.SourceTable, _settings.BoardId, _settings.BatchSize);
 
             var intervalSeconds = 300; // 5 minutes between batches
             var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));

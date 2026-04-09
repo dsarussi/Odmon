@@ -3,8 +3,8 @@ using System.ComponentModel.DataAnnotations.Schema;
 namespace Odmon.Worker.Models
 {
     /// <summary>
-    /// Snapshot table for April 2026 hearings backfill. Read-only; no tracking columns.
-    /// Source: [OdmonIntegration].[dbo].[HearingBackfill_Apr2026]
+    /// Row shape for hearings backfill staging tables (e.g. HearingBackfill_Apr2026, HearingBackfill_May2026).
+    /// Queries use FromSqlRaw against HearingBackfill:SourceTable.
     /// </summary>
     [Table("HearingBackfill_Apr2026")]
     public class HearingBackfillApr2026

@@ -359,10 +359,13 @@ static async Task VerifyIntegrationDbConnectionAsync(IServiceProvider services)
         } // DataReader + command disposed here
 
         // ── Check critical table existence (sequential, no open readers) ──
-        await VerifyTableExistsAsync(connection, "HearingNearestSnapshots", logger);
-        await VerifyTableExistsAsync(connection, "SyncRunLocks", logger);
-        await VerifyTableExistsAsync(connection, "SyncFailures", logger);
-        await VerifyTableExistsAsync(connection, "HearingBackfill_Apr2026", logger);
+        await VerifyDboTableExistsAsync(connection, "HearingNearestSnapshots", logger);
+        await VerifyDboTableExistsAsync(connection, "SyncRunLocks", logger);
+        await VerifyDboTableExistsAsync(connection, "SyncFailures", logger);
+
+        var hearingBackfillSource = provider.GetRequiredService<IConfiguration>()["HearingBackfill:SourceTable"];
+        var (bfSchema, bfTable) = HearingBackfillSettings.ParseSchemaAndTable(hearingBackfillSource);
+        await VerifySchemaTableExistsAsync(connection, bfSchema, bfTable, logger);
     }
     catch (Exception ex)
     {
@@ -372,29 +375,38 @@ static async Task VerifyIntegrationDbConnectionAsync(IServiceProvider services)
     }
 }
 
-static async Task VerifyTableExistsAsync(System.Data.Common.DbConnection connection, string tableName, Microsoft.Extensions.Logging.ILogger logger)
+static async Task VerifyDboTableExistsAsync(System.Data.Common.DbConnection connection, string tableName, Microsoft.Extensions.Logging.ILogger logger)
+{
+    await VerifySchemaTableExistsAsync(connection, "dbo", tableName, logger);
+}
+
+static async Task VerifySchemaTableExistsAsync(
+    System.Data.Common.DbConnection connection,
+    string schema,
+    string tableName,
+    Microsoft.Extensions.Logging.ILogger logger)
 {
     try
     {
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT CASE WHEN OBJECT_ID(N'[dbo].[{tableName}]', 'U') IS NULL THEN 0 ELSE 1 END";
+        cmd.CommandText = $"SELECT CASE WHEN OBJECT_ID(N'[{schema}].[{tableName}]', 'U') IS NULL THEN 0 ELSE 1 END";
         var result = await cmd.ExecuteScalarAsync();
         var exists = result is int i ? i == 1 : false;
         if (!exists)
         {
             logger.LogWarning(
-                "IntegrationDb TABLE CHECK: dbo.{TableName} does NOT exist. The corrective migration may not have been applied yet.",
-                tableName);
+                "IntegrationDb TABLE CHECK: {Schema}.{TableName} does NOT exist. The corrective migration may not have been applied yet.",
+                schema, tableName);
         }
         else
         {
             logger.LogInformation(
-                "IntegrationDb TABLE CHECK: dbo.{TableName} exists.",
-                tableName);
+                "IntegrationDb TABLE CHECK: {Schema}.{TableName} exists.",
+                schema, tableName);
         }
     }
     catch (Exception ex)
     {
-        logger.LogWarning(ex, "IntegrationDb TABLE CHECK: Failed to verify existence of dbo.{TableName}", tableName);
+        logger.LogWarning(ex, "IntegrationDb TABLE CHECK: Failed to verify existence of {Schema}.{TableName}", schema, tableName);
     }
 }
