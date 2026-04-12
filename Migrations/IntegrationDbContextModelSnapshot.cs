@@ -108,10 +108,6 @@ namespace Odmon.Worker.Migrations
                         .HasColumnType("nvarchar(max)")
                         .HasColumnName("מספר לקוח");
 
-                    b.Property<string>("CourtName")
-                        .HasColumnType("nvarchar(max)")
-                        .HasColumnName("שם ביהמש");
-
                     b.Property<string>("CourtCity")
                         .HasColumnType("nvarchar(max)")
                         .HasColumnName("עיר בית משפט");

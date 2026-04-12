@@ -19,9 +19,6 @@ namespace Odmon.Worker.Models
         [Column("שם שופט")]
         public string? JudgeName { get; set; }
 
-        [Column("שם ביהמש")]
-        public string? CourtName { get; set; }
-
         [Column("עיר בית משפט")]
         public string? CourtCity { get; set; }
 
