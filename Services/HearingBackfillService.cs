@@ -39,6 +39,9 @@ namespace Odmon.Worker.Services
         private const string TikNumberColumnId = "text_mkwe19hn";
         private const string ClientNumberColumnId = "dropdown_mkxjrssr";
         private const string EventDateColumnId = "date_mkwj3780";
+        /// <summary>סטטוס תיק — "באמצע תהליך" (Monday status index, not label string).</summary>
+        private const string CaseStatusColumnId = "color_mkwefnbx";
+        private const int CaseStatusIndex = 7;
 
         public HearingBackfillService(
             IntegrationDbContext db,
@@ -258,6 +261,8 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
 
             if (row.EventDate.HasValue)
                 cv[EventDateColumnId] = new { date = row.EventDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) };
+
+            cv[CaseStatusColumnId] = new { index = CaseStatusIndex };
 
             cv[_settings.StatusColumnId] = new { label = StatusLabel };
 
