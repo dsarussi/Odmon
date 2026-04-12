@@ -71,8 +71,9 @@ namespace Odmon.Worker.Services
                 _settings.SourceTable, boardId, _settings.BatchSize);
 
             // Use raw SQL for OFFSET/FETCH since we have no Id (table from config; identifiers validated)
+            // CONVERT מספר לקוח so INT (Apr) and NVARCHAR (May) both project as nvarchar — avoids InvalidCastException on read.
             var rawSql = $@"
-SELECT [תאריך דיון], [שעת דיון], [שם שופט], [שם ביהמש], [טלפון נהג], [שם נהג], [מספר תיק], [מספר לקוח], [תאריך אירוע]
+SELECT [תאריך דיון], [שעת דיון], [שם שופט], [שם ביהמש], [טלפון נהג], [שם נהג], [מספר תיק], CONVERT(NVARCHAR(64), [מספר לקוח]) AS [מספר לקוח], [תאריך אירוע]
 FROM {fromQualified}
 ORDER BY [תאריך דיון], [שעת דיון], [מספר תיק]
 OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
@@ -245,9 +246,9 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
             if (!string.IsNullOrWhiteSpace(row.TikNumber))
                 cv[TikNumberColumnId] = row.TikNumber.Trim();
 
-            if (row.ClientNumber.HasValue && dropdownLabels != null)
+            if (!string.IsNullOrWhiteSpace(row.ClientNumber) && dropdownLabels != null)
             {
-                var clientNumberText = row.ClientNumber.Value.ToString();
+                var clientNumberText = row.ClientNumber.Trim();
                 if (dropdownLabels.Contains(clientNumberText))
                     cv[ClientNumberColumnId] = new { labels = new[] { clientNumberText } };
                 else

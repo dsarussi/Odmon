@@ -104,8 +104,8 @@ namespace Odmon.Worker.Migrations
 
             modelBuilder.Entity("Odmon.Worker.Models.HearingBackfillApr2026", b =>
                 {
-                    b.Property<int?>("ClientNumber")
-                        .HasColumnType("int")
+                    b.Property<string>("ClientNumber")
+                        .HasColumnType("nvarchar(max)")
                         .HasColumnName("מספר לקוח");
 
                     b.Property<string>("CourtName")

@@ -30,8 +30,9 @@ namespace Odmon.Worker.Models
         [Column("מספר תיק")]
         public string? TikNumber { get; set; }
 
+        /// <summary>May be int or nvarchar in source table; read as string for materialization.</summary>
         [Column("מספר לקוח")]
-        public int? ClientNumber { get; set; }
+        public string? ClientNumber { get; set; }
 
         [Column("תאריך אירוע")]
         public DateTime? EventDate { get; set; }
