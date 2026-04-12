@@ -73,7 +73,7 @@ namespace Odmon.Worker.Services
             // Use raw SQL for OFFSET/FETCH since we have no Id (table from config; identifiers validated)
             // All polymorphic columns projected as nvarchar so EF reads string properties without type-cast failures.
             var rawSql = $@"
-SELECT [תאריך דיון], CONVERT(NVARCHAR(32), [שעת דיון]) AS [שעת דיון], [שם שופט], [שם ביהמש], [עיר בית משפט], [טלפון נהג], [שם נהג], [מספר תיק], CONVERT(NVARCHAR(64), [מספר לקוח]) AS [מספר לקוח], [תאריך אירוע]
+SELECT [תאריך דיון], CONVERT(NVARCHAR(32), [שעת דיון]) AS [שעת דיון], [שם שופט], [עיר בית משפט], [טלפון נהג], [שם נהג], [מספר תיק], CONVERT(NVARCHAR(64), [מספר לקוח]) AS [מספר לקוח], [תאריך אירוע]
 FROM {fromQualified}
 ORDER BY [תאריך דיון], [שעת דיון], [מספר תיק]
 OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
