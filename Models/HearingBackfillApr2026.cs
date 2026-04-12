@@ -12,8 +12,9 @@ namespace Odmon.Worker.Models
         [Column("תאריך דיון")]
         public DateTime? HearingDate { get; set; }
 
+        /// <summary>May be time or nvarchar in source table; read as string, parsed in BuildColumnValues.</summary>
         [Column("שעת דיון")]
-        public TimeSpan? HearingTime { get; set; }
+        public string? HearingTime { get; set; }
 
         [Column("שם שופט")]
         public string? JudgeName { get; set; }

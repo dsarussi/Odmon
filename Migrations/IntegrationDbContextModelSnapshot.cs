@@ -128,8 +128,8 @@ namespace Odmon.Worker.Migrations
                         .HasColumnType("datetime2")
                         .HasColumnName("תאריך דיון");
 
-                    b.Property<TimeSpan?>("HearingTime")
-                        .HasColumnType("time")
+                    b.Property<string>("HearingTime")
+                        .HasColumnType("nvarchar(max)")
                         .HasColumnName("שעת דיון");
 
                     b.Property<string>("JudgeName")

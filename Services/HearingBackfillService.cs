@@ -71,9 +71,9 @@ namespace Odmon.Worker.Services
                 _settings.SourceTable, boardId, _settings.BatchSize);
 
             // Use raw SQL for OFFSET/FETCH since we have no Id (table from config; identifiers validated)
-            // CONVERT מספר לקוח so INT (Apr) and NVARCHAR (May) both project as nvarchar — avoids InvalidCastException on read.
+            // All polymorphic columns projected as nvarchar so EF reads string properties without type-cast failures.
             var rawSql = $@"
-SELECT [תאריך דיון], [שעת דיון], [שם שופט], [שם ביהמש], [טלפון נהג], [שם נהג], [מספר תיק], CONVERT(NVARCHAR(64), [מספר לקוח]) AS [מספר לקוח], [תאריך אירוע]
+SELECT [תאריך דיון], CONVERT(NVARCHAR(32), [שעת דיון]) AS [שעת דיון], [שם שופט], [שם ביהמש], [טלפון נהג], [שם נהג], [מספר תיק], CONVERT(NVARCHAR(64), [מספר לקוח]) AS [מספר לקוח], [תאריך אירוע]
 FROM {fromQualified}
 ORDER BY [תאריך דיון], [שעת דיון], [מספר תיק]
 OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
@@ -220,10 +220,8 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
             if (row.HearingDate.HasValue)
                 cv[DateColumnId] = new { date = row.HearingDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) };
 
-            if (row.HearingTime.HasValue)
+            if (!string.IsNullOrWhiteSpace(row.HearingTime) && TryParseHourMinute(row.HearingTime, out var h, out var m))
             {
-                var h = row.HearingTime.Value.Hours;
-                var m = row.HearingTime.Value.Minutes;
                 if (h >= 0 && h <= 23 && m >= 0 && m <= 59)
                     cv[HourColumnId] = new { hour = h, minute = m };
             }
@@ -268,6 +266,22 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
             cv[_settings.StatusColumnId] = new { label = StatusLabel };
 
             return cv;
+        }
+
+        /// <summary>
+        /// Parses "HH:MM" or "HH:MM:SS" (from CONVERT(NVARCHAR, time) or raw string column).
+        /// </summary>
+        private static bool TryParseHourMinute(string raw, out int hour, out int minute)
+        {
+            hour = 0;
+            minute = 0;
+            if (TimeSpan.TryParse(raw.Trim(), out var ts))
+            {
+                hour = ts.Hours;
+                minute = ts.Minutes;
+                return true;
+            }
+            return false;
         }
 
         private static string? NormalizePhone(string? phone)
