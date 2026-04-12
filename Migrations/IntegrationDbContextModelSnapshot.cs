@@ -112,6 +112,10 @@ namespace Odmon.Worker.Migrations
                         .HasColumnType("nvarchar(max)")
                         .HasColumnName("שם ביהמש");
 
+                    b.Property<string>("CourtCity")
+                        .HasColumnType("nvarchar(max)")
+                        .HasColumnName("עיר בית משפט");
+
                     b.Property<string>("DriverName")
                         .HasColumnType("nvarchar(max)")
                         .HasColumnName("שם נהג");

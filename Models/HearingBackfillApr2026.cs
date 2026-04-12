@@ -22,6 +22,9 @@ namespace Odmon.Worker.Models
         [Column("שם ביהמש")]
         public string? CourtName { get; set; }
 
+        [Column("עיר בית משפט")]
+        public string? CourtCity { get; set; }
+
         [Column("טלפון נהג")]
         public string? DriverPhone { get; set; }
 
