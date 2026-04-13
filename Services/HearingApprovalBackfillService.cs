@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -19,6 +21,8 @@ namespace Odmon.Worker.Services
     /// One-time backfill: scans existing Monday case items and writes hearing-approval
     /// annexes for cases that already have an approved/rejected status.
     /// Reuses the same annex text mapping as <see cref="HearingApprovalSyncService"/>.
+    /// For mappings with negative (synthetic) TikCounter, resolves the real TikCounter
+    /// from Odcanit via dbo.MainTik before writing.
     /// </summary>
     public class HearingApprovalBackfillService
     {
@@ -31,6 +35,7 @@ namespace Odmon.Worker.Services
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
         private readonly IOdcanitWriter _odcanitWriter;
+        private readonly OdcanitDbContext _odcanitDb;
         private readonly MondaySettings _mondaySettings;
         private readonly HearingApprovalBackfillSettings _settings;
         private readonly ILogger<HearingApprovalBackfillService> _logger;
@@ -40,6 +45,7 @@ namespace Odmon.Worker.Services
             IntegrationDbContext integrationDb,
             IMondayClient mondayClient,
             IOdcanitWriter odcanitWriter,
+            OdcanitDbContext odcanitDb,
             IOptions<MondaySettings> mondayOptions,
             IOptions<HearingApprovalBackfillSettings> settings,
             ILogger<HearingApprovalBackfillService> logger,
@@ -48,6 +54,7 @@ namespace Odmon.Worker.Services
             _integrationDb = integrationDb;
             _mondayClient = mondayClient;
             _odcanitWriter = odcanitWriter;
+            _odcanitDb = odcanitDb;
             _mondaySettings = mondayOptions.Value;
             _settings = settings.Value;
             _logger = logger;
@@ -85,7 +92,7 @@ namespace Odmon.Worker.Services
             }
 
             mappings = mappings
-                .Where(m => m.TikCounter > 0 && !string.IsNullOrWhiteSpace(m.TikNumber));
+                .Where(m => m.TikCounter != 0 && !string.IsNullOrWhiteSpace(m.TikNumber));
 
             if (_settings.MaxItems > 0)
                 mappings = mappings.Take(_settings.MaxItems);
@@ -121,11 +128,11 @@ namespace Odmon.Worker.Services
             sw.Stop();
 
             _logger.LogInformation(
-                "HEARING_APPROVAL_BACKFILL | Completed in {ElapsedMs}ms | Scanned={Scanned}, Actionable={Actionable}, Written={Written}, SkippedNoStatus={SkippedNoStatus}, SkippedAlreadyProcessed={SkippedAlreadyProcessed}, SkippedDryRun={SkippedDryRun}, Failed={Failed}",
+                "HEARING_APPROVAL_BACKFILL | Completed in {ElapsedMs}ms | Scanned={Scanned}, Actionable={Actionable}, Written={Written}, Resolved={Resolved}, SkippedNoStatus={SkippedNoStatus}, SkippedAlreadyProcessed={SkippedAlreadyProcessed}, SkippedDryRun={SkippedDryRun}, SkippedResolveFailed={SkippedResolveFailed}, Failed={Failed}",
                 sw.ElapsedMilliseconds,
-                result.Scanned, result.Actionable, result.Written,
+                result.Scanned, result.Actionable, result.Written, result.Resolved,
                 result.SkippedNoStatus, result.SkippedAlreadyProcessed, result.SkippedDryRun,
-                result.Failed);
+                result.SkippedResolveFailed, result.Failed);
 
             return result;
         }
@@ -138,7 +145,28 @@ namespace Odmon.Worker.Services
             CancellationToken ct)
         {
             var tikCounter = mapping.TikCounter;
+            var tikNumber = mapping.TikNumber!;
             var itemId = mapping.MondayItemId;
+
+            if (tikCounter <= 0)
+            {
+                var resolved = await ResolveTikCounterFromOdcanitAsync(tikNumber, ct);
+                if (resolved == null)
+                {
+                    result.SkippedResolveFailed++;
+                    _logger.LogWarning(
+                        "HEARING_APPROVAL_BACKFILL | Cannot resolve real TikCounter for synthetic mapping: MappingTikCounter={MappingTikCounter}, TikNumber={TikNumber}, ItemId={ItemId} — skipping",
+                        tikCounter, tikNumber, itemId);
+                    return;
+                }
+
+                _logger.LogInformation(
+                    "HEARING_APPROVAL_BACKFILL | Resolved synthetic TikCounter: MappingTikCounter={MappingTikCounter} → RealTikCounter={RealTikCounter} via TikNumber={TikNumber}",
+                    tikCounter, resolved.Value, tikNumber);
+
+                tikCounter = resolved.Value;
+                result.Resolved++;
+            }
 
             var currentIndex = await _mondayClient.GetHearingApprovalStatusAsync(itemId, ct);
 
@@ -184,21 +212,31 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            var stubCase = new OdcanitCase { TikCounter = tikCounter, TikNumber = mapping.TikNumber! };
+            var stubCase = new OdcanitCase { TikCounter = tikCounter, TikNumber = tikNumber };
             var nowUtc = DateTime.UtcNow;
 
+            NispahWriteLog writeLog;
             try
             {
                 await _odcanitWriter.AppendNispahAsync(stubCase, nowUtc, NispahTypeName, annexText, ct);
+                writeLog = HearingApprovalSyncService.BuildWriteLog(
+                    tikCounter, tikNumber, itemId, annexText, nowUtc, failed: false);
             }
             catch (Exception ex)
             {
+                writeLog = HearingApprovalSyncService.BuildWriteLog(
+                    tikCounter, tikNumber, itemId, annexText, nowUtc, failed: true, ex.Message);
+                try { _integrationDb.NispahWriteLogs.Add(writeLog); await _integrationDb.SaveChangesAsync(ct); }
+                catch (Exception logEx) { _logger.LogWarning(logEx, "HEARING_APPROVAL_BACKFILL | Failed to persist NispahWriteLog (non-fatal)"); }
+
                 result.Failed++;
                 _logger.LogError(ex,
                     "HEARING_APPROVAL_BACKFILL | Annex write FAILED: TikCounter={TikCounter}, ItemId={ItemId}, Text='{AnnexText}' — state NOT advanced",
                     tikCounter, itemId, annexText);
                 return;
             }
+
+            _integrationDb.NispahWriteLogs.Add(writeLog);
 
             if (state == null)
             {
@@ -228,6 +266,54 @@ namespace Odmon.Worker.Services
                 tikCounter, itemId, annexText, currentIndex);
         }
 
+        /// <summary>
+        /// Resolves a real (positive) TikCounter from Odcanit dbo.MainTik by TikNumber (VisualID).
+        /// Tries column "TikCounter" first, falls back to "Counter" for DB compatibility.
+        /// Returns null if no match or ambiguous.
+        /// </summary>
+        private async Task<int?> ResolveTikCounterFromOdcanitAsync(string tikNumber, CancellationToken ct)
+        {
+            var connection = _odcanitDb.Database.GetDbConnection();
+            var wasClosed = connection.State == ConnectionState.Closed;
+            if (wasClosed) await connection.OpenAsync(ct);
+
+            try
+            {
+                var result = await TryQueryMainTikAsync(connection, "TikCounter", tikNumber, ct);
+                if (result is > 0) return result;
+
+                result = await TryQueryMainTikAsync(connection, "Counter", tikNumber, ct);
+                if (result is > 0) return result;
+
+                return null;
+            }
+            finally
+            {
+                if (wasClosed && connection.State == ConnectionState.Open)
+                    await connection.CloseAsync();
+            }
+        }
+
+        private static async Task<int?> TryQueryMainTikAsync(
+            System.Data.Common.DbConnection connection, string columnName, string tikNumber, CancellationToken ct)
+        {
+            try
+            {
+                await using var cmd = (SqlCommand)connection.CreateCommand();
+                cmd.CommandText = $"SELECT TOP 1 [{columnName}] FROM dbo.MainTik WHERE VisualID = @TikVisualID";
+                cmd.CommandType = CommandType.Text;
+                cmd.CommandTimeout = 15;
+                cmd.Parameters.Add(new SqlParameter("@TikVisualID", SqlDbType.NVarChar, 50) { Value = tikNumber });
+
+                var scalar = await cmd.ExecuteScalarAsync(ct);
+                return scalar is int v ? v : null;
+            }
+            catch (SqlException ex) when (ex.Number == 207)
+            {
+                return null;
+            }
+        }
+
         private static string? GetAnnexText(string statusIndex) => statusIndex switch
         {
             StatusIndexApproved => AnnexTextApproved,
@@ -241,9 +327,11 @@ namespace Odmon.Worker.Services
         public int Scanned { get; set; }
         public int Actionable { get; set; }
         public int Written { get; set; }
+        public int Resolved { get; set; }
         public int SkippedNoStatus { get; set; }
         public int SkippedAlreadyProcessed { get; set; }
         public int SkippedDryRun { get; set; }
+        public int SkippedResolveFailed { get; set; }
         public int Failed { get; set; }
     }
 }

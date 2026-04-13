@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
@@ -28,6 +30,8 @@ namespace Odmon.Worker.Services
 
         private const string AnnexTextApproved = "אישר הגעה לדיון";
         private const string AnnexTextRejected = "לא אישר הגעה לדיון";
+
+        internal const string SourceKindHearingApproval = "HearingApproval";
 
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
@@ -78,7 +82,13 @@ namespace Odmon.Worker.Services
             foreach (var c in cases)
             {
                 if (ct.IsCancellationRequested) break;
-                if (c.TikCounter <= 0) continue;
+                if (c.TikCounter <= 0)
+                {
+                    _logger.LogWarning(
+                        "HearingApproval skipped case with non-positive TikCounter={TikCounter}, TikNumber={TikNumber} — Odcanit write-back requires a real TikCounter",
+                        c.TikCounter, c.TikNumber);
+                    continue;
+                }
 
                 var mapping = await _mappingReader.FindReadOnlyAsync(c.TikCounter, casesBoardId, ct);
                 if (mapping == null) continue;
@@ -156,10 +166,13 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
+                NispahWriteLog writeLog;
                 try
                 {
                     await _odcanitWriter.AppendNispahAsync(c, nowUtc, NispahTypeName, annexText, ct);
                     state.LastWriteAtUtc = nowUtc;
+
+                    writeLog = BuildWriteLog(c.TikCounter, c.TikNumber, itemId, annexText, nowUtc, failed: false);
 
                     _logger.LogInformation(
                         "HearingApproval annex written: TikCounter={TikCounter}, Text='{AnnexText}'",
@@ -167,12 +180,17 @@ namespace Odmon.Worker.Services
                 }
                 catch (Exception ex)
                 {
+                    writeLog = BuildWriteLog(c.TikCounter, c.TikNumber, itemId, annexText, nowUtc, failed: true, ex.Message);
+                    _integrationDb.NispahWriteLogs.Add(writeLog);
+                    await TrySaveWriteLogAsync(ct);
+
                     _logger.LogError(ex,
                         "HearingApproval annex write FAILED: TikCounter={TikCounter}, Text='{AnnexText}' — status NOT advanced",
                         c.TikCounter, annexText);
                     continue;
                 }
 
+                _integrationDb.NispahWriteLogs.Add(writeLog);
                 state.LastKnownStatus = currentIndex;
                 state.UpdatedAtUtc = nowUtc;
                 await _integrationDb.SaveChangesAsync(ct);
@@ -193,6 +211,43 @@ namespace Odmon.Worker.Services
             StatusIndexRejected => AnnexTextRejected,
             _ => null
         };
+
+        internal static NispahWriteLog BuildWriteLog(
+            int tikCounter, string tikNumber, long sourceItemId,
+            string annexText, DateTime nowUtc,
+            bool failed, string? errorMessage = null)
+        {
+            return new NispahWriteLog
+            {
+                TikCounter = tikCounter,
+                TikVisualId = tikNumber,
+                NispahType = NispahTypeName,
+                SourceKind = SourceKindHearingApproval,
+                SourceItemId = sourceItemId,
+                InfoHash = ComputeSha256(annexText),
+                CreatedAtUtc = nowUtc,
+                Failed = failed,
+                ErrorMessage = errorMessage?.Length > 2000 ? errorMessage[..2000] : errorMessage
+            };
+        }
+
+        internal static string ComputeSha256(string input)
+        {
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+            return Convert.ToHexString(bytes).ToLowerInvariant();
+        }
+
+        private async Task TrySaveWriteLogAsync(CancellationToken ct)
+        {
+            try
+            {
+                await _integrationDb.SaveChangesAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "HearingApproval failed to persist NispahWriteLog (non-fatal)");
+            }
+        }
     }
 }
 
