@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
@@ -16,10 +14,21 @@ using Odmon.Worker.OdcanitAccess;
 namespace Odmon.Worker.Services
 {
     /// <summary>
-    /// Phase-2: Sync hearing approval status from Monday back to Odcanit (append Nispah records).
+    /// Detects changes in the Monday hearing-approval status column (color_mkzbmv1b)
+    /// and writes an annex to Odcanit for every real approval/rejection transition.
+    /// State tracking via <see cref="MondayHearingApprovalState"/> prevents duplicates.
     /// </summary>
     public class HearingApprovalSyncService
     {
+        private const string NispahTypeName = "אישור הגעה לדיון";
+
+        private const string StatusIndexApproved = "1";   // מאשר הגעה
+        private const string StatusIndexRejected = "2";   // לא מאשר הגעה
+        private const string StatusIndexDefault  = "5";   // עוד לא אישר הגעה
+
+        private const string AnnexTextApproved = "אישר הגעה לדיון";
+        private const string AnnexTextRejected = "לא אישר הגעה לדיון";
+
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
         private readonly IOdcanitWriter _odcanitWriter;
@@ -53,10 +62,14 @@ namespace Odmon.Worker.Services
             var mode = !enableWrites ? "disabled" : (dryRun ? "dryrun" : "live");
 
             _logger.LogInformation(
-                "HearingApproval Phase2 mode resolved: Enable={Enable}, DryRun={DryRun}, Mode={Mode}",
-                enableWrites,
-                dryRun,
-                mode);
+                "HearingApproval sync started: Enable={Enable}, DryRun={DryRun}, Mode={Mode}",
+                enableWrites, dryRun, mode);
+
+            if (!enableWrites)
+            {
+                _logger.LogInformation("HearingApproval sync skipped — writes are disabled");
+                return;
+            }
 
             var casesBoardId = _mondaySettings.CasesBoardId != 0
                 ? _mondaySettings.CasesBoardId
@@ -64,31 +77,20 @@ namespace Odmon.Worker.Services
 
             foreach (var c in cases)
             {
-                if (ct.IsCancellationRequested)
-                {
-                    break;
-                }
+                if (ct.IsCancellationRequested) break;
+                if (c.TikCounter <= 0) continue;
 
-                if (c.TikCounter <= 0)
-                {
-                    continue;
-                }
-
-                // Only items with an existing mapping on the cases board
                 var mapping = await _mappingReader.FindReadOnlyAsync(c.TikCounter, casesBoardId, ct);
-
-                if (mapping == null)
-                {
-                    continue;
-                }
+                if (mapping == null) continue;
 
                 var itemId = mapping.MondayItemId;
 
-                var newStatus = await _mondayClient.GetHearingApprovalStatusAsync(itemId, ct);
-                if (string.IsNullOrWhiteSpace(newStatus))
-                {
-                    continue;
-                }
+                var currentIndex = await _mondayClient.GetHearingApprovalStatusAsync(itemId, ct);
+                if (string.IsNullOrWhiteSpace(currentIndex)) continue;
+
+                _logger.LogInformation(
+                    "HearingApproval read: TikCounter={TikCounter}, ItemId={ItemId}, CurrentIndex={CurrentIndex}",
+                    c.TikCounter, itemId, currentIndex);
 
                 var state = await _integrationDb.MondayHearingApprovalStates
                     .FirstOrDefaultAsync(s => s.BoardId == casesBoardId && s.MondayItemId == itemId, ct);
@@ -105,149 +107,92 @@ namespace Odmon.Worker.Services
                     _integrationDb.MondayHearingApprovalStates.Add(state);
                 }
 
-                var oldStatus = state.LastKnownStatus;
+                var previousIndex = state.LastKnownStatus;
 
-                if (oldStatus == newStatus)
+                _logger.LogInformation(
+                    "HearingApproval state: TikCounter={TikCounter}, PreviousIndex={Previous}, CurrentIndex={Current}",
+                    c.TikCounter, previousIndex ?? "<null>", currentIndex);
+
+                if (previousIndex == currentIndex)
                 {
-                    // Idempotent: nothing to do
+                    _logger.LogDebug(
+                        "HearingApproval unchanged: TikCounter={TikCounter}, Status={Status} — skipping",
+                        c.TikCounter, currentIndex);
                     continue;
                 }
 
                 _logger.LogInformation(
-                    "HearingApproval changed: TikCounter={TikCounter}, ItemId={ItemId}, Old={Old}, New={New}, FirstDecision={FirstDecision}",
-                    c.TikCounter,
-                    itemId,
-                    oldStatus ?? "<null>",
-                    newStatus,
-                    state.FirstDecision ?? "<null>");
+                    "HearingApproval change detected: TikCounter={TikCounter}, From={From}, To={To}",
+                    c.TikCounter, previousIndex ?? "<null>", currentIndex);
 
+                var annexText = GetAnnexText(currentIndex);
                 var nowUtc = DateTime.UtcNow;
 
-                // Handle default "5" behavior
-                if (newStatus == "5")
+                if (annexText == null)
                 {
-                    if (!string.IsNullOrWhiteSpace(state.FirstDecision))
+                    if (dryRun)
                     {
-                        _logger.LogWarning(
-                            "Invalid HearingApproval transition suppressed: TikCounter={TikCounter}, ItemId={ItemId}, FirstDecision={FirstDecision}, Old={Old}, New={New}",
-                            c.TikCounter,
-                            itemId,
-                            state.FirstDecision,
-                            oldStatus ?? "<null>",
-                            newStatus);
-                        // Do NOT update LastKnownStatus so it can be retried after manual fix
+                        _logger.LogInformation(
+                            "HearingApproval annex skipped [dryrun] (non-actionable status): TikCounter={TikCounter}, Status={Status} — state NOT advanced",
+                            c.TikCounter, currentIndex);
                         continue;
                     }
 
-                    state.LastKnownStatus = newStatus;
+                    _logger.LogInformation(
+                        "HearingApproval annex skipped (non-actionable status): TikCounter={TikCounter}, Status={Status}",
+                        c.TikCounter, currentIndex);
+
+                    state.LastKnownStatus = currentIndex;
                     state.UpdatedAtUtc = nowUtc;
                     await _integrationDb.SaveChangesAsync(ct);
                     continue;
                 }
 
-                // Only 1 or 2 are actionable
-                if (newStatus != "1" && newStatus != "2")
-                {
-                    // Track but do not write
-                    state.LastKnownStatus = newStatus;
-                    state.UpdatedAtUtc = nowUtc;
-                    await _integrationDb.SaveChangesAsync(ct);
-                    continue;
-                }
-
-                // Require upcoming hearing
-                if (c.HearingDate == null)
-                {
-                    _logger.LogWarning(
-                        "Hearing approval present but no upcoming hearing; suppressed write for TikCounter={TikCounter}, ItemId={ItemId}",
-                        c.TikCounter,
-                        itemId);
-
-                    state.LastKnownStatus = newStatus;
-                    state.UpdatedAtUtc = nowUtc;
-                    await _integrationDb.SaveChangesAsync(ct);
-                    continue;
-                }
-
-                // First decision
-                if (string.IsNullOrWhiteSpace(state.FirstDecision))
-                {
-                    state.FirstDecision = newStatus;
-                }
-                else
-                {
-                    // Enforce 1<->2 toggles; allow if old is null/5
-                    if (!string.IsNullOrWhiteSpace(oldStatus) && oldStatus != "5")
-                    {
-                        var toggleOk =
-                            (oldStatus == "1" && newStatus == "2") ||
-                            (oldStatus == "2" && newStatus == "1");
-
-                        if (!toggleOk)
-                        {
-                            _logger.LogWarning(
-                                "Invalid HearingApproval transition suppressed: TikCounter={TikCounter}, ItemId={ItemId}, FirstDecision={FirstDecision}, Old={Old}, New={New}",
-                                c.TikCounter,
-                                itemId,
-                                state.FirstDecision,
-                                oldStatus ?? "<null>",
-                                newStatus);
-                            // Do NOT update LastKnownStatus so it can be retried
-                            continue;
-                        }
-                    }
-                }
-
-                // Build Info text
-                var policyHolderName = !string.IsNullOrWhiteSpace(c.PolicyHolderName)
-                    ? c.PolicyHolderName
-                    : "בעל פוליסה";
-
-                var statusText = newStatus == "1" ? "מאשר הגעה" : "לא מאשר הגעה";
-                var info = $"{policyHolderName} {statusText}";
-
-                if (c.HearingDate.HasValue)
-                {
-                    var dtLocal = c.HearingDate.Value.Date + (c.HearingTime ?? TimeSpan.Zero);
-                    info += $" | דיון: {dtLocal:dd/MM/yyyy HH\\:mm}";
-                }
-
-                if (!enableWrites || dryRun)
+                if (dryRun)
                 {
                     _logger.LogInformation(
-                        "HearingApproval Nispah write: mode={Mode}, TikCounter={TikCounter}, ItemId={ItemId}, Status={Status}, Info='{Info}'",
-                        mode,
-                        c.TikCounter,
-                        itemId,
-                        newStatus,
-                        info);
-                }
-                else
-                {
-                    try
-                    {
-                        await _odcanitWriter.AppendNispahAsync(c, nowUtc, "אישור הגעה לדיון", info, ct);
-                        state.LastWriteAtUtc = nowUtc;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(
-                            ex,
-                            "HearingApproval Nispah write failed: mode={Mode}, TikCounter={TikCounter}, ItemId={ItemId}, Status={Status}",
-                            mode,
-                            c.TikCounter,
-                            itemId,
-                            newStatus);
-                        // Do NOT update LastKnownStatus so it can be retried
-                        continue;
-                    }
+                        "HearingApproval annex [dryrun]: TikCounter={TikCounter}, Text='{AnnexText}' — state NOT advanced",
+                        c.TikCounter, annexText);
+                    continue;
                 }
 
-                state.LastKnownStatus = newStatus;
+                try
+                {
+                    await _odcanitWriter.AppendNispahAsync(c, nowUtc, NispahTypeName, annexText, ct);
+                    state.LastWriteAtUtc = nowUtc;
+
+                    _logger.LogInformation(
+                        "HearingApproval annex written: TikCounter={TikCounter}, Text='{AnnexText}'",
+                        c.TikCounter, annexText);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "HearingApproval annex write FAILED: TikCounter={TikCounter}, Text='{AnnexText}' — status NOT advanced",
+                        c.TikCounter, annexText);
+                    continue;
+                }
+
+                state.LastKnownStatus = currentIndex;
                 state.UpdatedAtUtc = nowUtc;
                 await _integrationDb.SaveChangesAsync(ct);
+
+                _logger.LogInformation(
+                    "HearingApproval state updated: TikCounter={TikCounter}, NewStatus={NewStatus}",
+                    c.TikCounter, currentIndex);
             }
         }
+
+        /// <summary>
+        /// Maps a Monday status index to the exact annex text to write.
+        /// Returns null for statuses that should not produce an annex.
+        /// </summary>
+        private static string? GetAnnexText(string statusIndex) => statusIndex switch
+        {
+            StatusIndexApproved => AnnexTextApproved,
+            StatusIndexRejected => AnnexTextRejected,
+            _ => null
+        };
     }
 }
 
