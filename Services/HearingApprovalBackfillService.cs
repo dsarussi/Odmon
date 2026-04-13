@@ -191,17 +191,26 @@ namespace Odmon.Worker.Services
 
             result.Actionable++;
 
-            var state = await _integrationDb.MondayHearingApprovalStates
-                .FirstOrDefaultAsync(s => s.BoardId == boardId && s.MondayItemId == itemId, ct);
+            var infoHash = HearingApprovalSyncService.ComputeSha256(annexText);
+            var alreadyWritten = await _integrationDb.NispahWriteLogs.AsNoTracking()
+                .AnyAsync(w =>
+                    w.SourceKind == HearingApprovalSyncService.SourceKindHearingApproval
+                    && w.TikCounter == tikCounter
+                    && w.InfoHash == infoHash
+                    && !w.Failed,
+                    ct);
 
-            if (state != null && state.LastKnownStatus == currentIndex)
+            if (alreadyWritten)
             {
                 result.SkippedAlreadyProcessed++;
                 _logger.LogDebug(
-                    "HEARING_APPROVAL_BACKFILL | Already processed: TikCounter={TikCounter}, ItemId={ItemId}, Status={Status}",
+                    "HEARING_APPROVAL_BACKFILL | Already written (NispahWriteLog proof): TikCounter={TikCounter}, ItemId={ItemId}, Status={Status}",
                     tikCounter, itemId, currentIndex);
                 return;
             }
+
+            var state = await _integrationDb.MondayHearingApprovalStates
+                .FirstOrDefaultAsync(s => s.BoardId == boardId && s.MondayItemId == itemId, ct);
 
             if (dryRun)
             {
