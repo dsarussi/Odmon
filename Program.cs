@@ -151,6 +151,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.Configure<DocumentIngestionSettings>(config.GetSection("MondayDocumentIngestion"));
     services.Configure<OdcanitDocumentSettings>(config.GetSection("OdcanitDocuments"));
     services.Configure<HearingBackfillSettings>(config.GetSection("HearingBackfill"));
+    services.Configure<HearingApprovalBackfillSettings>(config.GetSection("HearingApprovalBackfill"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
@@ -171,6 +172,8 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddHostedService<SyncWorker>();
     services.AddScoped<HearingBackfillService>();
     services.AddHostedService<HearingBackfillWorker>();
+    services.AddScoped<HearingApprovalBackfillService>();
+    services.AddHostedService<HearingApprovalBackfillWorker>();
 
     // Document ingestion from Monday questionnaire board
     services.AddHttpClient<DocumentIngestionMondayService>(client =>
