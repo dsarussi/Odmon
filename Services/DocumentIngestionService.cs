@@ -701,6 +701,23 @@ namespace Odmon.Worker.Services
                         "TASKDOC IMPORT SUCCESS | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, DocCounter={DocCounter}, DestPath={DestPath}",
                         questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId, record.OdcanitDocCounter, record.OdcanitDestPath);
             }
+            catch (OversizedFileException ofx)
+            {
+                assetSw.Stop();
+                record.RetryCount = maxAttempts;
+                record.Status = DocumentImportStatus.Failed;
+                record.ErrorMessage = ofx.Message.Length > 2000 ? ofx.Message[..2000] : ofx.Message;
+                record.UpdatedAtUtc = DateTime.UtcNow;
+                await SaveRecordAsync(record);
+                _totalSkipped++;
+                _logger.LogWarning(
+                    "DOCINGESTION SKIP file too large (no retries) | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, ColumnId={ColumnId}, FileName={FileName}, FileSize={FileSize}, MaxSize={MaxSize}, Reason=FILE_TOO_LARGE",
+                    assetIdStr, questionnaireItemId, tikCounter, tikVisualID, columnId, record.OriginalFileName, ofx.FileSize, ofx.MaxSize);
+                if (linkedCaseItemId == 0)
+                    _logger.LogWarning("TASKDOC IMPORT FAILED | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, Reason=FILE_TOO_LARGE",
+                        questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId);
+                return;
+            }
             catch (InvalidExtensionException iex)
             {
                 assetSw.Stop();
@@ -711,11 +728,11 @@ namespace Odmon.Worker.Services
                 await SaveRecordAsync(record);
                 _totalSkipped++;
                 _logger.LogWarning(
-                    "DOCINGESTION SKIP invalid extension (no retries) | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, Reason=InvalidExtension",
-                    assetIdStr, questionnaireItemId, tikCounter, tikVisualID);
+                    "DOCINGESTION SKIP extension rejected (no retries) | AssetId={AssetId}, ItemId={ItemId}, TikCounter={TikCounter}, TikVisualID={TikVisualID}, ColumnId={ColumnId}, FileName={FileName}, Extension={Extension}, Reason={Reason}",
+                    assetIdStr, questionnaireItemId, tikCounter, tikVisualID, columnId, record.OriginalFileName, iex.DetectedExtension ?? "", iex.Reason);
                 if (linkedCaseItemId == 0)
-                    _logger.LogWarning("TASKDOC IMPORT FAILED | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, Reason=InvalidExtension",
-                        questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId);
+                    _logger.LogWarning("TASKDOC IMPORT FAILED | ItemId={ItemId}, TikNumber={TikNumber}, TikCounter={TikCounter}, AssetId={AssetId}, ColumnId={ColumnId}, Reason={Reason}",
+                        questionnaireItemId, tikVisualID, tikCounter, assetIdStr, columnId, iex.Reason);
                 return;
             }
             catch (Exception ex)
@@ -769,9 +786,21 @@ namespace Odmon.Worker.Services
 
             record.OriginalFileName = assetInfo.Name ?? string.Empty;
 
-            if (assetInfo.FileSize > _settings.MaxFileSizeBytes)
-                throw new InvalidOperationException(
-                    $"Asset {assetId} size {assetInfo.FileSize} exceeds max {_settings.MaxFileSizeBytes} bytes");
+            var rawExt = Path.GetExtension(assetInfo.Name ?? "")?.TrimStart('.').ToLowerInvariant();
+            if (_settings.IsDeniedExtension(rawExt) || _settings.IsDeniedExtension(assetInfo.FileExtension))
+            {
+                var deniedExt = _settings.IsDeniedExtension(rawExt) ? rawExt : assetInfo.FileExtension;
+                throw new InvalidExtensionException(
+                    $"DENYLIST_EXTENSION; asset {assetId} has denied extension '{deniedExt}' (file: {assetInfo.Name}, column: {record.ColumnId})",
+                    reason: "DENYLIST_EXTENSION",
+                    detectedExtension: deniedExt);
+            }
+
+            var maxSizeForColumn = _settings.GetMaxFileSizeForColumn(record.ColumnId);
+            if (assetInfo.FileSize > maxSizeForColumn)
+                throw new OversizedFileException(
+                    $"FILE_TOO_LARGE; asset {assetId} size {assetInfo.FileSize} exceeds max {maxSizeForColumn} bytes (file: {assetInfo.Name}, column: {record.ColumnId})",
+                    assetInfo.FileSize, maxSizeForColumn);
 
             // Use the exact URL from Monday as an opaque string; never add/remove/normalize query params.
             var downloadUrl = assetInfo.PublicUrl;
@@ -1667,9 +1696,29 @@ namespace Odmon.Worker.Services
         }
     }
 
-    /// <summary>Thrown when extension cannot be resolved; do not retry.</summary>
+    /// <summary>Thrown when extension cannot be resolved or is denied; do not retry.</summary>
     public sealed class InvalidExtensionException : InvalidOperationException
     {
-        public InvalidExtensionException(string message) : base(message) { }
+        public string Reason { get; }
+        public string? DetectedExtension { get; }
+        public InvalidExtensionException(string message, string reason = "UNSUPPORTED_EXTENSION", string? detectedExtension = null)
+            : base(message)
+        {
+            Reason = reason;
+            DetectedExtension = detectedExtension;
+        }
+    }
+
+    /// <summary>Thrown when file exceeds the configured size limit; do not retry.</summary>
+    public sealed class OversizedFileException : InvalidOperationException
+    {
+        public long FileSize { get; }
+        public long MaxSize { get; }
+        public OversizedFileException(string message, long fileSize, long maxSize)
+            : base(message)
+        {
+            FileSize = fileSize;
+            MaxSize = maxSize;
+        }
     }
 }

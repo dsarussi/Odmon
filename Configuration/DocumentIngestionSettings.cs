@@ -11,6 +11,7 @@ namespace Odmon.Worker.Configuration
             ["file_mm1bvngc"] = "כתב תביעה",
             ["file_mm0qwtat"] = "תצהיר ויפוי כח",
             ["file_mkzr2cmr"] = "מסמך נלווה",
+            ["file_mkyet713"] = "תיעוד ממקום התאונה",
         };
 
         private static readonly Dictionary<int, string> ClientMap = new()
@@ -105,6 +106,32 @@ namespace Odmon.Worker.Configuration
         public long MaxFileSizeBytes { get; set; } = 52428800;
         public string[] AllowedExtensions { get; set; } = ["pdf", "jpg", "jpeg", "png"];
         public string[] Columns { get; set; } = ["file_mm0qwtat", "file_mkzr2cmr"];
+
+        /// <summary>Per-column max file size overrides. Key = column ID, value = max bytes. Falls back to <see cref="MaxFileSizeBytes"/> if absent.</summary>
+        public Dictionary<string, long> ColumnMaxFileSizeBytes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Extensions that are always blocked regardless of allowlist.
+        /// Checked against the raw filename from Monday before downloading.
+        /// </summary>
+        public string[] DeniedExtensions { get; set; } =
+            ["exe", "msi", "bat", "cmd", "ps1", "js", "vbs", "scr", "com", "hta", "jar", "zip", "rar", "7z"];
+
+        public long GetMaxFileSizeForColumn(string? columnId)
+        {
+            if (!string.IsNullOrEmpty(columnId) &&
+                ColumnMaxFileSizeBytes.TryGetValue(columnId, out var perColumn) &&
+                perColumn > 0)
+                return perColumn;
+            return MaxFileSizeBytes;
+        }
+
+        public bool IsDeniedExtension(string? ext)
+        {
+            if (string.IsNullOrWhiteSpace(ext)) return false;
+            var normalized = ext.TrimStart('.');
+            return Array.Exists(DeniedExtensions, d => string.Equals(d, normalized, StringComparison.OrdinalIgnoreCase));
+        }
         public string RelationColumnId { get; set; } = "board_relation_mkzenscq";
         public string LinkedCaseTikColumnId { get; set; } = "text_mkwe19hn";
         public int IntervalSeconds { get; set; } = 300;

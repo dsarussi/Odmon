@@ -219,6 +219,13 @@ namespace Odmon.Worker.Workers
                 ).ToListAsync(ct);
 
                 // Section 5 — System notes (from SyncRunMetrics in window)
+                // Section — Document Ingestion Failures
+                var docIngestionFailures = await db.MondayDocumentImports
+                    .AsNoTracking()
+                    .Where(d => d.Status == DocumentImportStatus.Failed && d.UpdatedAtUtc >= startUtc && d.UpdatedAtUtc <= endUtc)
+                    .OrderBy(d => d.UpdatedAtUtc)
+                    .ToListAsync(ct);
+
                 var runMetricsInWindow = await db.SyncRunMetrics
                     .AsNoTracking()
                     .Where(m => m.StartedAtUtc >= startUtc && m.StartedAtUtc <= endUtc)
@@ -237,6 +244,7 @@ namespace Odmon.Worker.Workers
                     casesCreated.Select(c => (c.TikNumber ?? "", c.CreatedAtUtc)).ToList(),
                     hearingsSynced.Select(x => (x.TikNumber ?? "", x.LastSyncedAtUtc)).ToList(),
                     groupedFailures,
+                    docIngestionFailures,
                     circuitBreakerTripped,
                     highFailureNote);
 
@@ -274,6 +282,7 @@ namespace Odmon.Worker.Workers
             List<(string TikNumber, DateTime CreatedAtUtc)> casesCreated,
             List<(string TikNumber, DateTime LastSyncedAtUtc)> hearingsSynced,
             List<(string CaseNumber, string Operation, string RootCause, int Count, DateTime FirstOccurrence)> groupedFailures,
+            List<MondayDocumentImport> docIngestionFailures,
             bool circuitBreakerTripped,
             bool highFailureNote)
         {
@@ -292,6 +301,10 @@ namespace Odmon.Worker.Workers
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Items updated yesterday</td><td style='padding:4px;'>{itemsUpdatedCount}</td></tr>");
             var failStyle = realFailureCount > 0 ? "color:red;font-weight:bold;" : "";
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Real failures yesterday</td><td style='padding:4px;{failStyle}'>{realFailureCount}</td></tr>");
+            var docFailTotal = docIngestionFailures.Count;
+            var docFailScene = docIngestionFailures.Count(d => string.Equals(d.ColumnId, "file_mkyet713", StringComparison.OrdinalIgnoreCase));
+            var docFailStyle = docFailTotal > 0 ? "color:#d35400;font-weight:bold;" : "";
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Document ingestion failures</td><td style='padding:4px;{docFailStyle}'>{docFailTotal} (scene-docs: {docFailScene})</td></tr>");
             sb.AppendLine("</table>");
 
             // Section 2 — Cases Created Yesterday
@@ -339,6 +352,48 @@ namespace Odmon.Worker.Workers
                 foreach (var g in groupedFailures)
                 {
                     sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{E(g.CaseNumber)}</td><td style='border:1px solid #ddd;'>{E(g.Operation)}</td><td style='border:1px solid #ddd;'>{E(g.RootCause)}</td><td style='border:1px solid #ddd;'>{g.Count}</td><td style='border:1px solid #ddd;'>{g.FirstOccurrence:yyyy-MM-dd HH:mm}</td></tr>");
+                }
+                sb.AppendLine("</table>");
+            }
+
+            // Section 4b — Document Ingestion Failures
+            sb.AppendLine("<hr/>");
+            sb.AppendLine("<h3 style='margin:16px 0 8px;'>Document Ingestion Failures</h3>");
+            if (docIngestionFailures.Count == 0)
+                sb.AppendLine("<p>None.</p>");
+            else
+            {
+                sb.AppendLine($"<p>Total: <b>{docFailTotal}</b> &nbsp;|&nbsp; Column file_mkyet713 (scene docs): <b>{docFailScene}</b></p>");
+                sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;font-size:13px;' cellpadding='5'>");
+                sb.AppendLine("<tr style='background:#f5f5f5;'>"
+                    + "<th style='border:1px solid #ddd;'>TikNumber</th>"
+                    + "<th style='border:1px solid #ddd;'>TikCounter</th>"
+                    + "<th style='border:1px solid #ddd;'>MondayItemId</th>"
+                    + "<th style='border:1px solid #ddd;'>ColumnId</th>"
+                    + "<th style='border:1px solid #ddd;'>AssetId</th>"
+                    + "<th style='border:1px solid #ddd;'>FileName</th>"
+                    + "<th style='border:1px solid #ddd;'>Retries</th>"
+                    + "<th style='border:1px solid #ddd;'>Status</th>"
+                    + "<th style='border:1px solid #ddd;'>LastError</th>"
+                    + "<th style='border:1px solid #ddd;'>FirstFailure (UTC)</th>"
+                    + "<th style='border:1px solid #ddd;'>LastFailure (UTC)</th>"
+                    + "</tr>");
+                foreach (var d in docIngestionFailures)
+                {
+                    var errSnippet = (d.ErrorMessage ?? "").Length > 120 ? d.ErrorMessage![..120] + "…" : d.ErrorMessage ?? "";
+                    sb.AppendLine("<tr>"
+                        + $"<td style='border:1px solid #ddd;'>{E(d.TikVisualID ?? "")}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{d.TikCounter}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{d.MondayQuestionnaireItemId}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{E(d.ColumnId)}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{E(d.AssetId)}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{E(d.OriginalFileName)}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{d.RetryCount}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{d.Status}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{E(errSnippet)}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{d.CreatedAtUtc:yyyy-MM-dd HH:mm}</td>"
+                        + $"<td style='border:1px solid #ddd;'>{d.UpdatedAtUtc:yyyy-MM-dd HH:mm}</td>"
+                        + "</tr>");
                 }
                 sb.AppendLine("</table>");
             }
