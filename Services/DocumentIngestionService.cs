@@ -852,12 +852,17 @@ namespace Odmon.Worker.Services
                 detection = TryDetectExtensionFromMagicBytes(magicBuffer.AsSpan(0, read).ToArray(), allowlist);
                 if (detection == null)
                 {
+                    var rawNameExt = Path.GetExtension(assetInfo.Name ?? "")?.TrimStart('.').ToLowerInvariant();
+                    var hasRecognizableExt = !string.IsNullOrEmpty(rawNameExt) && rawNameExt.Length <= MaxExtensionLength;
+                    var reason = hasRecognizableExt ? "UNSUPPORTED_EXTENSION" : "UNKNOWN_MEDIA_SIGNATURE";
                     _logger.LogWarning(
-                        "DOCINGESTION SKIP no valid extension | AssetId={AssetId}, ItemId={ItemId}, assetName={AssetName}, assetFileExtension={AssetFileExtension}, detectedExtension=, detectionSource=, Allowlist=[{Allowlist}]",
-                        assetId, record.MondayQuestionnaireItemId, SafeFileNameForLog(assetInfo.Name), assetInfo.FileExtension ?? "", string.Join(",", allowlist));
+                        "DOCINGESTION SKIP no valid extension | AssetId={AssetId}, ItemId={ItemId}, assetName={AssetName}, assetFileExtension={AssetFileExtension}, detectedExtension=, detectionSource=, Allowlist=[{Allowlist}], Reason={Reason}",
+                        assetId, record.MondayQuestionnaireItemId, SafeFileNameForLog(assetInfo.Name), assetInfo.FileExtension ?? "", string.Join(",", allowlist), reason);
                     await contentStreamForMagic.DisposeAsync();
                     throw new InvalidExtensionException(
-                        $"InvalidExtension; no allowed extension for asset {assetId}. Name/file_extension not in allowlist and content-type/magic did not resolve.");
+                        $"{reason}; no allowed extension for asset {assetId}. Name/file_extension not in allowlist and content-type/magic did not resolve. (rawExt={rawNameExt})",
+                        reason: reason,
+                        detectedExtension: hasRecognizableExt ? rawNameExt : null);
                 }
                 if (read < 8)
                     magicBuffer = null;
@@ -1479,7 +1484,9 @@ namespace Odmon.Worker.Services
             ["image/jpg"] = "jpg",
             ["image/png"] = "png",
             ["image/gif"] = "gif",
-            ["image/webp"] = "webp"
+            ["image/webp"] = "webp",
+            ["video/mp4"] = "mp4",
+            ["video/quicktime"] = "mov",
         };
 
         internal const int MaxExtensionLength = 5;
@@ -1591,15 +1598,30 @@ namespace Odmon.Worker.Services
             return new ExtensionDetectionResult { Extension = ext, DetectionSource = SourceContentType, MimeType = contentType };
         }
 
-        /// <summary>Check first bytes for %PDF; only returns pdf if in allowlist.</summary>
+        /// <summary>Check first bytes for known signatures; only returns extensions present in the allowlist.</summary>
         internal static ExtensionDetectionResult? TryDetectExtensionFromMagicBytes(byte[] firstBytes, IReadOnlyList<string> allowlist)
         {
             if (allowlist == null || allowlist.Count == 0) return null;
-            var set = new HashSet<string>(allowlist, StringComparer.OrdinalIgnoreCase);
-            if (!set.Contains("pdf")) return null;
             if (firstBytes == null || firstBytes.Length < 4) return null;
-            if (firstBytes[0] == 0x25 && firstBytes[1] == 0x50 && firstBytes[2] == 0x44 && firstBytes[3] == 0x46) // %PDF
+            var set = new HashSet<string>(allowlist, StringComparer.OrdinalIgnoreCase);
+
+            // %PDF (0x25504446)
+            if (set.Contains("pdf") &&
+                firstBytes[0] == 0x25 && firstBytes[1] == 0x50 && firstBytes[2] == 0x44 && firstBytes[3] == 0x46)
                 return new ExtensionDetectionResult { Extension = "pdf", DetectionSource = SourceMagicBytes };
+
+            // ISO BMFF 'ftyp' atom at offset 4 — MP4 / MOV / QuickTime containers
+            if (firstBytes.Length >= 8 &&
+                firstBytes[4] == 0x66 && firstBytes[5] == 0x74 && firstBytes[6] == 0x79 && firstBytes[7] == 0x70) // ftyp
+            {
+                if (set.Contains("mp4"))
+                    return new ExtensionDetectionResult { Extension = "mp4", DetectionSource = SourceMagicBytes };
+                if (set.Contains("mov"))
+                    return new ExtensionDetectionResult { Extension = "mov", DetectionSource = SourceMagicBytes };
+                if (set.Contains("qt"))
+                    return new ExtensionDetectionResult { Extension = "qt", DetectionSource = SourceMagicBytes };
+            }
+
             return null;
         }
 
