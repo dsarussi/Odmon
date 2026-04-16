@@ -75,18 +75,25 @@ namespace Odmon.Worker.Voicenter
             try
             {
                 using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
 
                 JsonElement dataArray;
-                if (doc.RootElement.ValueKind == JsonValueKind.Array)
-                    dataArray = doc.RootElement;
-                else if (doc.RootElement.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.Array)
+                if (root.TryGetProperty("CDR_LIST", out var cdrList) && cdrList.ValueKind == JsonValueKind.Array)
+                    dataArray = cdrList;
+                else if (root.ValueKind == JsonValueKind.Array)
+                    dataArray = root;
+                else if (root.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.Array)
                     dataArray = d;
                 else
                 {
-                    _logger.LogWarning("VOICENTER | CDR response has unexpected structure; RootKind={Kind}",
-                        doc.RootElement.ValueKind);
+                    _logger.LogWarning("VOICENTER | CDR response has unexpected structure; RootKind={Kind}, HasCDR_LIST=false",
+                        root.ValueKind);
                     return result;
                 }
+
+                _logger.LogInformation(
+                    "VOICENTER | CDR parsed | RootKind={RootKind}, CDR_LIST_Found={Found}, Count={Count}",
+                    root.ValueKind, root.TryGetProperty("CDR_LIST", out _), dataArray.GetArrayLength());
 
                 foreach (var item in dataArray.EnumerateArray())
                 {
