@@ -132,22 +132,26 @@ namespace Odmon.Worker.Voicenter
                     return null;
                 }
 
+                // Data.ai_data (phone + summary live here)
+                JsonElement aiData = default;
+                if (dataObj.ValueKind == JsonValueKind.Object)
+                    dataObj.TryGetProperty("ai_data", out aiData);
+
                 var detail = new VoicenterCallDetail
                 {
                     CallId = callId,
                     UniqueId = GetStringProp(cdr, "iVR_unique_id"),
                     DurationSeconds = GetIntProp(cdr, "sec_total"),
                     DialStatus = GetStringProp(cdr, "dialstatus_name"),
-                    ClientPhone = GetStringProp(cdr, "client_phone"),
+                    ClientPhone = GetStringProp(aiData, "client_phone") ?? GetStringProp(cdr, "client_phone"),
                     TargetNo = GetStringProp(cdr, "target_no"),
                     CallerNo = GetStringProp(cdr, "caller_no"),
-                    AiExists = GetBoolProp(cdr, "AiExists"),
                 };
 
                 if (DateTime.TryParse(GetStringProp(cdr, "cdr_time"), out var parsedTime))
                     detail.CallTime = DateTime.SpecifyKind(parsedTime, DateTimeKind.Utc);
 
-                detail.AiSummary = ExtractAiSummary(root);
+                detail.AiSummary = ExtractAiSummary(aiData, root);
 
                 return detail;
             }
@@ -158,50 +162,30 @@ namespace Odmon.Worker.Voicenter
             }
         }
 
-        private static string? ExtractAiSummary(JsonElement root)
+        /// <summary>
+        /// Extract AI summary. Primary: ai_data.insights.summary (confirmed Voicenter payload structure).
+        /// aiData is already resolved as Data.ai_data by the caller.
+        /// </summary>
+        private static string? ExtractAiSummary(JsonElement aiData, JsonElement root)
         {
-            // Primary path: aiData.insights.summary (observed in real Voicenter payloads)
-            if (TryGetNestedString(root, "aiData", "insights", "summary", out var primary))
+            // Primary: ai_data.insights.summary (pre-resolved from Data.ai_data)
+            if (aiData.ValueKind == JsonValueKind.Object
+                && aiData.TryGetProperty("insights", out var insights)
+                && TryGetString(insights, "summary", out var primary))
                 return primary;
 
-            // Case-variant: Data.aiData.insights.summary
-            if ((root.TryGetProperty("Data", out var data) || root.TryGetProperty("data", out data))
-                && TryGetNestedString(data, "aiData", "insights", "summary", out var nested))
-                return nested;
-
-            // Fallback: scan common flat/nested locations
-            string[] summaryKeys = ["summary", "ai_summary", "Summary", "AiSummary"];
-
+            // Fallback: scan common flat locations on root
+            string[] summaryKeys = ["summary", "ai_summary", "Summary"];
             foreach (var key in summaryKeys)
                 if (TryGetString(root, key, out var v)) return v;
 
-            if (data.ValueKind == JsonValueKind.Object)
+            if (root.TryGetProperty("Data", out var data) || root.TryGetProperty("data", out data))
             {
                 foreach (var key in summaryKeys)
                     if (TryGetString(data, key, out var v)) return v;
-
-                if (data.TryGetProperty("cdr_data", out var cdr))
-                    foreach (var key in summaryKeys)
-                        if (TryGetString(cdr, key, out var v)) return v;
-
-                if (data.TryGetProperty("ai_data", out var ai))
-                    foreach (var key in summaryKeys)
-                        if (TryGetString(ai, key, out var v)) return v;
             }
 
             return null;
-        }
-
-        private static bool TryGetNestedString(JsonElement el, string a, string b, string c, out string? value)
-        {
-            value = null;
-            if (el.TryGetProperty(a, out var aEl) && aEl.TryGetProperty(b, out var bEl) && bEl.TryGetProperty(c, out var cEl)
-                && cEl.ValueKind == JsonValueKind.String)
-            {
-                value = cEl.GetString();
-                return !string.IsNullOrWhiteSpace(value);
-            }
-            return false;
         }
 
         private static bool TryGetString(JsonElement el, string key, out string? value)

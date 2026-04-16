@@ -22,7 +22,6 @@ namespace Odmon.Worker.Voicenter
         public string? ClientPhone { get; set; }
         public string? TargetNo { get; set; }
         public string? CallerNo { get; set; }
-        public bool AiExists { get; set; }
         public string? AiSummary { get; set; }
     }
 
