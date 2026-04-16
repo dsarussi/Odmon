@@ -847,8 +847,8 @@ namespace Odmon.Worker.Services
             if (detection == null)
             {
                 contentStreamForMagic = await response.Content.ReadAsStreamAsync(ct);
-                magicBuffer = new byte[8];
-                var read = await contentStreamForMagic.ReadAsync(magicBuffer.AsMemory(0, 8), ct);
+                magicBuffer = new byte[12];
+                var read = await contentStreamForMagic.ReadAsync(magicBuffer.AsMemory(0, 12), ct);
                 detection = TryDetectExtensionFromMagicBytes(magicBuffer.AsSpan(0, read).ToArray(), allowlist);
                 if (detection == null)
                 {
@@ -864,7 +864,7 @@ namespace Odmon.Worker.Services
                         reason: reason,
                         detectedExtension: hasRecognizableExt ? rawNameExt : null);
                 }
-                if (read < 8)
+                if (read < 12)
                     magicBuffer = null;
             }
 
@@ -1487,6 +1487,8 @@ namespace Odmon.Worker.Services
             ["image/webp"] = "webp",
             ["video/mp4"] = "mp4",
             ["video/quicktime"] = "mov",
+            ["image/heic"] = "heic",
+            ["image/heif"] = "heif",
         };
 
         internal const int MaxExtensionLength = 5;
@@ -1598,6 +1600,9 @@ namespace Odmon.Worker.Services
             return new ExtensionDetectionResult { Extension = ext, DetectionSource = SourceContentType, MimeType = contentType };
         }
 
+        private static readonly HashSet<string> HeicBrands = new(StringComparer.Ordinal)
+            { "heic", "heix", "mif1", "msf1", "hevc", "hevx" };
+
         /// <summary>Check first bytes for known signatures; only returns extensions present in the allowlist.</summary>
         internal static ExtensionDetectionResult? TryDetectExtensionFromMagicBytes(byte[] firstBytes, IReadOnlyList<string> allowlist)
         {
@@ -1610,10 +1615,38 @@ namespace Odmon.Worker.Services
                 firstBytes[0] == 0x25 && firstBytes[1] == 0x50 && firstBytes[2] == 0x44 && firstBytes[3] == 0x46)
                 return new ExtensionDetectionResult { Extension = "pdf", DetectionSource = SourceMagicBytes };
 
-            // ISO BMFF 'ftyp' atom at offset 4 — MP4 / MOV / QuickTime containers
+            // ISO BMFF 'ftyp' atom at offset 4
             if (firstBytes.Length >= 8 &&
                 firstBytes[4] == 0x66 && firstBytes[5] == 0x74 && firstBytes[6] == 0x79 && firstBytes[7] == 0x70) // ftyp
             {
+                // Read major brand at offset 8-11 to distinguish image vs video containers
+                if (firstBytes.Length >= 12)
+                {
+                    var brand = new string(new[] {
+                        (char)firstBytes[8], (char)firstBytes[9],
+                        (char)firstBytes[10], (char)firstBytes[11] });
+
+                    // HEIC/HEIF image containers — must NOT fall through to mp4
+                    if (HeicBrands.Contains(brand))
+                    {
+                        if (set.Contains("heic"))
+                            return new ExtensionDetectionResult { Extension = "heic", DetectionSource = SourceMagicBytes };
+                        if (set.Contains("heif"))
+                            return new ExtensionDetectionResult { Extension = "heif", DetectionSource = SourceMagicBytes };
+                        return null;
+                    }
+
+                    // QuickTime container
+                    if (brand.StartsWith("qt", StringComparison.Ordinal))
+                    {
+                        if (set.Contains("mov"))
+                            return new ExtensionDetectionResult { Extension = "mov", DetectionSource = SourceMagicBytes };
+                        if (set.Contains("qt"))
+                            return new ExtensionDetectionResult { Extension = "qt", DetectionSource = SourceMagicBytes };
+                    }
+                }
+
+                // Generic video container (isom, mp41, mp42, avc1, dash, M4V, etc.)
                 if (set.Contains("mp4"))
                     return new ExtensionDetectionResult { Extension = "mp4", DetectionSource = SourceMagicBytes };
                 if (set.Contains("mov"))

@@ -10,7 +10,7 @@ namespace Odmon.Worker.Configuration
         {
             ["file_mm1bvngc"] = "כתב תביעה",
             ["file_mm0qwtat"] = "תצהיר ויפוי כח",
-            ["file_mkzr2cmr"] = "מסמך נלווה",
+            ["file_mkzr2cmr"] = "אישור ניהול חשבון",
             ["file_mkyet713"] = "תיעוד ממקום התאונה",
         };
 
