@@ -125,21 +125,33 @@ namespace Odmon.Worker.Voicenter
             {
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
-
-                JsonElement cdr;
-                if (root.TryGetProperty("Data", out var dataObj) && dataObj.TryGetProperty("cdr_data", out cdr))
-                { /* nested Data.cdr_data */ }
-                else if (root.TryGetProperty("data", out var dataLower) && dataLower.TryGetProperty("cdr_data", out cdr))
-                { /* lowercase variant */ }
-                else if (root.TryGetProperty("cdr_data", out cdr))
-                { /* flat */ }
-                else
+                if (root.ValueKind != JsonValueKind.Object)
                 {
-                    _logger.LogDebug("VOICENTER | No cdr_data in detail response for CallID={CallId}", callId);
+                    _logger.LogWarning("VOICENTER | Skipping CallID={CallId} due to unexpected JSON shape in call detail response (RootKind={Kind})",
+                        callId, root.ValueKind);
                     return null;
                 }
 
-                // Data.ai_data (phone + summary live here)
+                JsonElement dataObj = default;
+                JsonElement cdr = default;
+                bool hasCdr = false;
+
+                if (root.TryGetProperty("Data", out dataObj) && dataObj.ValueKind == JsonValueKind.Object
+                    && dataObj.TryGetProperty("cdr_data", out cdr) && cdr.ValueKind == JsonValueKind.Object)
+                    hasCdr = true;
+                else if (root.TryGetProperty("data", out dataObj) && dataObj.ValueKind == JsonValueKind.Object
+                    && dataObj.TryGetProperty("cdr_data", out cdr) && cdr.ValueKind == JsonValueKind.Object)
+                    hasCdr = true;
+                else if (root.TryGetProperty("cdr_data", out cdr) && cdr.ValueKind == JsonValueKind.Object)
+                    hasCdr = true;
+
+                if (!hasCdr)
+                {
+                    _logger.LogWarning("VOICENTER | Skipping CallID={CallId} due to unexpected JSON shape in call detail response (no cdr_data object)",
+                        callId);
+                    return null;
+                }
+
                 JsonElement aiData = default;
                 if (dataObj.ValueKind == JsonValueKind.Object)
                     dataObj.TryGetProperty("ai_data", out aiData);
@@ -162,9 +174,9 @@ namespace Odmon.Worker.Voicenter
 
                 return detail;
             }
-            catch (JsonException ex)
+            catch (Exception ex)
             {
-                _logger.LogWarning(ex, "VOICENTER | Failed to parse call detail for CallID={CallId}", callId);
+                _logger.LogWarning(ex, "VOICENTER | Skipping CallID={CallId} due to unexpected JSON shape in call detail response", callId);
                 return null;
             }
         }
@@ -198,6 +210,7 @@ namespace Odmon.Worker.Voicenter
         private static bool TryGetString(JsonElement el, string key, out string? value)
         {
             value = null;
+            if (el.ValueKind != JsonValueKind.Object) return false;
             if (el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String)
             {
                 value = v.GetString();
@@ -208,6 +221,7 @@ namespace Odmon.Worker.Voicenter
 
         private static string? GetStringProp(JsonElement el, string name)
         {
+            if (el.ValueKind != JsonValueKind.Object) return null;
             if (el.TryGetProperty(name, out var v))
             {
                 return v.ValueKind switch
@@ -222,6 +236,7 @@ namespace Odmon.Worker.Voicenter
 
         private static int GetIntProp(JsonElement el, string name)
         {
+            if (el.ValueKind != JsonValueKind.Object) return 0;
             if (el.TryGetProperty(name, out var v))
             {
                 if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n)) return n;
@@ -232,6 +247,7 @@ namespace Odmon.Worker.Voicenter
 
         private static bool GetBoolProp(JsonElement el, string name)
         {
+            if (el.ValueKind != JsonValueKind.Object) return false;
             if (el.TryGetProperty(name, out var v))
             {
                 if (v.ValueKind is JsonValueKind.True) return true;

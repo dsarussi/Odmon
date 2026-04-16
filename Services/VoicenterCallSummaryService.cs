@@ -92,15 +92,26 @@ namespace Odmon.Worker.Services
                 if (_settings.MinimumDurationSeconds > 0 && cdr.Duration < _settings.MinimumDurationSeconds)
                     continue;
 
-                if (_settings.ThrottleMs > 0)
-                    await Task.Delay(_settings.ThrottleMs, ct);
+                try
+                {
+                    if (_settings.ThrottleMs > 0)
+                        await Task.Delay(_settings.ThrottleMs, ct);
 
-                var detail = await _api.FetchCallDetailAsync(bearerToken, cdr.CallID, ct);
-                if (detail == null)
-                    continue;
-                result.DetailsFetched++;
+                    var detail = await _api.FetchCallDetailAsync(bearerToken, cdr.CallID, ct);
+                    if (detail == null)
+                        continue;
+                    result.DetailsFetched++;
 
-                await ProcessCallDetailAsync(detail, result, ct);
+                    await ProcessCallDetailAsync(detail, result, ct);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    result.Failed++;
+                    if (result.FailedCallIds.Count < 20)
+                        result.FailedCallIds.Add(cdr.CallID!);
+                    _logger.LogError(ex, "VOICENTER | Per-call failure | CallID={CallId}", cdr.CallID);
+                }
             }
 
             _logger.LogInformation(
@@ -202,6 +213,8 @@ namespace Odmon.Worker.Services
                 _logger.LogError(ex, "VOICENTER | Annex write FAILED | CallID={CallId}, TikNumber={TikNumber}",
                     detail.CallId, match.TikNumber);
                 result.Failed++;
+                if (result.FailedCallIds.Count < 20 && !result.FailedCallIds.Contains(detail.CallId))
+                    result.FailedCallIds.Add(detail.CallId);
                 return;
             }
 

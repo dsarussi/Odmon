@@ -41,5 +41,6 @@ namespace Odmon.Worker.Voicenter
         public int SkippedDuplicate { get; set; }
         public int Written { get; set; }
         public int Failed { get; set; }
+        public List<string> FailedCallIds { get; set; } = [];
     }
 }

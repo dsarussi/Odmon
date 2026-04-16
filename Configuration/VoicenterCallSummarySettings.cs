@@ -22,5 +22,12 @@ namespace Odmon.Worker.Configuration
 
         /// <summary>Throttle delay in ms between call-detail API requests.</summary>
         public int ThrottleMs { get; set; } = 500;
+
+        // ─── Alerting & resilience ───
+
+        public bool AlertOnUnhandledException { get; set; } = true;
+        public bool AlertOnStaleWorker { get; set; } = true;
+        public double StaleWorkerThresholdHours { get; set; } = 18;
+        public int FailureAlertCooldownMinutes { get; set; } = 60;
     }
 }

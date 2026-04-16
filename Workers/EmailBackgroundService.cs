@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using Odmon.Worker.Data;
 using Odmon.Worker.Models;
 using Odmon.Worker.Services;
+using Odmon.Worker.Voicenter;
 
 namespace Odmon.Worker.Workers
 {
@@ -226,6 +227,28 @@ namespace Odmon.Worker.Workers
                     .OrderBy(d => d.UpdatedAtUtc)
                     .ToListAsync(ct);
 
+                // Section — Voicenter call summary stats
+                var voicenterWritten = await db.NispahWriteLogs
+                    .AsNoTracking()
+                    .CountAsync(w => w.SourceKind == VoicenterCallSummaryService.SourceKind
+                                     && !w.Failed
+                                     && w.CreatedAtUtc >= startUtc && w.CreatedAtUtc <= endUtc, ct);
+                var voicenterFailed = await db.NispahWriteLogs
+                    .AsNoTracking()
+                    .Where(w => w.SourceKind == VoicenterCallSummaryService.SourceKind
+                                && w.Failed
+                                && w.CreatedAtUtc >= startUtc && w.CreatedAtUtc <= endUtc)
+                    .ToListAsync(ct);
+                VoicenterRunResult? lastVcResult;
+                using (var vcScope = _scopeFactory.CreateScope())
+                {
+                    var vcWorker = vcScope.ServiceProvider
+                        .GetServices<IHostedService>()
+                        .OfType<VoicenterCallSummaryWorker>()
+                        .FirstOrDefault();
+                    lastVcResult = vcWorker?.LastRunResult;
+                }
+
                 var runMetricsInWindow = await db.SyncRunMetrics
                     .AsNoTracking()
                     .Where(m => m.StartedAtUtc >= startUtc && m.StartedAtUtc <= endUtc)
@@ -245,6 +268,7 @@ namespace Odmon.Worker.Workers
                     hearingsSynced.Select(x => (x.TikNumber ?? "", x.LastSyncedAtUtc)).ToList(),
                     groupedFailures,
                     docIngestionFailures,
+                    voicenterWritten, voicenterFailed, lastVcResult,
                     circuitBreakerTripped,
                     highFailureNote);
 
@@ -283,6 +307,7 @@ namespace Odmon.Worker.Workers
             List<(string TikNumber, DateTime LastSyncedAtUtc)> hearingsSynced,
             List<(string CaseNumber, string Operation, string RootCause, int Count, DateTime FirstOccurrence)> groupedFailures,
             List<MondayDocumentImport> docIngestionFailures,
+            int voicenterWritten, List<NispahWriteLog> voicenterFailed, Voicenter.VoicenterRunResult? lastVcResult,
             bool circuitBreakerTripped,
             bool highFailureNote)
         {
@@ -396,6 +421,40 @@ namespace Odmon.Worker.Workers
                         + "</tr>");
                 }
                 sb.AppendLine("</table>");
+            }
+
+            // Section 4c — Voicenter Call Summaries
+            if (voicenterWritten > 0 || voicenterFailed.Count > 0 || lastVcResult != null)
+            {
+                sb.AppendLine("<hr/>");
+                sb.AppendLine("<h3 style='margin:16px 0 8px;'>Voicenter Call Summaries</h3>");
+                sb.AppendLine("<table style='border-collapse:collapse; width:400px;'>");
+                if (lastVcResult != null)
+                {
+                    sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>CDR entries fetched (last run)</td><td style='padding:4px;'>{lastVcResult.Fetched}</td></tr>");
+                    sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Call details fetched</td><td style='padding:4px;'>{lastVcResult.DetailsFetched}</td></tr>");
+                    sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped no AI</td><td style='padding:4px;'>{lastVcResult.SkippedNoAi}</td></tr>");
+                    sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped no match</td><td style='padding:4px;'>{lastVcResult.SkippedNoMatch}</td></tr>");
+                    sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped duplicate</td><td style='padding:4px;'>{lastVcResult.SkippedDuplicate}</td></tr>");
+                }
+                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Annexes written (yesterday)</td><td style='padding:4px;'>{voicenterWritten}</td></tr>");
+                var vcFailStyle = voicenterFailed.Count > 0 ? "color:red;font-weight:bold;" : "";
+                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Failed writes (yesterday)</td><td style='padding:4px;{vcFailStyle}'>{voicenterFailed.Count}</td></tr>");
+                sb.AppendLine("</table>");
+
+                if (voicenterFailed.Count > 0)
+                {
+                    var sample = voicenterFailed.Take(10).ToList();
+                    sb.AppendLine($"<p style='margin-top:8px;'>Sample failed CallIDs ({sample.Count} of {voicenterFailed.Count}):</p>");
+                    sb.AppendLine("<ul style='font-size:13px;'>");
+                    foreach (var f in sample)
+                    {
+                        var info = f.ErrorMessage ?? "";
+                        var snippet = info.Length > 100 ? info[..100] + "…" : info;
+                        sb.AppendLine($"<li>SrcId={f.SourceItemId}, Tik={E(f.TikVisualId ?? "")}: {E(snippet)}</li>");
+                    }
+                    sb.AppendLine("</ul>");
+                }
             }
 
             // Section 5 — System Notes (optional)
