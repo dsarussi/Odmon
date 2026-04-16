@@ -160,43 +160,59 @@ namespace Odmon.Worker.Voicenter
 
         private static string? ExtractAiSummary(JsonElement root)
         {
-            // Try multiple known locations for the AI summary field
-            string[] summaryPaths = ["summary", "ai_summary", "Summary", "AiSummary"];
+            // Primary path: aiData.insights.summary (observed in real Voicenter payloads)
+            if (TryGetNestedString(root, "aiData", "insights", "summary", out var primary))
+                return primary;
 
-            foreach (var path in summaryPaths)
-            {
-                if (root.TryGetProperty(path, out var val) && val.ValueKind == JsonValueKind.String)
-                    return val.GetString();
-            }
+            // Case-variant: Data.aiData.insights.summary
+            if ((root.TryGetProperty("Data", out var data) || root.TryGetProperty("data", out data))
+                && TryGetNestedString(data, "aiData", "insights", "summary", out var nested))
+                return nested;
 
-            if (root.TryGetProperty("Data", out var data) || root.TryGetProperty("data", out data))
+            // Fallback: scan common flat/nested locations
+            string[] summaryKeys = ["summary", "ai_summary", "Summary", "AiSummary"];
+
+            foreach (var key in summaryKeys)
+                if (TryGetString(root, key, out var v)) return v;
+
+            if (data.ValueKind == JsonValueKind.Object)
             {
-                foreach (var path in summaryPaths)
-                {
-                    if (data.TryGetProperty(path, out var val) && val.ValueKind == JsonValueKind.String)
-                        return val.GetString();
-                }
+                foreach (var key in summaryKeys)
+                    if (TryGetString(data, key, out var v)) return v;
 
                 if (data.TryGetProperty("cdr_data", out var cdr))
-                {
-                    foreach (var path in summaryPaths)
-                    {
-                        if (cdr.TryGetProperty(path, out var val) && val.ValueKind == JsonValueKind.String)
-                            return val.GetString();
-                    }
-                }
+                    foreach (var key in summaryKeys)
+                        if (TryGetString(cdr, key, out var v)) return v;
 
                 if (data.TryGetProperty("ai_data", out var ai))
-                {
-                    foreach (var path in summaryPaths)
-                    {
-                        if (ai.TryGetProperty(path, out var val) && val.ValueKind == JsonValueKind.String)
-                            return val.GetString();
-                    }
-                }
+                    foreach (var key in summaryKeys)
+                        if (TryGetString(ai, key, out var v)) return v;
             }
 
             return null;
+        }
+
+        private static bool TryGetNestedString(JsonElement el, string a, string b, string c, out string? value)
+        {
+            value = null;
+            if (el.TryGetProperty(a, out var aEl) && aEl.TryGetProperty(b, out var bEl) && bEl.TryGetProperty(c, out var cEl)
+                && cEl.ValueKind == JsonValueKind.String)
+            {
+                value = cEl.GetString();
+                return !string.IsNullOrWhiteSpace(value);
+            }
+            return false;
+        }
+
+        private static bool TryGetString(JsonElement el, string key, out string? value)
+        {
+            value = null;
+            if (el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String)
+            {
+                value = v.GetString();
+                return !string.IsNullOrWhiteSpace(value);
+            }
+            return false;
         }
 
         private static string? GetStringProp(JsonElement el, string name)

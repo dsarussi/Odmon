@@ -114,10 +114,18 @@ namespace Odmon.Worker.Services
         private async Task ProcessCallDetailAsync(
             VoicenterCallDetail detail, VoicenterRunResult result, CancellationToken ct)
         {
-            if (!detail.AiExists || string.IsNullOrWhiteSpace(detail.AiSummary))
+            var hasSummary = !string.IsNullOrWhiteSpace(detail.AiSummary);
+            if (_settings.TestMode)
+            {
+                _logger.LogInformation(
+                    "VOICENTER | TEST DIAG | CallID={CallId}, SummaryFound={SummaryFound}, SummaryLength={SummaryLength}",
+                    detail.CallId, hasSummary, detail.AiSummary?.Length ?? 0);
+            }
+
+            if (!hasSummary)
             {
                 result.SkippedNoAi++;
-                _logger.LogDebug("VOICENTER | Skip no AI | CallID={CallId}", detail.CallId);
+                _logger.LogDebug("VOICENTER | Skip no AI summary | CallID={CallId}", detail.CallId);
                 return;
             }
 
