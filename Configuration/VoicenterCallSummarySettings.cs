@@ -1,0 +1,26 @@
+namespace Odmon.Worker.Configuration
+{
+    public class VoicenterCallSummarySettings
+    {
+        public bool Enabled { get; set; }
+        public double IntervalHours { get; set; } = 12;
+        public double LookbackHours { get; set; } = 25;
+
+        /// <summary>Voicenter CDR code — resolved via ISecretProvider at runtime.</summary>
+        public string? Code { get; set; }
+        /// <summary>Voicenter Bearer token — resolved via ISecretProvider at runtime.</summary>
+        public string? BearerToken { get; set; }
+
+        public string NispahTypeName { get; set; } = "סיכום שיחה";
+        public bool OnlyAnsweredCalls { get; set; } = true;
+        public int MinimumDurationSeconds { get; set; } = 10;
+        public bool EnableDailySummaryReporting { get; set; } = true;
+
+        /// <summary>When TestMode=true and TestCallId is set, only process that single call.</summary>
+        public string? TestCallId { get; set; }
+        public bool TestMode { get; set; }
+
+        /// <summary>Throttle delay in ms between call-detail API requests.</summary>
+        public int ThrottleMs { get; set; } = 500;
+    }
+}

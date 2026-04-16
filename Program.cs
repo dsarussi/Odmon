@@ -16,6 +16,7 @@ using Odmon.Worker.Monday;
 using Odmon.Worker.OdcanitAccess;
 using Odmon.Worker.Security;
 using Odmon.Worker.Services;
+using Odmon.Worker.Voicenter;
 using Odmon.Worker.Workers;
 using Serilog;
 
@@ -152,6 +153,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.Configure<OdcanitDocumentSettings>(config.GetSection("OdcanitDocuments"));
     services.Configure<HearingBackfillSettings>(config.GetSection("HearingBackfill"));
     services.Configure<HearingApprovalBackfillSettings>(config.GetSection("HearingApprovalBackfill"));
+    services.Configure<VoicenterCallSummarySettings>(config.GetSection("VoicenterCallSummaries"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
@@ -174,6 +176,13 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddHostedService<HearingBackfillWorker>();
     services.AddScoped<HearingApprovalBackfillService>();
     services.AddHostedService<HearingApprovalBackfillWorker>();
+
+    // Voicenter call summary -> Odcanit nispah
+    services.AddHttpClient("VoicenterCdr");
+    services.AddHttpClient("VoicenterDetail");
+    services.AddSingleton<VoicenterApiClient>();
+    services.AddScoped<VoicenterCallSummaryService>();
+    services.AddHostedService<VoicenterCallSummaryWorker>();
 
     // Document ingestion from Monday questionnaire board
     services.AddHttpClient<DocumentIngestionMondayService>(client =>
