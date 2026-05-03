@@ -204,23 +204,11 @@ namespace Odmon.Worker.Workers
                     .ToList();
                 var realFailureCount = groupedFailures.Count;
 
-                // Section 2 — Cases created yesterday (table, NOLOCK)
-                var casesCreatedEntities = await mappingReader.GetCreatedInRangeReadOnlyAsync(startUtc, endUtc, ct);
-                var casesCreated = casesCreatedEntities
-                    .Select(m => new { m.TikNumber, m.CreatedAtUtc })
-                    .ToList();
-
-                // Section 3 — Hearings synced yesterday (proxy for hearing activity; NOLOCK on mappings)
-                var hearingsSynced = await (
-                    from h in db.HearingNearestSnapshots.AsNoTracking()
-                    where h.LastSyncedAtUtc >= startUtc && h.LastSyncedAtUtc <= endUtc
-                    join m in mappingReader.NolockQueryable() on h.TikCounter equals m.TikCounter
-                    orderby h.LastSyncedAtUtc
-                    select new { m.TikNumber, h.LastSyncedAtUtc }
-                ).ToListAsync(ct);
-
-                // Section 5 — System notes (from SyncRunMetrics in window)
-                // Section — Document Ingestion Failures
+                // Document ingestion success / failure counts (yesterday window)
+                var docIngestionSucceeded = await db.MondayDocumentImports
+                    .AsNoTracking()
+                    .CountAsync(d => d.Status == DocumentImportStatus.Success
+                                     && d.UpdatedAtUtc >= startUtc && d.UpdatedAtUtc <= endUtc, ct);
                 var docIngestionFailures = await db.MondayDocumentImports
                     .AsNoTracking()
                     .Where(d => d.Status == DocumentImportStatus.Failed && d.UpdatedAtUtc >= startUtc && d.UpdatedAtUtc <= endUtc)
@@ -249,13 +237,10 @@ namespace Odmon.Worker.Workers
                     lastVcResult = vcWorker?.LastRunResult;
                 }
 
-                // Section — Voicenter API usage (weekly, separated by endpoint)
+                // Voicenter weekly CallHistoryDetail usage (single quota line in summary)
                 var weekStartUtc = VoicenterUsageTracker.GetWeekStartUtc(DateTime.UtcNow);
                 var weeklyDetailReq = await db.VoicenterApiRequestLogs.AsNoTracking()
                     .CountAsync(r => r.EndpointType == VoicenterEndpointType.CallHistoryDetail
-                                     && r.WeekStartUtc == weekStartUtc, ct);
-                var weeklyCdrReq = await db.VoicenterApiRequestLogs.AsNoTracking()
-                    .CountAsync(r => r.EndpointType == VoicenterEndpointType.CdrList
                                      && r.WeekStartUtc == weekStartUtc, ct);
                 var quotaExceededRecently = await db.VoicenterApiRequestLogs.AsNoTracking()
                     .AnyAsync(r => r.QuotaExceeded && r.CreatedAtUtc >= startUtc && r.CreatedAtUtc <= endUtc, ct);
@@ -275,12 +260,11 @@ namespace Odmon.Worker.Workers
                     hearingsSyncedCount,
                     itemsUpdatedCount,
                     realFailureCount,
-                    casesCreated.Select(c => (c.TikNumber ?? "", c.CreatedAtUtc)).ToList(),
-                    hearingsSynced.Select(x => (x.TikNumber ?? "", x.LastSyncedAtUtc)).ToList(),
                     groupedFailures,
+                    docIngestionSucceeded,
                     docIngestionFailures,
                     voicenterWritten, voicenterFailed, lastVcResult,
-                    weeklyDetailReq, weeklyCdrReq, quotaExceededRecently, weekStartUtc,
+                    weeklyDetailReq, quotaExceededRecently,
                     circuitBreakerTripped,
                     highFailureNote);
 
@@ -315,72 +299,94 @@ namespace Odmon.Worker.Workers
             int hearingsSyncedCount,
             int itemsUpdatedCount,
             int realFailureCount,
-            List<(string TikNumber, DateTime CreatedAtUtc)> casesCreated,
-            List<(string TikNumber, DateTime LastSyncedAtUtc)> hearingsSynced,
             List<(string CaseNumber, string Operation, string RootCause, int Count, DateTime FirstOccurrence)> groupedFailures,
+            int docIngestionSucceeded,
             List<MondayDocumentImport> docIngestionFailures,
             int voicenterWritten, List<NispahWriteLog> voicenterFailed, Voicenter.VoicenterRunResult? lastVcResult,
-            int weeklyDetailReq, int weeklyCdrReq, bool quotaExceededRecently, DateTime weekStartUtc,
+            int weeklyDetailReq, bool quotaExceededRecently,
             bool circuitBreakerTripped,
             bool highFailureNote)
         {
             static string E(string s) => System.Net.WebUtility.HtmlEncode(s ?? string.Empty);
+
+            var docFailTotal = docIngestionFailures.Count;
+            var docFailScene = docIngestionFailures.Count(d => string.Equals(d.ColumnId, "file_mkyet713", StringComparison.OrdinalIgnoreCase));
+
+            // ---- Compute System Status from real signals ----
+            // Critical: circuit breaker tripped, OR high failure burst
+            // Warning : real failures > 0, doc ingestion failures > 0, voicenter quota exceeded,
+            //           voicenter failed writes > 0, OR (CDR fetched but 0 details + quota exceeded recently)
+            // OK      : everything else
+            var voicenterQuotaExceeded = quotaExceededRecently
+                || (lastVcResult != null && lastVcResult.SkippedDueToQuotaExceeded > 0)
+                || (lastVcResult != null && lastVcResult.ApiLimitExceeded);
+
+            var critical = circuitBreakerTripped || highFailureNote;
+            var warning =
+                realFailureCount > 0
+                || docFailTotal > 0
+                || voicenterFailed.Count > 0
+                || voicenterQuotaExceeded
+                || (lastVcResult != null && lastVcResult.DetailFetchFailed > 0);
+
+            string statusLabel;
+            string statusColor;
+            string statusDetail;
+            if (critical)
+            {
+                statusLabel = "Critical";
+                statusColor = "#c0392b";
+                statusDetail = circuitBreakerTripped
+                    ? "Circuit breaker tripped during a sync run yesterday."
+                    : "Unusually high failure count yesterday; review issues below.";
+            }
+            else if (warning)
+            {
+                statusLabel = "Warning";
+                statusColor = "#b8860b";
+                var reasons = new List<string>();
+                if (voicenterQuotaExceeded) reasons.Add("Voicenter quota exceeded");
+                if (realFailureCount > 0) reasons.Add($"{realFailureCount} real failure(s)");
+                if (docFailTotal > 0) reasons.Add($"{docFailTotal} document ingestion failure(s)");
+                if (voicenterFailed.Count > 0) reasons.Add($"{voicenterFailed.Count} Voicenter write failure(s)");
+                if (lastVcResult != null && lastVcResult.DetailFetchFailed > 0) reasons.Add($"{lastVcResult.DetailFetchFailed} Voicenter detail fetch failure(s)");
+                statusDetail = reasons.Count > 0
+                    ? string.Join("; ", reasons) + ". Other services completed expected work."
+                    : "Non-critical anomalies detected.";
+            }
+            else
+            {
+                statusLabel = "OK";
+                statusColor = "#27ae60";
+                statusDetail = "All enabled services completed expected work.";
+            }
 
             var sb = new StringBuilder();
             sb.AppendLine("<html><body style='font-family:Arial,sans-serif;'>");
             sb.AppendLine($"<h2>ODMON Daily Summary — {date:yyyy-MM-dd}</h2>");
             sb.AppendLine("<p>Previous day (00:00–23:59 Israel time).</p>");
 
-            // Section 1 — Daily Overview
+            // ---- System Status ----
+            sb.AppendLine("<h3 style='margin:16px 0 8px;'>System Status</h3>");
+            sb.AppendLine($"<p style='margin:0 0 12px 0;'><span style='display:inline-block;padding:4px 10px;border-radius:4px;background:{statusColor};color:#fff;font-weight:bold;'>{statusLabel}</span> &nbsp; {E(statusDetail)}</p>");
+
+            // ---- Daily Overview ----
             sb.AppendLine("<h3 style='margin:16px 0 8px;'>Daily Overview</h3>");
-            sb.AppendLine("<table style='border-collapse:collapse; width:400px;'>");
+            sb.AppendLine("<table style='border-collapse:collapse; width:420px;'>");
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Cases created in Monday yesterday</td><td style='padding:4px;'>{casesCreatedCount}</td></tr>");
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Hearings synced yesterday</td><td style='padding:4px;'>{hearingsSyncedCount}</td></tr>");
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Items updated yesterday</td><td style='padding:4px;'>{itemsUpdatedCount}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Document ingestion succeeded</td><td style='padding:4px;'>{docIngestionSucceeded}</td></tr>");
+            var docFailStyle = docFailTotal > 0 ? "color:#d35400;font-weight:bold;" : "";
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Document ingestion failures</td><td style='padding:4px;{docFailStyle}'>{docFailTotal}{(docFailScene > 0 ? $" (scene-docs: {docFailScene})" : "")}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Voicenter annexes written yesterday</td><td style='padding:4px;'>{voicenterWritten}</td></tr>");
             var failStyle = realFailureCount > 0 ? "color:red;font-weight:bold;" : "";
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Real failures yesterday</td><td style='padding:4px;{failStyle}'>{realFailureCount}</td></tr>");
-            var docFailTotal = docIngestionFailures.Count;
-            var docFailScene = docIngestionFailures.Count(d => string.Equals(d.ColumnId, "file_mkyet713", StringComparison.OrdinalIgnoreCase));
-            var docFailStyle = docFailTotal > 0 ? "color:#d35400;font-weight:bold;" : "";
-            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Document ingestion failures</td><td style='padding:4px;{docFailStyle}'>{docFailTotal} (scene-docs: {docFailScene})</td></tr>");
             sb.AppendLine("</table>");
 
-            // Section 2 — Cases Created Yesterday
+            // ---- Issues Requiring Attention ----
             sb.AppendLine("<hr/>");
-            sb.AppendLine("<h3 style='margin:16px 0 8px;'>Cases Created Yesterday</h3>");
-            if (casesCreated.Count == 0)
-                sb.AppendLine("<p>None.</p>");
-            else
-            {
-                sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;' cellpadding='6'>");
-                sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>Case Number</th><th style='border:1px solid #ddd;'>Created Time (UTC)</th></tr>");
-                foreach (var r in casesCreated)
-                {
-                    sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{E(r.TikNumber)}</td><td style='border:1px solid #ddd;'>{r.CreatedAtUtc:yyyy-MM-dd HH:mm} UTC</td></tr>");
-                }
-                sb.AppendLine("</table>");
-            }
-
-            // Section 3 — Hearings synced yesterday (sync proxy; not "created")
-            sb.AppendLine("<hr/>");
-            sb.AppendLine("<h3 style='margin:16px 0 8px;'>Hearings Synced Yesterday</h3>");
-            sb.AppendLine("<p><small>Hearing data synced to Monday (LastSyncedAtUtc).</small></p>");
-            if (hearingsSynced.Count == 0)
-                sb.AppendLine("<p>None.</p>");
-            else
-            {
-                sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;' cellpadding='6'>");
-                sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>Case Number</th><th style='border:1px solid #ddd;'>Synced Time (UTC)</th></tr>");
-                foreach (var r in hearingsSynced)
-                {
-                    sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{E(r.TikNumber)}</td><td style='border:1px solid #ddd;'>{r.LastSyncedAtUtc:yyyy-MM-dd HH:mm} UTC</td></tr>");
-                }
-                sb.AppendLine("</table>");
-            }
-
-            // Section 4 — Failures That Require Attention (real failures only, grouped by Case+Operation+RootCause)
-            sb.AppendLine("<hr/>");
-            sb.AppendLine("<h3 style='margin:16px 0 8px;'>Failures That Require Attention</h3>");
+            sb.AppendLine("<h3 style='margin:16px 0 8px;'>Issues Requiring Attention</h3>");
             if (groupedFailures.Count == 0)
                 sb.AppendLine("<p>None.</p>");
             else
@@ -394,26 +400,46 @@ namespace Odmon.Worker.Workers
                 sb.AppendLine("</table>");
             }
 
-            // Section 4b — Document Ingestion Failures
+            // ---- Warnings / Anomalies (only when something is worth noting) ----
+            var anomalies = new List<string>();
+            if (voicenterQuotaExceeded)
+                anomalies.Add("Voicenter quota exceeded; backfill should wait until quota resets.");
+            if (lastVcResult != null && lastVcResult.Fetched > 0 && lastVcResult.DetailsFetched == 0 && voicenterQuotaExceeded)
+                anomalies.Add("CDR entries fetched but no call details fetched due to quota.");
+            if (lastVcResult != null && lastVcResult.DetailFetchFailed > 0)
+                anomalies.Add($"{lastVcResult.DetailFetchFailed} Voicenter detail fetch failure(s) — see incident alerts.");
+            if (circuitBreakerTripped)
+                anomalies.Add("Worker circuit breaker tripped — incident alert was sent.");
+            if (highFailureNote)
+                anomalies.Add("Unusually high failure count yesterday; review issues above.");
+            if (docFailTotal > 0)
+                anomalies.Add($"Document ingestion failure count > 0 ({docFailTotal}). See section below.");
+
+            if (anomalies.Count > 0)
+            {
+                sb.AppendLine("<hr/>");
+                sb.AppendLine("<h3 style='margin:16px 0 8px;'>Warnings / Anomalies</h3>");
+                sb.AppendLine("<ul style='margin:0 0 0 18px;padding:0;'>");
+                foreach (var a in anomalies)
+                    sb.AppendLine($"<li>{E(a)}</li>");
+                sb.AppendLine("</ul>");
+            }
+
+            // ---- Document Ingestion Failures (concise) ----
             sb.AppendLine("<hr/>");
             sb.AppendLine("<h3 style='margin:16px 0 8px;'>Document Ingestion Failures</h3>");
             if (docIngestionFailures.Count == 0)
                 sb.AppendLine("<p>None.</p>");
             else
             {
-                sb.AppendLine($"<p>Total: <b>{docFailTotal}</b> &nbsp;|&nbsp; Column file_mkyet713 (scene docs): <b>{docFailScene}</b></p>");
+                sb.AppendLine($"<p>Total: <b>{docFailTotal}</b>{(docFailScene > 0 ? $" &nbsp;|&nbsp; Column file_mkyet713 (scene docs): <b>{docFailScene}</b>" : "")}</p>");
                 sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;font-size:13px;' cellpadding='5'>");
                 sb.AppendLine("<tr style='background:#f5f5f5;'>"
                     + "<th style='border:1px solid #ddd;'>TikNumber</th>"
-                    + "<th style='border:1px solid #ddd;'>TikCounter</th>"
-                    + "<th style='border:1px solid #ddd;'>MondayItemId</th>"
                     + "<th style='border:1px solid #ddd;'>ColumnId</th>"
-                    + "<th style='border:1px solid #ddd;'>AssetId</th>"
                     + "<th style='border:1px solid #ddd;'>FileName</th>"
                     + "<th style='border:1px solid #ddd;'>Retries</th>"
-                    + "<th style='border:1px solid #ddd;'>Status</th>"
                     + "<th style='border:1px solid #ddd;'>LastError</th>"
-                    + "<th style='border:1px solid #ddd;'>FirstFailure (UTC)</th>"
                     + "<th style='border:1px solid #ddd;'>LastFailure (UTC)</th>"
                     + "</tr>");
                 foreach (var d in docIngestionFailures)
@@ -421,106 +447,74 @@ namespace Odmon.Worker.Workers
                     var errSnippet = (d.ErrorMessage ?? "").Length > 120 ? d.ErrorMessage![..120] + "…" : d.ErrorMessage ?? "";
                     sb.AppendLine("<tr>"
                         + $"<td style='border:1px solid #ddd;'>{E(d.TikVisualID ?? "")}</td>"
-                        + $"<td style='border:1px solid #ddd;'>{d.TikCounter}</td>"
-                        + $"<td style='border:1px solid #ddd;'>{d.MondayQuestionnaireItemId}</td>"
                         + $"<td style='border:1px solid #ddd;'>{E(d.ColumnId)}</td>"
-                        + $"<td style='border:1px solid #ddd;'>{E(d.AssetId)}</td>"
                         + $"<td style='border:1px solid #ddd;'>{E(d.OriginalFileName)}</td>"
                         + $"<td style='border:1px solid #ddd;'>{d.RetryCount}</td>"
-                        + $"<td style='border:1px solid #ddd;'>{d.Status}</td>"
                         + $"<td style='border:1px solid #ddd;'>{E(errSnippet)}</td>"
-                        + $"<td style='border:1px solid #ddd;'>{d.CreatedAtUtc:yyyy-MM-dd HH:mm}</td>"
                         + $"<td style='border:1px solid #ddd;'>{d.UpdatedAtUtc:yyyy-MM-dd HH:mm}</td>"
                         + "</tr>");
                 }
                 sb.AppendLine("</table>");
             }
 
-            // Section 4c — Voicenter Call Summaries
+            // ---- Voicenter Call Summaries (compact) ----
             sb.AppendLine("<hr/>");
             sb.AppendLine("<h3 style='margin:16px 0 8px;'>Voicenter Call Summaries</h3>");
 
-            // 4c.1 Last-run counters (with explicit pre-detail skip reasons)
-            if (lastVcResult != null)
+            string vcStatus;
+            string vcStatusStyle = "";
+            if (voicenterQuotaExceeded)
             {
-                if (lastVcResult.BackfillMode)
-                {
-                    sb.AppendLine($"<p><b>BACKFILL MODE</b> — Range {lastVcResult.BackfillFromUtc:yyyy-MM-dd HH:mm}Z .. {lastVcResult.BackfillToUtc:yyyy-MM-dd HH:mm}Z, DryRun={lastVcResult.BackfillDryRun}</p>");
-                }
-                sb.AppendLine("<table style='border-collapse:collapse; width:480px;'>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>CDR entries fetched (last run)</td><td style='padding:4px;'>{lastVcResult.Fetched}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Call details fetched</td><td style='padding:4px;'>{lastVcResult.DetailsFetched}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Annexes written (last run)</td><td style='padding:4px;'>{lastVcResult.Written}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped no AI</td><td style='padding:4px;'>{lastVcResult.SkippedNoAi}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped no match</td><td style='padding:4px;'>{lastVcResult.SkippedNoMatch}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped duplicate (post-detail)</td><td style='padding:4px;'>{lastVcResult.SkippedDuplicate}</td></tr>");
-                sb.AppendLine("<tr><td colspan='2' style='padding:6px 0 2px 0;'><b>Why CDR rows did not become detail requests</b></td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>&nbsp;&nbsp;Skipped missing CallID</td><td style='padding:4px;'>{lastVcResult.SkippedMissingCallId}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>&nbsp;&nbsp;Skipped duplicate before detail</td><td style='padding:4px;'>{lastVcResult.SkippedDuplicateBeforeDetail}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>&nbsp;&nbsp;Skipped already processed</td><td style='padding:4px;'>{lastVcResult.SkippedAlreadyProcessed}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>&nbsp;&nbsp;Skipped due to quota exceeded</td><td style='padding:4px;'>{lastVcResult.SkippedDueToQuotaExceeded}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>&nbsp;&nbsp;Skipped pre-detail (filter / answered / duration)</td><td style='padding:4px;'>{lastVcResult.SkippedPreDetailOther}</td></tr>");
-                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>&nbsp;&nbsp;Detail fetch failed</td><td style='padding:4px;'>{lastVcResult.DetailFetchFailed}</td></tr>");
-                sb.AppendLine("</table>");
-
-                // If the run fetched CDRs but did 0 of everything, surface a loud explanation row.
-                if (lastVcResult.Fetched > 0 && lastVcResult.DetailsFetched == 0
-                    && lastVcResult.SkippedMissingCallId == 0 && lastVcResult.SkippedDuplicateBeforeDetail == 0
-                    && lastVcResult.SkippedAlreadyProcessed == 0 && lastVcResult.SkippedDueToQuotaExceeded == 0
-                    && lastVcResult.SkippedPreDetailOther == 0 && lastVcResult.DetailFetchFailed == 0)
-                {
-                    sb.AppendLine("<p style='color:red;'><b>Note:</b> CDR rows were fetched but no details were attempted and no skip reason was recorded — please investigate logs.</p>");
-                }
+                vcStatus = "Quota exceeded";
+                vcStatusStyle = "color:#c0392b;font-weight:bold;";
+            }
+            else if (lastVcResult == null)
+            {
+                vcStatus = "No run data available";
+                vcStatusStyle = "color:#7f8c8d;";
+            }
+            else if (lastVcResult.DetailFetchFailed > 0 || voicenterFailed.Count > 0)
+            {
+                vcStatus = "Errors during run";
+                vcStatusStyle = "color:#c0392b;font-weight:bold;";
+            }
+            else if (lastVcResult.BackfillMode)
+            {
+                vcStatus = $"Backfill mode ({(lastVcResult.BackfillDryRun ? "DryRun" : "Live")})";
+                vcStatusStyle = "color:#2980b9;font-weight:bold;";
+            }
+            else
+            {
+                vcStatus = "OK";
+                vcStatusStyle = "color:#27ae60;font-weight:bold;";
             }
 
-            // 4c.2 Weekly API usage (CallHistoryDetail vs CdrList, separated)
-            sb.AppendLine("<h4 style='margin:12px 0 4px;'>Weekly Voicenter API usage</h4>");
+            var vcFetched = lastVcResult?.Fetched ?? 0;
+            var vcDetails = lastVcResult?.DetailsFetched ?? 0;
+            var vcSkippedNoAi = lastVcResult?.SkippedNoAi ?? 0;
+            var vcSkippedNoMatch = lastVcResult?.SkippedNoMatch ?? 0;
+            var vcSkippedDup = lastVcResult?.SkippedDuplicate ?? 0;
+            var vcSkippedQuota = lastVcResult?.SkippedDueToQuotaExceeded ?? 0;
+            var vcWeeklyLimit = lastVcResult?.WeeklyCallHistoryDetailLimit ?? 0;
+            var vcWeeklyWarn = lastVcResult?.WeeklyCallHistoryDetailWarningThreshold ?? 0;
+            var vcUsageStyle = vcWeeklyWarn > 0 && weeklyDetailReq >= vcWeeklyWarn ? "color:#b8860b;font-weight:bold;" : "";
+
             sb.AppendLine("<table style='border-collapse:collapse; width:480px;'>");
-            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Week start (UTC, Monday)</td><td style='padding:4px;'>{weekStartUtc:yyyy-MM-dd}</td></tr>");
-            var detailStyle = lastVcResult != null && weeklyDetailReq >= lastVcResult.WeeklyCallHistoryDetailWarningThreshold
-                ? "color:#b8860b;font-weight:bold;" : "";
-            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>CallHistoryDetail requests this week</td><td style='padding:4px;{detailStyle}'>{weeklyDetailReq} / {lastVcResult?.WeeklyCallHistoryDetailLimit ?? 0} (warn at {lastVcResult?.WeeklyCallHistoryDetailWarningThreshold ?? 0})</td></tr>");
-            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>CdrList requests this week (separate quota)</td><td style='padding:4px;'>{weeklyCdrReq}</td></tr>");
-            if (quotaExceededRecently)
-            {
-                sb.AppendLine("<tr><td style='padding:4px 12px 4px 0;color:red;font-weight:bold;'>API LIMIT EXCEEDED</td><td style='padding:4px;color:red;font-weight:bold;'>Voicenter rejected at least one request in the last 24h</td></tr>");
-            }
-            sb.AppendLine("</table>");
-
-            // 4c.3 Annex write totals + sample failures
-            sb.AppendLine("<table style='border-collapse:collapse; width:480px;margin-top:8px;'>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>CDR entries fetched (last run)</td><td style='padding:4px;'>{vcFetched}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Call details fetched</td><td style='padding:4px;'>{vcDetails}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped no AI</td><td style='padding:4px;'>{vcSkippedNoAi}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped no match</td><td style='padding:4px;'>{vcSkippedNoMatch}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped duplicate</td><td style='padding:4px;'>{vcSkippedDup}</td></tr>");
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Annexes written (yesterday)</td><td style='padding:4px;'>{voicenterWritten}</td></tr>");
             var vcFailStyle = voicenterFailed.Count > 0 ? "color:red;font-weight:bold;" : "";
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Failed writes (yesterday)</td><td style='padding:4px;{vcFailStyle}'>{voicenterFailed.Count}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Status</td><td style='padding:4px;{vcStatusStyle}'>{E(vcStatus)}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Weekly CallHistoryDetail usage</td><td style='padding:4px;{vcUsageStyle}'>{weeklyDetailReq} / {vcWeeklyLimit}</td></tr>");
+            if (vcSkippedQuota > 0)
+            {
+                sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped due to quota exceeded</td><td style='padding:4px;color:#c0392b;'>{vcSkippedQuota}</td></tr>");
+            }
             sb.AppendLine("</table>");
-
-            if (voicenterFailed.Count > 0)
-            {
-                var sample = voicenterFailed.Take(10).ToList();
-                sb.AppendLine($"<p style='margin-top:8px;'>Sample failed CallIDs ({sample.Count} of {voicenterFailed.Count}):</p>");
-                sb.AppendLine("<ul style='font-size:13px;'>");
-                foreach (var f in sample)
-                {
-                    var info = f.ErrorMessage ?? "";
-                    var snippet = info.Length > 100 ? info[..100] + "…" : info;
-                    sb.AppendLine($"<li>SrcId={f.SourceItemId}, Tik={E(f.TikVisualId ?? "")}: {E(snippet)}</li>");
-                }
-                sb.AppendLine("</ul>");
-            }
-
-            // Section 5 — System Notes (optional)
-            var notes = new List<string>();
-            if (circuitBreakerTripped) notes.Add("Circuit breaker tripped during a sync run yesterday.");
-            if (highFailureNote) notes.Add("Unusually high failure count yesterday; review failures above.");
-            if (notes.Count > 0)
-            {
-                sb.AppendLine("<hr/>");
-                sb.AppendLine("<h3 style='margin:16px 0 8px;'>System Notes</h3>");
-                sb.AppendLine("<ul>");
-                foreach (var n in notes)
-                    sb.AppendLine($"<li>{E(n)}</li>");
-                sb.AppendLine("</ul>");
-            }
 
             sb.AppendLine("<br/><small>Generated by ODMON Worker email monitor.</small>");
             sb.AppendLine("</body></html>");
