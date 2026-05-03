@@ -13,6 +13,15 @@ namespace Odmon.Worker.Voicenter
         private static readonly string[] CdrFields =
             ["CallerNumber", "TargetNumber", "Date", "Duration", "CallID", "Type", "DialStatus", "RecordURL"];
 
+        // Substrings (case-insensitive) that indicate a quota / usage-limit response from Voicenter.
+        private static readonly string[] QuotaPhrases =
+        [
+            "weekly usage limit",
+            "usage limit",
+            "quota",
+            "limit reached",
+        ];
+
         public VoicenterApiClient(IHttpClientFactory httpClientFactory, ILogger<VoicenterApiClient> logger)
         {
             _httpClientFactory = httpClientFactory;
@@ -20,7 +29,7 @@ namespace Odmon.Worker.Voicenter
         }
 
         /// <summary>Fetch CDR list. Auth: body code only — no Bearer token.</summary>
-        public async Task<List<VoicenterCdrEntry>> FetchCdrListAsync(
+        public async Task<VoicenterApiResult<List<VoicenterCdrEntry>>> FetchCdrListAsync(
             string code, DateTime fromUtc, DateTime toUtc, CancellationToken ct)
         {
             var client = _httpClientFactory.CreateClient("VoicenterCdr");
@@ -42,14 +51,37 @@ namespace Odmon.Worker.Voicenter
             };
 
             using var response = await client.SendAsync(request, ct);
-            response.EnsureSuccessStatusCode();
+            var status = (int)response.StatusCode;
             var responseJson = await response.Content.ReadAsStringAsync(ct);
 
-            return ParseCdrResponse(responseJson);
+            if (LooksLikeQuotaResponse(status, responseJson))
+            {
+                var snippet = Snippet(responseJson);
+                _logger.LogError(
+                    "VOICENTER | API LIMIT EXCEEDED | Endpoint=CdrList, Status={Status}, Description={Body}",
+                    status, snippet);
+                return VoicenterApiResult<List<VoicenterCdrEntry>>.Quota(status, "CdrList quota / usage-limit response", snippet);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var snippet = Snippet(responseJson);
+                _logger.LogWarning(
+                    "VOICENTER | CDR list fetch failed | Status={Status}, Body={Body}",
+                    status, snippet);
+                return VoicenterApiResult<List<VoicenterCdrEntry>>.Failure(status, $"HTTP {status}", snippet);
+            }
+
+            var entries = ParseCdrResponse(responseJson);
+            return VoicenterApiResult<List<VoicenterCdrEntry>>.Ok(entries, status);
         }
 
-        /// <summary>Fetch call detail. Auth: Bearer token only — no body code.</summary>
-        public async Task<VoicenterCallDetail?> FetchCallDetailAsync(
+        /// <summary>
+        /// Fetch call detail. Auth: Bearer token only — no body code.
+        /// Throws <see cref="VoicenterQuotaExceededException"/> when Voicenter returns a usage-limit response,
+        /// so the caller can stop further detail requests for the cycle.
+        /// </summary>
+        public async Task<VoicenterApiResult<VoicenterCallDetail?>> FetchCallDetailAsync(
             string bearerToken, string callId, CancellationToken ct)
         {
             var client = _httpClientFactory.CreateClient("VoicenterDetail");
@@ -58,16 +90,57 @@ namespace Odmon.Worker.Voicenter
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
 
             using var response = await client.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode)
+            var status = (int)response.StatusCode;
+            var responseJson = await response.Content.ReadAsStringAsync(ct);
+
+            if (LooksLikeQuotaResponse(status, responseJson))
             {
-                _logger.LogWarning("VOICENTER | Call detail fetch failed | CallID={CallId}, Status={Status}",
-                    callId, (int)response.StatusCode);
-                return null;
+                var snippet = Snippet(responseJson);
+                _logger.LogError(
+                    "VOICENTER | API LIMIT EXCEEDED | Endpoint=CallHistoryDetail, Status={Status}, CallID={CallId}, Description={Body}",
+                    status, callId, snippet);
+                throw new VoicenterQuotaExceededException(
+                    VoicenterEndpointTypeStrings.CallHistoryDetail,
+                    status,
+                    callId,
+                    snippet,
+                    $"Voicenter CallHistoryDetail quota exceeded (HTTP {status}) for CallID={callId}");
             }
 
-            var responseJson = await response.Content.ReadAsStringAsync(ct);
-            return ParseCallDetailResponse(responseJson, callId);
+            if (!response.IsSuccessStatusCode)
+            {
+                var snippet = Snippet(responseJson);
+                _logger.LogWarning(
+                    "VOICENTER | Call detail fetch failed | CallID={CallId}, Status={Status}, Body={Body}",
+                    callId, status, snippet);
+                return VoicenterApiResult<VoicenterCallDetail?>.Failure(status, $"HTTP {status}", snippet);
+            }
+
+            var detail = ParseCallDetailResponse(responseJson, callId);
+            return VoicenterApiResult<VoicenterCallDetail?>.Ok(detail, status);
         }
+
+        // ─── Quota / body inspection helpers ───
+
+        private static bool LooksLikeQuotaResponse(int status, string body)
+        {
+            if (status == 401) return true;
+            if (string.IsNullOrEmpty(body)) return false;
+            foreach (var phrase in QuotaPhrases)
+            {
+                if (body.Contains(phrase, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private static string Snippet(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return string.Empty;
+            return body.Length <= 400 ? body : body[..400] + "…";
+        }
+
+        // ─── Response parsing ───
 
         private List<VoicenterCdrEntry> ParseCdrResponse(string json)
         {
@@ -108,8 +181,9 @@ namespace Odmon.Worker.Voicenter
                         DialStatus = GetStringProp(item, "DialStatus"),
                         RecordURL = GetStringProp(item, "RecordURL"),
                     };
-                    if (!string.IsNullOrWhiteSpace(entry.CallID))
-                        result.Add(entry);
+                    // Keep entries even when CallID is missing/empty so the service-level
+                    // counters can attribute them to SkippedMissingCallId.
+                    result.Add(entry);
                 }
             }
             catch (JsonException ex)
@@ -187,13 +261,11 @@ namespace Odmon.Worker.Voicenter
         /// </summary>
         private static string? ExtractAiSummary(JsonElement aiData, JsonElement root)
         {
-            // Primary: ai_data.insights.summary (pre-resolved from Data.ai_data)
             if (aiData.ValueKind == JsonValueKind.Object
                 && aiData.TryGetProperty("insights", out var insights)
                 && TryGetString(insights, "summary", out var primary))
                 return primary;
 
-            // Fallback: scan common flat locations on root
             string[] summaryKeys = ["summary", "ai_summary", "Summary"];
             foreach (var key in summaryKeys)
                 if (TryGetString(root, key, out var v)) return v;
@@ -244,22 +316,13 @@ namespace Odmon.Worker.Voicenter
             }
             return 0;
         }
+    }
 
-        private static bool GetBoolProp(JsonElement el, string name)
-        {
-            if (el.ValueKind != JsonValueKind.Object) return false;
-            if (el.TryGetProperty(name, out var v))
-            {
-                if (v.ValueKind is JsonValueKind.True) return true;
-                if (v.ValueKind is JsonValueKind.False) return false;
-                if (v.ValueKind == JsonValueKind.Number) return v.GetInt32() != 0;
-                if (v.ValueKind == JsonValueKind.String)
-                {
-                    var s = v.GetString();
-                    return s is "1" or "true" or "True";
-                }
-            }
-            return false;
-        }
+    /// <summary>String constants mirroring Models.VoicenterEndpointType (avoids cross-namespace dependency in this file).</summary>
+    internal static class VoicenterEndpointTypeStrings
+    {
+        public const string CdrList = "CdrList";
+        public const string CallHistoryDetail = "CallHistoryDetail";
+        public const string Other = "Other";
     }
 }

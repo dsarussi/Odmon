@@ -370,7 +370,13 @@ When a phone call is made to a client or witness and the AI generates a summary 
 
 **Test mode:** When `TestMode=true` and `TestCallId` is set, only that single call is processed (with diagnostic logging).
 
-**Key tables:** `NispahWriteLogs`
+**Weekly quota tracking (May 2026):** Voicenter enforces a weekly usage limit (currently 400/week for User 203570) on the `Call/History/{CallID}` endpoint. ODMON now records every API request in `VoicenterApiRequestLogs` separated by `EndpointType` (`CdrList` vs `CallHistoryDetail`), counts the current ISO week, and queues a warning email once per week when usage reaches `WeeklyUsageWarningThreshold` (default 350). When Voicenter returns HTTP 401 or a body containing "weekly usage limit" / "usage limit" / "quota" / "limit reached", `VoicenterApiClient` throws `VoicenterQuotaExceededException`; the service stops issuing further detail requests for the cycle and counts remaining CDR rows as `SkippedDueToQuotaExceeded`.
+
+**Local processing-state cache:** `VoicenterCallProcessingStates` stores per-CallID terminal status (`Written`, `NoAI`, `NoMatch`, `Duplicate`, `Failed`, `QuotaExceeded`). The worker checks this cache **before** issuing a `CallHistoryDetail` request, so already-resolved CallIDs do not consume quota. `NispahWriteLogs` is also checked as a second proof of prior write.
+
+**Manual backfill mode:** `VoicenterBackfill` config block enables a one-shot wider date range (e.g. recovering all calls since 2026-04-27 after a quota outage). Defaults to `DryRun=true` for safe preview. See `docs/VOICENTER_QUOTA_RUNBOOK.md`.
+
+**Key tables:** `NispahWriteLogs`, `VoicenterApiRequestLogs`, `VoicenterQuotaWarningStates`, `VoicenterCallProcessingStates`
 
 ---
 
@@ -473,6 +479,9 @@ The Integration Database is ODMON's own working memory — it tracks what has be
 | `CaseAnnexWriteStates` | Per-case idempotency flags (e.g. accident story written) |
 | `AllowedTiks` | Allowlist of TikCounters for controlled loading |
 | `EmailAlertDedups` | Email alert deduplication and rate limiting |
+| `VoicenterApiRequestLogs` | Audit row per outbound Voicenter API request, separated by endpoint type (for quota tracking) |
+| `VoicenterQuotaWarningStates` | One row per (week, endpoint type) when a weekly quota warning email is queued — prevents weekly warning spam |
+| `VoicenterCallProcessingStates` | Per-CallID terminal status cache; stops the worker from re-fetching details for already-resolved calls |
 
 **Indexes on `MondayItemMappings`:** Unique indexes on `TikCounter`, `(TikNumber, BoardId)`, and `MondayItemId` for efficient lookups and constraint enforcement.
 
@@ -647,7 +656,8 @@ Configuration values are resolved in this order (later overrides earlier):
 | `MondayDocumentIngestion:TasksSource` | Tasks board ingestion | `Enabled`, `BoardId`, `FileColumnId`, `TikNumberColumnId`, `TaskStatusColumnId`, `SuccessStatusLabel` |
 | `OdcanitDocuments` | Odcanit document SP defaults | `CategoryCounter`, `SubCategoryCounter`, `DocStatus`, `DocType`, `WriterCounter`, `OwnerCounter`, `Metapel` |
 | `NispahWriter` | Annex write guardrails | `MaxCreatesPerRun`, `MaxCreatesPerMinute`, `DeduplicationWindowMinutes`, `CommandTimeoutSeconds` |
-| `VoicenterCallSummaries` | Voicenter integration | `Enabled`, `IntervalHours`, `LookbackHours`, `NispahTypeName`, `OnlyAnsweredCalls`, `MinimumDurationSeconds`, `ThrottleMs`, `TestMode`, `TestCallId`, `AlertOnUnhandledException`, `AlertOnStaleWorker`, `StaleWorkerThresholdHours`, `FailureAlertCooldownMinutes` |
+| `VoicenterCallSummaries` | Voicenter integration | `Enabled`, `IntervalHours`, `LookbackHours`, `NispahTypeName`, `OnlyAnsweredCalls`, `MinimumDurationSeconds`, `ThrottleMs`, `TestMode`, `TestCallId`, `AlertOnUnhandledException`, `AlertOnStaleWorker`, `StaleWorkerThresholdHours`, `FailureAlertCooldownMinutes`, `WeeklyUsageWarningThreshold`, `WeeklyUsageHardLimit`, `UsageWarningEmailEnabled` |
+| `VoicenterBackfill` | One-shot Voicenter call summary backfill (recover missed calls after quota outage) | `Enable`, `FromUtc`, `ToUtc`, `MaxCalls`, `ForceRecheck`, `DryRun` |
 | `Email` | SMTP and alerting | `Enabled`, `SmtpHost`, `SmtpPort`, `UseTls`, `Username`, `Recipients[]`, `MaxEmailsPerHour`, `DedupWindowMinutes`, `DigestIntervalMinutes`, `DailySummaryTimeIsrael` |
 | `HearingBackfill` | Bulk hearing import | `Enable`, `SourceTable`, `BoardId`, `BatchSize` |
 | `HearingApprovalBackfill` | Historical approval backfill | `Enable`, `DryRun`, `MaxItems`, `OnlyTikCounters`, `ThrottleMs` |

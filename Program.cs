@@ -154,6 +154,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.Configure<HearingBackfillSettings>(config.GetSection("HearingBackfill"));
     services.Configure<HearingApprovalBackfillSettings>(config.GetSection("HearingApprovalBackfill"));
     services.Configure<VoicenterCallSummarySettings>(config.GetSection("VoicenterCallSummaries"));
+    services.Configure<VoicenterBackfillSettings>(config.GetSection("VoicenterBackfill"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
@@ -181,6 +182,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddHttpClient("VoicenterCdr");
     services.AddHttpClient("VoicenterDetail");
     services.AddSingleton<VoicenterApiClient>();
+    services.AddScoped<VoicenterUsageTracker>();
     services.AddScoped<VoicenterCallSummaryService>();
     services.AddHostedService<VoicenterCallSummaryWorker>();
 

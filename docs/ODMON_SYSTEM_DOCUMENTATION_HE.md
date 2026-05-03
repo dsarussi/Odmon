@@ -370,7 +370,13 @@ ODMON הוא שירות Worker של .NET 8 הפועל כשירות Windows. הו
 
 **מצב בדיקה:** כאשר `TestMode=true` ו-`TestCallId` מוגדר, רק שיחה אחת מעובדת (עם לוגים אבחוניים).
 
-**טבלאות מרכזיות:** `NispahWriteLogs`
+**מעקב מכסה שבועית (מאי 2026):** Voicenter אוכפת מגבלת שימוש שבועית (כיום 400 לשבוע עבור משתמש 203570) על נקודת הקצה `Call/History/{CallID}`. ODMON רושם כעת כל קריאת API ב-`VoicenterApiRequestLogs` בהפרדה לפי `EndpointType` (`CdrList` מול `CallHistoryDetail`), סופר את שבוע ה-ISO הנוכחי, ושולח דוא"ל אזהרה פעם בשבוע כאשר השימוש מגיע ל-`WeeklyUsageWarningThreshold` (ברירת מחדל 350). כאשר Voicenter מחזירה HTTP 401 או גוף תגובה המכיל "weekly usage limit" / "usage limit" / "quota" / "limit reached", `VoicenterApiClient` זורקת `VoicenterQuotaExceededException`; השירות מפסיק לשלוח קריאות פרטים נוספות במחזור וסופר את שורות ה-CDR הנותרות כ-`SkippedDueToQuotaExceeded`.
+
+**מטמון מצב עיבוד מקומי:** `VoicenterCallProcessingStates` שומר סטטוס סופי לכל CallID (`Written`, `NoAI`, `NoMatch`, `Duplicate`, `Failed`, `QuotaExceeded`). ה-Worker בודק את המטמון **לפני** שליחת בקשת `CallHistoryDetail`, כך ש-CallIDs שכבר טופלו לא מבזבזים מכסה. גם `NispahWriteLogs` נבדק כהוכחה שנייה לכתיבה קודמת.
+
+**מצב Backfill ידני:** בלוק קונפיגורציה `VoicenterBackfill` מאפשר טווח תאריכים רחב יותר חד-פעמי (לדוגמה: שחזור כל השיחות מאז 27.04.2026 לאחר הפסקת מכסה). ברירת המחדל `DryRun=true` לתצוגה מקדימה בטוחה. ראו `docs/VOICENTER_QUOTA_RUNBOOK.md`.
+
+**טבלאות מרכזיות:** `NispahWriteLogs`, `VoicenterApiRequestLogs`, `VoicenterQuotaWarningStates`, `VoicenterCallProcessingStates`
 
 ---
 
@@ -473,6 +479,9 @@ Voicenter היא מערכת הטלפון. היא מקליטה שיחות ויו�
 | `CaseAnnexWriteStates` | דגלי אידמפוטנטיות לכל תיק (לדוגמה: סיפור תאונה נכתב) |
 | `AllowedTiks` | רשימת TikCounters מורשים לטעינה מבוקרת |
 | `EmailAlertDedups` | מניעת כפילויות והגבלת קצב להתראות דוא"ל |
+| `VoicenterApiRequestLogs` | רשומת ביקורת לכל קריאת API יוצאת ל-Voicenter, מופרדת לפי סוג נקודת קצה (למעקב מכסה) |
+| `VoicenterQuotaWarningStates` | שורה אחת לכל (שבוע, סוג נקודת קצה) כאשר נשלח דוא"ל אזהרת מכסה — מונע ספאם אזהרות שבועיות |
+| `VoicenterCallProcessingStates` | מטמון מצב סופי לכל CallID; מונע מה-Worker לשלוף שוב פרטים עבור שיחות שכבר טופלו |
 
 **אינדקסים על `MondayItemMappings`:** אינדקסים ייחודיים על `TikCounter`, `(TikNumber, BoardId)`, ו-`MondayItemId` לחיפוש יעיל ואכיפת ייחודיות.
 
@@ -647,7 +656,8 @@ ODMON משתמש במספר שכבות למניעת כתיבות כפולות:
 | `MondayDocumentIngestion:TasksSource` | קליטה מלוח משימות | `Enabled`, `BoardId`, `FileColumnId`, `TikNumberColumnId`, `TaskStatusColumnId`, `SuccessStatusLabel` |
 | `OdcanitDocuments` | ברירות מחדל ל-SP מסמכי Odcanit | `CategoryCounter`, `SubCategoryCounter`, `DocStatus`, `DocType`, `WriterCounter`, `OwnerCounter`, `Metapel` |
 | `NispahWriter` | הגנות כתיבת נספח | `MaxCreatesPerRun`, `MaxCreatesPerMinute`, `DeduplicationWindowMinutes`, `CommandTimeoutSeconds` |
-| `VoicenterCallSummaries` | אינטגרציית Voicenter | `Enabled`, `IntervalHours`, `LookbackHours`, `NispahTypeName`, `OnlyAnsweredCalls`, `MinimumDurationSeconds`, `ThrottleMs`, `TestMode`, `TestCallId`, `AlertOnUnhandledException`, `AlertOnStaleWorker`, `StaleWorkerThresholdHours`, `FailureAlertCooldownMinutes` |
+| `VoicenterCallSummaries` | אינטגרציית Voicenter | `Enabled`, `IntervalHours`, `LookbackHours`, `NispahTypeName`, `OnlyAnsweredCalls`, `MinimumDurationSeconds`, `ThrottleMs`, `TestMode`, `TestCallId`, `AlertOnUnhandledException`, `AlertOnStaleWorker`, `StaleWorkerThresholdHours`, `FailureAlertCooldownMinutes`, `WeeklyUsageWarningThreshold`, `WeeklyUsageHardLimit`, `UsageWarningEmailEnabled` |
+| `VoicenterBackfill` | Backfill חד-פעמי לסיכומי שיחות Voicenter (שחזור שיחות שהוחמצו לאחר הפסקת מכסה) | `Enable`, `FromUtc`, `ToUtc`, `MaxCalls`, `ForceRecheck`, `DryRun` |
 | `Email` | SMTP והתראות | `Enabled`, `SmtpHost`, `SmtpPort`, `UseTls`, `Username`, `Recipients[]`, `MaxEmailsPerHour`, `DedupWindowMinutes`, `DigestIntervalMinutes`, `DailySummaryTimeIsrael` |
 | `HearingBackfill` | ייבוא דיונים מרוכז | `Enable`, `SourceTable`, `BoardId`, `BatchSize` |
 | `HearingApprovalBackfill` | Backfill אישורי הגעה היסטוריים | `Enable`, `DryRun`, `MaxItems`, `OnlyTikCounters`, `ThrottleMs` |

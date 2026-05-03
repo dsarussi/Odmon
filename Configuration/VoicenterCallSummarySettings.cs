@@ -29,5 +29,22 @@ namespace Odmon.Worker.Configuration
         public bool AlertOnStaleWorker { get; set; } = true;
         public double StaleWorkerThresholdHours { get; set; } = 18;
         public int FailureAlertCooldownMinutes { get; set; } = 60;
+
+        // ─── Voicenter weekly quota guard rails (apply to CallHistoryDetail endpoint) ───
+
+        /// <summary>
+        /// When CallHistoryDetail weekly request count reaches this threshold, send a warning email
+        /// (once per week). Does NOT block requests; only alerts.
+        /// </summary>
+        public int WeeklyUsageWarningThreshold { get; set; } = 350;
+
+        /// <summary>
+        /// Voicenter-enforced hard weekly limit for CallHistoryDetail. Used in alert messaging only;
+        /// the actual block comes from Voicenter's HTTP 401 response which we detect and surface.
+        /// </summary>
+        public int WeeklyUsageHardLimit { get; set; } = 400;
+
+        /// <summary>If false, no warning email is sent even when threshold is reached.</summary>
+        public bool UsageWarningEmailEnabled { get; set; } = true;
     }
 }

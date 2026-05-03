@@ -24,6 +24,9 @@ namespace Odmon.Worker.Data
         public DbSet<NispahWriteLog> NispahWriteLogs => Set<NispahWriteLog>();
         public DbSet<CaseAnnexWriteState> CaseAnnexWriteStates => Set<CaseAnnexWriteState>();
         public DbSet<HearingBackfillApr2026> HearingBackfillApr2026 => Set<HearingBackfillApr2026>();
+        public DbSet<VoicenterApiRequestLog> VoicenterApiRequestLogs => Set<VoicenterApiRequestLog>();
+        public DbSet<VoicenterQuotaWarningState> VoicenterQuotaWarningStates => Set<VoicenterQuotaWarningState>();
+        public DbSet<VoicenterCallProcessingState> VoicenterCallProcessingStates => Set<VoicenterCallProcessingState>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -202,6 +205,42 @@ namespace Odmon.Worker.Data
             {
                 b.ToTable("HearingBackfill_Apr2026");
                 b.HasNoKey();
+            });
+
+            modelBuilder.Entity<VoicenterApiRequestLog>(b =>
+            {
+                b.ToTable("VoicenterApiRequestLogs");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => x.WeekStartUtc).HasDatabaseName("IX_VoicenterApiRequestLogs_WeekStartUtc");
+                b.HasIndex(x => x.CreatedAtUtc).HasDatabaseName("IX_VoicenterApiRequestLogs_CreatedAtUtc");
+                b.HasIndex(x => x.CallId).HasDatabaseName("IX_VoicenterApiRequestLogs_CallId");
+                b.HasIndex(x => new { x.EndpointType, x.WeekStartUtc })
+                 .HasDatabaseName("IX_VoicenterApiRequestLogs_EndpointType_WeekStartUtc");
+                b.Property(x => x.EndpointType).HasMaxLength(32).IsRequired();
+                b.Property(x => x.CallId).HasMaxLength(128);
+                b.Property(x => x.ErrorMessage).HasMaxLength(2000);
+                b.Property(x => x.CorrelationId).HasMaxLength(64);
+            });
+
+            modelBuilder.Entity<VoicenterQuotaWarningState>(b =>
+            {
+                b.ToTable("VoicenterQuotaWarningStates");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.WeekStartUtc, x.EndpointType }).IsUnique()
+                 .HasDatabaseName("UX_VoicenterQuotaWarningStates_Week_Endpoint");
+                b.Property(x => x.EndpointType).HasMaxLength(32).IsRequired();
+            });
+
+            modelBuilder.Entity<VoicenterCallProcessingState>(b =>
+            {
+                b.ToTable("VoicenterCallProcessingStates");
+                b.HasKey(x => x.CallId);
+                b.Property(x => x.CallId).HasMaxLength(128).ValueGeneratedNever();
+                b.Property(x => x.Status).HasMaxLength(32).IsRequired();
+                b.Property(x => x.TikVisualId).HasMaxLength(64);
+                b.Property(x => x.LastError).HasMaxLength(2000);
+                b.HasIndex(x => x.Status).HasDatabaseName("IX_VoicenterCallProcessingStates_Status");
+                b.HasIndex(x => x.LastSeenUtc).HasDatabaseName("IX_VoicenterCallProcessingStates_LastSeenUtc");
             });
 
             base.OnModelCreating(modelBuilder);
