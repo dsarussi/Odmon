@@ -1016,7 +1016,7 @@ namespace Odmon.Worker.Services
             return referenceNumber;
         }
 
-        private async Task<string> BuildColumnValuesJsonAsync(long boardId, OdcanitCase c, bool forceNotStartedStatus = false, CancellationToken ct = default)
+        private async Task<string> BuildColumnValuesJsonAsync(long boardId, OdcanitCase c, CancellationToken ct = default)
         {
             var columnValues = new Dictionary<string, object>();
 
@@ -1245,19 +1245,7 @@ namespace Odmon.Worker.Services
                     c.ClientVisualID ?? "<null>");
             }
 
-            var statusColumnId = _mondaySettings.CaseStatusColumnId;
-            if (!string.IsNullOrWhiteSpace(statusColumnId))
-            {
-                if (forceNotStartedStatus)
-                {
-                    columnValues[statusColumnId] = new { label = "חדש" };
-                }
-                else
-                {
-                    var statusIndex = MapStatusIndex(c.StatusName);
-                    columnValues[statusColumnId] = new { index = statusIndex };
-                }
-            }
+            await TryAddCaseStatusColumnAsync(columnValues, boardId, c, ct);
 
             if (columnValues.TryGetValue(mainPhoneColumnId, out var phoneColumnValue))
             {
@@ -2298,6 +2286,120 @@ namespace Odmon.Worker.Services
             }
         }
 
+        private async Task TryAddCaseStatusColumnAsync(
+            Dictionary<string, object> columnValues,
+            long boardId,
+            OdcanitCase c,
+            CancellationToken ct)
+        {
+            var columnId = _mondaySettings.CaseStatusColumnId;
+            if (string.IsNullOrWhiteSpace(columnId))
+            {
+                return;
+            }
+
+            var mappedLabel = MapCaseStatusLabel(c.StatusName);
+            if (string.IsNullOrWhiteSpace(mappedLabel))
+            {
+                var reasonCode = string.IsNullOrWhiteSpace(c.StatusName)
+                    ? "monday_case_status_missing"
+                    : "monday_case_status_unsupported";
+
+                _logger.LogWarning(
+                    "Case status omitted from Monday payload. TikCounter={TikCounter}, TikNumber={TikNumber}, StatusName={StatusName}, ColumnId={ColumnId}, Reason={ReasonCode}",
+                    c.TikCounter,
+                    c.TikNumber ?? "<null>",
+                    string.IsNullOrWhiteSpace(c.StatusName) ? "<null/empty>" : c.StatusName.Trim(),
+                    columnId,
+                    reasonCode);
+
+                await _skipLogger.LogSkipAsync(
+                    c.TikCounter,
+                    c.TikNumber,
+                    operation: "MondayColumnValueValidation",
+                    reasonCode: reasonCode,
+                    entityId: columnId,
+                    rawValue: c.StatusName,
+                    details: new
+                    {
+                        EntityType = "Status",
+                        BoardId = boardId,
+                        SourceField = "StatusName",
+                        SourceChangedDate = c.StatusChangedDate
+                    },
+                    ct);
+
+                return;
+            }
+
+            try
+            {
+                var allowedLabels = await _mondayMetadataProvider.GetAllowedStatusLabelsAsync(boardId, columnId, ct);
+                if (!allowedLabels.Contains(mappedLabel))
+                {
+                    _logger.LogWarning(
+                        "Case status label is not allowed on Monday board; status column omitted. TikCounter={TikCounter}, TikNumber={TikNumber}, StatusName={StatusName}, MappedLabel={MappedLabel}, ColumnId={ColumnId}, BoardId={BoardId}",
+                        c.TikCounter,
+                        c.TikNumber ?? "<null>",
+                        c.StatusName?.Trim() ?? "<null>",
+                        mappedLabel,
+                        columnId,
+                        boardId);
+
+                    await _skipLogger.LogSkipAsync(
+                        c.TikCounter,
+                        c.TikNumber,
+                        operation: "MondayColumnValueValidation",
+                        reasonCode: "monday_case_status_label_not_allowed",
+                        entityId: columnId,
+                        rawValue: c.StatusName,
+                        details: new
+                        {
+                            EntityType = "Status",
+                            BoardId = boardId,
+                            SourceField = "StatusName",
+                            MappedLabel = mappedLabel,
+                            AllowedLabelCount = allowedLabels.Count,
+                            SourceChangedDate = c.StatusChangedDate
+                        },
+                        ct);
+
+                    return;
+                }
+
+                columnValues[columnId] = new { label = mappedLabel };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to fetch/validate metadata for non-critical case status column {ColumnId} on board {BoardId}. StatusName '{StatusName}' for TikCounter {TikCounter}, TikNumber {TikNumber} will be omitted from this sync. Exception: {Message}",
+                    columnId,
+                    boardId,
+                    c.StatusName?.Trim() ?? "<null>",
+                    c.TikCounter,
+                    c.TikNumber ?? "<null>",
+                    ex.Message);
+
+                await _skipLogger.LogSkipAsync(
+                    c.TikCounter,
+                    c.TikNumber,
+                    operation: "MondayColumnValueValidation",
+                    reasonCode: "monday_case_status_metadata_failure",
+                    entityId: columnId,
+                    rawValue: c.StatusName,
+                    details: new
+                    {
+                        EntityType = "Status",
+                        BoardId = boardId,
+                        SourceField = "StatusName",
+                        ExceptionType = ex.GetType().Name,
+                        ExceptionMessage = ex.Message
+                    },
+                    ct);
+            }
+        }
+
         /// <summary>
         /// Pure decision logic for cooling period eligibility using Israeli business days.
         /// Israeli business days: Sunday–Thursday. Friday and Saturday are skipped.
@@ -2558,16 +2660,27 @@ namespace Odmon.Worker.Services
             return mapping.MondayChecksum.StartsWith("[TEST] ", StringComparison.Ordinal);
         }
 
-        private static int MapStatusIndex(string status)
+        internal static string? MapCaseStatusLabel(string? statusName)
         {
-            if (string.IsNullOrWhiteSpace(status)) return 5;
-            var s = status.ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(statusName))
+            {
+                return null;
+            }
 
-            if (s.Contains("סגור") || s.Contains("closed")) return 1;
-            if (s.Contains("פתוח") || s.Contains("open") || s.Contains("עבודה")) return 0;
-            if (s.Contains("תקוע") || s.Contains("stuck")) return 2;
-
-            return 5;
+            return statusName.Trim() switch
+            {
+                "בוטל" => "בוטל",
+                "דיווח" => "דיווח",
+                "הוחזר לביטוח" => "הוחזר לביטוח",
+                "הסדר תשלום" => "הסדר תשלום",
+                "ממתין לפסק דין" => "ממתין לפסק דין",
+                "ממתין לתשלום" => "ממתין לתשלום",
+                "מעוכב" => "מעוכב",
+                "סגור" => "סגור",
+                "פתוח" => "פתוח",
+                "סגור- נפתח בטעות" => "סגור - נפתח בטעות פש\"ר",
+                _ => null
+            };
         }
 
         public Task SyncMondayToOdcanitAsync(CancellationToken ct)
@@ -2861,7 +2974,7 @@ namespace Odmon.Worker.Services
             // FAIL-FAST: Validate critical fields before creating Monday item
             await ValidateCriticalFieldsAsync(boardId, c, ct);
 
-            var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: true, ct);
+            var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, ct);
             var mondayItemId = await _mondayClient.CreateItemAsync(boardId, groupId, itemName, columnValuesJson, ct);
 
             var newMapping = new MondayItemMapping
@@ -2912,7 +3025,7 @@ namespace Odmon.Worker.Services
                 // FAIL-FAST: Validate critical fields before updating Monday item
                 await ValidateCriticalFieldsAsync(boardId, c, ct);
 
-                var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, forceNotStartedStatus: false, ct);
+                var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, ct);
                 await _mondayClient.UpdateItemAsync(boardId, mapping.MondayItemId, columnValuesJson, ct);
                 mapping.OdcanitVersion = ComputeContentVersion(c);
             }
