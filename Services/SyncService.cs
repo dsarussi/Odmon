@@ -2368,6 +2368,13 @@ namespace Odmon.Worker.Services
                 }
 
                 columnValues[columnId] = new { label = mappedLabel };
+                _logger.LogInformation(
+                    "CASE STATUS SYNC | TikCounter={TikCounter} | TikNumber={TikNumber} | OdcanitStatus='{OdcanitStatus}' | MondayLabel='{MondayLabel}' | ColumnId={ColumnId}",
+                    c.TikCounter,
+                    c.TikNumber ?? "<null>",
+                    c.StatusName?.Trim() ?? "<null>",
+                    mappedLabel,
+                    columnId);
             }
             catch (Exception ex)
             {
@@ -2667,19 +2674,11 @@ namespace Odmon.Worker.Services
                 return null;
             }
 
-            return statusName.Trim() switch
+            var trimmed = statusName.Trim();
+            return trimmed switch
             {
-                "בוטל" => "בוטל",
-                "דיווח" => "דיווח",
-                "הוחזר לביטוח" => "הוחזר לביטוח",
-                "הסדר תשלום" => "הסדר תשלום",
-                "ממתין לפסק דין" => "ממתין לפסק דין",
-                "ממתין לתשלום" => "ממתין לתשלום",
-                "מעוכב" => "מעוכב",
-                "סגור" => "סגור",
-                "פתוח" => "פתוח",
                 "סגור- נפתח בטעות" => "סגור - נפתח בטעות פש\"ר",
-                _ => null
+                _ => trimmed
             };
         }
 
@@ -2903,7 +2902,9 @@ namespace Odmon.Worker.Services
             }
 
             var odcanitVersion = ComputeContentVersion(c);
-            var requiresDataUpdate = mapping.OdcanitVersion != odcanitVersion;
+            var compatibleOdcanitVersions = GetCompatibleContentVersions(c);
+            var statusChangedAfterLastSync = IsStatusChangedAfterLastSync(c.StatusChangedDate, mapping.LastSyncFromOdcanitUtc);
+            var requiresDataUpdate = statusChangedAfterLastSync || !compatibleOdcanitVersions.Contains(mapping.OdcanitVersion);
             var requiresNameUpdate = mapping.MondayChecksum != itemName;
 
             // Hearing checksum: detect hearing-only changes even when main case data is unchanged
@@ -2943,8 +2944,13 @@ namespace Odmon.Worker.Services
             if (requiresDataUpdate)
             {
                 _logger.LogDebug(
-                    "ContentVersion diff: TikCounter={TikCounter}, OldVersion={OldVersion}, NewVersion={NewVersion}",
-                    c.TikCounter, mapping.OdcanitVersion ?? "<null>", odcanitVersion);
+                    "ContentVersion diff: TikCounter={TikCounter}, OldVersion={OldVersion}, NewVersion={NewVersion}, StatusChangedAfterLastSync={StatusChangedAfterLastSync}, StatusChangedDate={StatusChangedDate}, LastSyncFromOdcanitUtc={LastSyncFromOdcanitUtc}",
+                    c.TikCounter,
+                    mapping.OdcanitVersion ?? "<null>",
+                    odcanitVersion,
+                    statusChangedAfterLastSync,
+                    c.StatusChangedDate,
+                    mapping.LastSyncFromOdcanitUtc);
             }
 
             return new SyncAction
@@ -3252,6 +3258,64 @@ namespace Odmon.Worker.Services
         // ====================================================================
         internal static string ComputeContentVersion(OdcanitCase c)
         {
+            return ComputeContentVersion(c, includeStatusName: true, includeStatusChangedDate: true);
+        }
+
+        private static HashSet<string?> GetCompatibleContentVersions(OdcanitCase c)
+        {
+            return new HashSet<string?>(StringComparer.Ordinal)
+            {
+                ComputeContentVersion(c, includeStatusName: true, includeStatusChangedDate: true),
+                ComputeContentVersion(c, includeStatusName: true, includeStatusChangedDate: false),
+                ComputeContentVersion(c, includeStatusName: false, includeStatusChangedDate: false)
+            };
+        }
+
+        internal static bool IsStatusChangedAfterLastSync(DateTime? statusChangedDate, DateTime? lastSyncFromOdcanitUtc)
+        {
+            if (!statusChangedDate.HasValue || !lastSyncFromOdcanitUtc.HasValue)
+            {
+                return false;
+            }
+
+            return NormalizeOdcanitDateTimeToUtc(statusChangedDate.Value) > NormalizeUtcDateTime(lastSyncFromOdcanitUtc.Value);
+        }
+
+        private static DateTime NormalizeOdcanitDateTimeToUtc(DateTime value)
+        {
+            if (value.Kind == DateTimeKind.Utc)
+            {
+                return value;
+            }
+
+            if (value.Kind == DateTimeKind.Local)
+            {
+                return value.ToUniversalTime();
+            }
+
+            return TimeZoneInfo.ConvertTimeToUtc(value, GetIsraelTimeZone());
+        }
+
+        private static DateTime NormalizeUtcDateTime(DateTime value)
+        {
+            if (value.Kind == DateTimeKind.Utc)
+            {
+                return value;
+            }
+
+            if (value.Kind == DateTimeKind.Local)
+            {
+                return value.ToUniversalTime();
+            }
+
+            return DateTime.SpecifyKind(value, DateTimeKind.Utc);
+        }
+
+        private static string ComputeContentVersion(
+            OdcanitCase c,
+            bool includeStatusName,
+            bool includeStatusChangedDate)
+        {
             var sb = new StringBuilder(4096);
 
             // ── String columns (in column-mapping order from BuildColumnValuesJsonAsync) ──
@@ -3308,7 +3372,15 @@ namespace Odmon.Worker.Services
             AppendStr(sb, c.ProceedingType);
             AppendDec(sb, c.PaymentDueAmount);
             AppendStr(sb, c.CaseFolderId);
-            AppendStr(sb, c.StatusName);
+            if (includeStatusName)
+            {
+                AppendStr(sb, c.StatusName);
+            }
+
+            if (includeStatusChangedDate)
+            {
+                AppendDateTime(sb, c.StatusChangedDate);
+            }
 
             // ── Phone columns (normalized before hashing) ──
             AppendStr(sb, NormalizeIsraeliPhoneForDocument(c.PolicyHolderPhone));
@@ -3365,6 +3437,11 @@ namespace Odmon.Worker.Services
         private static void AppendDate(StringBuilder sb, DateTime? value)
         {
             sb.Append(value?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "").Append('|');
+        }
+
+        private static void AppendDateTime(StringBuilder sb, DateTime? value)
+        {
+            sb.Append(value?.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) ?? "").Append('|');
         }
 
         private static void AppendDec(StringBuilder sb, decimal? value)

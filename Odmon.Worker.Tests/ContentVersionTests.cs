@@ -219,6 +219,54 @@ namespace Odmon.Worker.Tests
                 SyncService.ComputeContentVersion(modified));
         }
 
+        [Fact]
+        public void StatusNameChange_Detected()
+        {
+            var original = MakeCase();
+            original.StatusName = "פתוח";
+
+            var modified = MakeCase();
+            modified.StatusName = "במשא ומתן";
+
+            Assert.NotEqual(
+                SyncService.ComputeContentVersion(original),
+                SyncService.ComputeContentVersion(modified));
+        }
+
+        [Fact]
+        public void StatusChangedDateChange_Detected()
+        {
+            var original = MakeCase();
+            original.StatusName = "פתוח";
+            original.StatusChangedDate = new DateTime(2026, 5, 7, 10, 0, 0);
+
+            var modified = MakeCase();
+            modified.StatusName = "פתוח";
+            modified.StatusChangedDate = new DateTime(2026, 5, 8, 10, 0, 0);
+
+            Assert.NotEqual(
+                SyncService.ComputeContentVersion(original),
+                SyncService.ComputeContentVersion(modified));
+        }
+
+        [Fact]
+        public void StatusChangedAfterLastSync_Detected()
+        {
+            var lastSyncUtc = new DateTime(2026, 5, 8, 7, 0, 0, DateTimeKind.Utc);
+            var statusChangedUtc = new DateTime(2026, 5, 8, 8, 0, 0, DateTimeKind.Utc);
+
+            Assert.True(SyncService.IsStatusChangedAfterLastSync(statusChangedUtc, lastSyncUtc));
+        }
+
+        [Fact]
+        public void StatusChangedBeforeLastSync_NotDetected()
+        {
+            var lastSyncUtc = new DateTime(2026, 5, 8, 8, 0, 0, DateTimeKind.Utc);
+            var statusChangedUtc = new DateTime(2026, 5, 8, 7, 0, 0, DateTimeKind.Utc);
+
+            Assert.False(SyncService.IsStatusChangedAfterLastSync(statusChangedUtc, lastSyncUtc));
+        }
+
         // ====================================================================
         // Helper
         // ====================================================================

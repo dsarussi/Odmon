@@ -9,7 +9,9 @@ namespace Odmon.Worker.Tests
         [InlineData("בוטל", "בוטל")]
         [InlineData("דיווח", "דיווח")]
         [InlineData("הוחזר לביטוח", "הוחזר לביטוח")]
+        [InlineData("הסדר", "הסדר")]
         [InlineData("הסדר תשלום", "הסדר תשלום")]
+        [InlineData("במשא ומתן", "במשא ומתן")]
         [InlineData("ממתין לפסק דין", "ממתין לפסק דין")]
         [InlineData("ממתין לתשלום", "ממתין לתשלום")]
         [InlineData("מעוכב", "מעוכב")]
@@ -31,12 +33,18 @@ namespace Odmon.Worker.Tests
         [InlineData(null)]
         [InlineData("")]
         [InlineData("   ")]
+        public void MapCaseStatusLabel_MissingStatus_ReturnsNull(string? statusName)
+        {
+            Assert.Null(SyncService.MapCaseStatusLabel(statusName));
+        }
+
+        [Theory]
         [InlineData("פעיל")]
         [InlineData("חדש")]
         [InlineData("באמצע תהליך")]
-        public void MapCaseStatusLabel_MissingOrUnsupportedStatus_ReturnsNull(string? statusName)
+        public void MapCaseStatusLabel_NonEmptyStatus_PassesThroughForMetadataValidation(string statusName)
         {
-            Assert.Null(SyncService.MapCaseStatusLabel(statusName));
+            Assert.Equal(statusName, SyncService.MapCaseStatusLabel(statusName));
         }
     }
 }
