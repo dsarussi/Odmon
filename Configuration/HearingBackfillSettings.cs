@@ -7,7 +7,7 @@ namespace Odmon.Worker.Configuration
     {
         public bool Enable { get; set; }
 
-        /// <summary>Qualified source table, e.g. dbo.HearingBackfill_May2026 (same column layout as April).</summary>
+        /// <summary>Qualified source table, e.g. dbo.HearingBackfill_May2026 (same column layout as April/May).</summary>
         public string SourceTable { get; set; } = "dbo.HearingBackfill_May2026";
 
         public long BoardId { get; set; } = 5035534500;

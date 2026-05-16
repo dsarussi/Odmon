@@ -32,9 +32,15 @@ namespace Odmon.Worker.Workers
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            _logger.LogInformation(
+                "HearingBackfillWorker startup config: Enable={Enable}, SourceTable={SourceTable}, BoardId={BoardId}, BatchSize={BatchSize}.",
+                _settings.Enable, _settings.SourceTable, _settings.BoardId, _settings.BatchSize);
+
             if (!_settings.Enable)
             {
-                _logger.LogInformation("HearingBackfillWorker: Disabled (HearingBackfill:Enable=false). Exiting.");
+                _logger.LogInformation(
+                    "HearingBackfillWorker: Disabled (HearingBackfill:Enable=false). SourceTable={SourceTable}, BoardId={BoardId}, BatchSize={BatchSize}. Exiting.",
+                    _settings.SourceTable, _settings.BoardId, _settings.BatchSize);
                 return;
             }
 
@@ -55,7 +61,15 @@ namespace Odmon.Worker.Workers
 
                     if (result.NoMoreRows)
                     {
-                        _logger.LogInformation("HearingBackfillWorker: No more rows to process. Stopping backfill loop.");
+                        _logger.LogInformation(
+                            "HearingBackfillWorker: No more rows to process. Stopping backfill loop. SourceTable={SourceTable}, BoardId={BoardId}, Processed={Processed}, Created={Created}, Skipped={Skipped}, Failed={Failed}, DropdownSkipped={DropdownSkipped}",
+                            _settings.SourceTable,
+                            _settings.BoardId,
+                            result.Processed,
+                            result.Created,
+                            result.Skipped,
+                            result.Failed,
+                            result.DropdownSkipped);
                         return;
                     }
                 }

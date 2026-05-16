@@ -279,13 +279,45 @@ ODMON הוא שירות Worker של .NET 8 הפועל כשירות Windows. הו
 
 **זרימה טכנית:**
 
-1. `HearingBackfillService.RunAsync` קורא שורות מטבלת מקור מוגדרת (לדוגמה `dbo.HearingBackfill_May2026`)
+1. `HearingBackfillService.RunAsync` קורא שורות מטבלת מקור מוגדרת (לדוגמה `dbo.HearingBackfill_JunJul2026`)
 2. מטפל בחוסר התאמת טיפוסים: `ClientNumber` כ-`string` (מ-`NVARCHAR`), `HearingTime` כ-`string` (מ-`TimeSpan`)
 3. בונה ערכי עמודות Monday ויוצר פריטים דרך Monday API
-4. מסמן שורות שיובאו עם עדכון עמודת סטטוס
+4. מגדיר את עמודת הסטטוס המוגדרת על כל פריט חדש שנוצר ב-Monday
 5. יוצר רשומות `MondayItemMapping` עבור פריטים חדשים
 
 **טבלאות מרכזיות:** טבלת מקור מוגדרת (עמודות בעברית), `MondayItemMappings`
+
+**הרצת יוני-יולי 2026:** יש להשתמש בטבלת staging אחת בשם `dbo.HearingBackfill_JunJul2026`. הבחירה בטבלה נעשית דרך קונפיגורציה, ללא שינוי קוד, כל עוד צורת העמודות זהה:
+
+```sql
+CREATE TABLE dbo.HearingBackfill_JunJul2026
+(
+    [תאריך דיון] date NULL,
+    [שעת דיון] time(0) NULL,
+    [שם שופט] nvarchar(256) NULL,
+    [עיר בית משפט] nvarchar(256) NULL,
+    [טלפון נהג] nvarchar(64) NULL,
+    [שם נהג] nvarchar(256) NULL,
+    [מספר תיק] nvarchar(64) NULL,
+    [מספר לקוח] nvarchar(64) NULL,
+    [תאריך אירוע] date NULL
+);
+```
+
+קונפיגורציית הרצה:
+
+```json
+"HearingBackfill": {
+  "Enable": true,
+  "SourceTable": "dbo.HearingBackfill_JunJul2026",
+  "BoardId": 5035534500,
+  "StatusColumnId": "color_mm12y7zr",
+  "ImportedStatusIndex": 1,
+  "BatchSize": 10
+}
+```
+
+אזהרת תפעול: ל-`HearingBackfill` אין מצב dry-run. יש להפעיל אותו רק בזמן חלון הייבוא, לעקוב בלוגים אחרי `SourceTable`, `BoardId`, `BatchSize`, `Processed`, `Created`, `Skipped`, ו-`Failed`, ולהחזיר מיד בסיום את `HearingBackfill:Enable=false`.
 
 ### 4.6 קליטת מסמכים (לוח שאלון)
 

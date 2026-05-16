@@ -279,13 +279,63 @@ Imports a batch of hearing records from a staging table into Monday.com, used du
 
 **Technical flow:**
 
-1. `HearingBackfillService.RunAsync` reads rows from a configurable source table (e.g. `dbo.HearingBackfill_May2026`)
+1. `HearingBackfillService.RunAsync` reads rows from a configurable source table (e.g. `dbo.HearingBackfill_JunJul2026`)
 2. Handles type mismatches: `ClientNumber` as `string` (from `NVARCHAR`), `HearingTime` as `string` (from `TimeSpan`)
 3. Builds Monday column values and creates items via the Monday API
-4. Marks imported rows with a status column update
+4. Sets the configured Monday status column on each created item
 5. Creates `MondayItemMapping` entries for new items
 
 **Key tables:** Configurable source table (Hebrew columns), `MondayItemMappings`
+
+**June-July 2026 run:** use one combined staging table named `dbo.HearingBackfill_JunJul2026`. The app is config-driven; no code change is required to switch the month/window as long as the source table has the same shape:
+
+```sql
+CREATE TABLE dbo.HearingBackfill_JunJul2026
+(
+    [תאריך דיון] date NULL,
+    [שעת דיון] time(0) NULL,
+    [שם שופט] nvarchar(256) NULL,
+    [עיר בית משפט] nvarchar(256) NULL,
+    [טלפון נהג] nvarchar(64) NULL,
+    [שם נהג] nvarchar(256) NULL,
+    [מספר תיק] nvarchar(64) NULL,
+    [מספר לקוח] nvarchar(64) NULL,
+    [תאריך אירוע] date NULL
+);
+```
+
+If copying from an existing monthly staging table, keep the same column names and types:
+
+```sql
+SELECT
+    [תאריך דיון],
+    [שעת דיון],
+    [שם שופט],
+    [עיר בית משפט],
+    [טלפון נהג],
+    [שם נהג],
+    [מספר תיק],
+    [מספר לקוח],
+    [תאריך אירוע]
+INTO dbo.HearingBackfill_JunJul2026
+FROM dbo.HearingBackfill_May2026
+WHERE 1 = 0;
+```
+
+Run configuration:
+
+```json
+"HearingBackfill": {
+  "Enable": true,
+  "SourceTable": "dbo.HearingBackfill_JunJul2026",
+  "BoardId": 5035534500,
+  "StatusColumnId": "color_mm12y7zr",
+  "ImportedStatusIndex": 1,
+  "BatchSize": 10
+}
+```
+
+Operational warning: `HearingBackfill` has no dry-run mode. Enable it only for the import window, monitor logs for `SourceTable`, `BoardId`, `BatchSize`, `Processed`, `Created`, `Skipped`, and `Failed`, then restore `HearingBackfill:Enable=false` immediately after completion.
 
 ### 4.6 Document Ingestion (Questionnaire Board)
 
