@@ -166,6 +166,7 @@ namespace Odmon.Worker.Configuration
         public bool Enabled { get; set; } = false;
         public long BoardId { get; set; } = 5035534505;
         public string TaskStatusColumnId { get; set; } = "color_mkwej7ys";
+        public string[] ReadyStatusLabels { get; set; } = [];
         public string SuccessStatusLabel { get; set; } = "טופס נוצר בהצלחה";
         public string FileColumnId { get; set; } = "file_mm1bvngc";
         public string[] AllowedExtensions { get; set; } = ["docx", "doc"];
@@ -179,6 +180,22 @@ namespace Odmon.Worker.Configuration
         /// <summary>When in test mode, fetch at most this many items per page to reduce payload. Default 10.</summary>
         public int TestModePageLimit { get; set; } = 10;
         public bool IsTestMode => !string.IsNullOrWhiteSpace(TestTikNumber);
+
+        public string[] GetReadyStatusLabels()
+        {
+            var configured = ReadyStatusLabels
+                .Where(label => !string.IsNullOrWhiteSpace(label))
+                .Select(label => label.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+
+            if (configured.Length > 0)
+                return configured;
+
+            return string.IsNullOrWhiteSpace(SuccessStatusLabel)
+                ? []
+                : [SuccessStatusLabel.Trim()];
+        }
     }
 
     public class AccidentStorySettings

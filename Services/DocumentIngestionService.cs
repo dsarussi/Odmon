@@ -141,6 +141,12 @@ namespace Odmon.Worker.Services
 
             try
             {
+                var readyStatusLabels = ts.GetReadyStatusLabels();
+                var readyStatusLabelsLog = string.Join(" | ", readyStatusLabels);
+                _logger.LogInformation(
+                    "TASKDOC READY STATUS CONFIG | StatusColumnId={StatusColumnId} | ReadyStatusLabels={ReadyStatusLabels} | FileColumnId={FileColumnId}",
+                    ts.TaskStatusColumnId, readyStatusLabelsLog, ts.FileColumnId);
+
                 var taskItems = await _mondayService.FetchTaskItemsAsync(
                     ts.BoardId, ts.TaskStatusColumnId, ts.FileColumnId,
                     ts.TikNumberColumnId,
@@ -158,7 +164,7 @@ namespace Odmon.Worker.Services
                     foreach (var ti in taskItems)
                     {
                         var lookupTik = ti.TikNumber?.Trim() ?? "";
-                        var sMatch = string.Equals(ti.StatusLabel?.Trim(), ts.SuccessStatusLabel, StringComparison.Ordinal);
+                        var sMatch = IsTaskReadyStatus(ti.StatusLabel, readyStatusLabels);
                         var hFile = ti.FileAssets.Count > 0;
                         var mTest = string.Equals(lookupTik, ts.TestTikNumber!.Trim(), StringComparison.OrdinalIgnoreCase);
                         if (mTest) matchedItems++;
@@ -167,8 +173,8 @@ namespace Odmon.Worker.Services
                         if (mTest && sMatch && hFile && !string.IsNullOrWhiteSpace(lookupTik)) readyToImport++;
                     }
                     _logger.LogInformation(
-                        "TASKDOC TEST SUMMARY | TestTikNumber={TestTikNumber} | MatchedItems={Matched} | SuccessStatusItems={SuccessStatus} | ItemsWithFile={WithFile} | ReadyToImport={Ready}",
-                        ts.TestTikNumber, matchedItems, successStatusItems, itemsWithFile, readyToImport);
+                        "TASKDOC TEST SUMMARY | TestTikNumber={TestTikNumber} | MatchedItems={Matched} | ReadyStatusItems={ReadyStatusItems} | ItemsWithFile={WithFile} | ReadyToImport={Ready} | ReadyStatusLabels={ReadyStatusLabels}",
+                        ts.TestTikNumber, matchedItems, successStatusItems, itemsWithFile, readyToImport, readyStatusLabelsLog);
                     if (matchedItems == 0)
                         _logger.LogWarning("TASKDOC TEST NO MATCH | TestTikNumber={TestTikNumber}", ts.TestTikNumber);
                 }
@@ -222,21 +228,41 @@ namespace Odmon.Worker.Services
             return WordExtensions.Contains(ext);
         }
 
+        public static bool IsTaskReadyStatus(string? statusLabel, IEnumerable<string> readyStatusLabels)
+        {
+            var currentStatus = statusLabel?.Trim();
+            if (string.IsNullOrWhiteSpace(currentStatus))
+                return false;
+
+            return readyStatusLabels.Any(label =>
+                string.Equals(currentStatus, label?.Trim(), StringComparison.Ordinal));
+        }
+
         private async Task ProcessTaskItemAsync(DocumentIngestionMondayService.TaskItem item, CancellationToken ct)
         {
             var ts = _settings.TasksSource!;
             var fileColumnId = ts.FileColumnId;
-            var statusMatch = string.Equals(item.StatusLabel?.Trim(), ts.SuccessStatusLabel, StringComparison.Ordinal);
+            var readyStatusLabels = ts.GetReadyStatusLabels();
+            var readyStatusLabelsLog = string.Join(" | ", readyStatusLabels);
+            var statusMatch = IsTaskReadyStatus(item.StatusLabel, readyStatusLabels);
             var lookupTik = item.TikNumber?.Trim() ?? "";
             var statusText = item.StatusLabel ?? "<null>";
+
+            _logger.LogDebug(
+                "TASKDOC STATUS CHECK | ItemId={ItemId} | StatusText={StatusText} | ReadyStatusLabels={ReadyStatusLabels}",
+                item.ItemId, statusText, readyStatusLabelsLog);
 
             if (!statusMatch)
             {
                 _logger.LogDebug(
-                    "TASKDOC BLOCKED | Reason=StatusMismatch | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | StatusText={StatusText}",
-                    item.ItemId, string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, statusText);
+                    "TASKDOC BLOCKED | Reason=StatusMismatch | ItemId={ItemId} | LookupTikNumber={LookupTikNumber} | CurrentStatus={CurrentStatus} | ExpectedStatusLabels={ExpectedStatusLabels}",
+                    item.ItemId, string.IsNullOrEmpty(lookupTik) ? "<empty>" : lookupTik, statusText, readyStatusLabelsLog);
                 return;
             }
+
+            _logger.LogInformation(
+                "TASKDOC READY | ItemId={ItemId} | MatchedStatusLabel={MatchedStatusLabel} | FileColumnId={FileColumnId}",
+                item.ItemId, item.StatusLabel?.Trim() ?? "<null>", fileColumnId);
 
             var wordAssets = item.FileAssets.Where(a => IsWordAsset(a.Name)).ToList();
             var hasWordFile = wordAssets.Count > 0;

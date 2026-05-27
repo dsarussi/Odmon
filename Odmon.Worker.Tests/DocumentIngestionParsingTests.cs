@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Xunit;
+using Odmon.Worker.Configuration;
 using Odmon.Worker.Services;
 
 namespace Odmon.Worker.Tests
@@ -472,6 +473,78 @@ namespace Odmon.Worker.Tests
         {
             var name = DocumentIngestionService.AssetSafeFileName(198847023, "pdf");
             Assert.Equal("asset_198847023.pdf", name);
+        }
+
+        [Fact]
+        public void TasksSourceReadyStatus_ExistingSuccessLabel_IsReady()
+        {
+            var settings = new TasksBoardSourceSettings
+            {
+                SuccessStatusLabel = "טופס נוצר בהצלחה",
+                ReadyStatusLabels = ["טופס נוצר בהצלחה", "נוצר PDF מערכת"]
+            };
+
+            Assert.True(DocumentIngestionService.IsTaskReadyStatus(
+                "טופס נוצר בהצלחה",
+                settings.GetReadyStatusLabels()));
+        }
+
+        [Fact]
+        public void TasksSourceReadyStatus_NewPdfSystemLabel_IsReady()
+        {
+            var settings = new TasksBoardSourceSettings
+            {
+                SuccessStatusLabel = "טופס נוצר בהצלחה",
+                ReadyStatusLabels = ["טופס נוצר בהצלחה", "נוצר PDF מערכת"]
+            };
+
+            Assert.True(DocumentIngestionService.IsTaskReadyStatus(
+                "נוצר PDF מערכת",
+                settings.GetReadyStatusLabels()));
+        }
+
+        [Fact]
+        public void TasksSourceReadyStatus_OtherLabel_IsNotReady()
+        {
+            var settings = new TasksBoardSourceSettings
+            {
+                SuccessStatusLabel = "טופס נוצר בהצלחה",
+                ReadyStatusLabels = ["טופס נוצר בהצלחה", "נוצר PDF מערכת"]
+            };
+
+            Assert.False(DocumentIngestionService.IsTaskReadyStatus(
+                "ממתין",
+                settings.GetReadyStatusLabels()));
+        }
+
+        [Fact]
+        public void TasksSourceReadyStatus_EmptyReadyLabels_FallsBackToSuccessStatusLabel()
+        {
+            var settings = new TasksBoardSourceSettings
+            {
+                SuccessStatusLabel = "טופס נוצר בהצלחה",
+                ReadyStatusLabels = []
+            };
+
+            var readyLabels = settings.GetReadyStatusLabels();
+
+            Assert.Single(readyLabels);
+            Assert.Equal("טופס נוצר בהצלחה", readyLabels[0]);
+            Assert.True(DocumentIngestionService.IsTaskReadyStatus(
+                "טופס נוצר בהצלחה",
+                readyLabels));
+        }
+
+        [Fact]
+        public void TasksSourceFileColumn_RemainsWordFileColumn()
+        {
+            var settings = new TasksBoardSourceSettings
+            {
+                FileColumnId = "file_mm1bvngc"
+            };
+
+            Assert.Equal("file_mm1bvngc", settings.FileColumnId);
+            Assert.NotEqual("file_mkwerwmq", settings.FileColumnId);
         }
 
         [Fact]
