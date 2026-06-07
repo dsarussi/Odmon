@@ -18,54 +18,10 @@ namespace Odmon.Worker.OdcanitAccess
             _logger = logger;
         }
 
-        public async Task<long> GetMaxDecisionCounterAsync(CancellationToken ct)
-        {
-            var connection = _db.Database.GetDbConnection();
-            var wasOpen = connection.State == ConnectionState.Open;
-            if (!wasOpen)
-            {
-                await connection.OpenAsync(ct);
-            }
-
-            try
-            {
-                await using var command = connection.CreateCommand();
-                command.CommandText = @"
-SELECT COALESCE(MAX([Counter]), 0)
-FROM [vwNetCourtDocs]
-WHERE [DocType] IN (2, 3);";
-
-                var value = await command.ExecuteScalarAsync(ct);
-                var maxCounter = value is null or DBNull
-                    ? 0L
-                    : Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture);
-
-                _logger.LogInformation(
-                    "NETCOURT reader loaded current DocType 2/3 high watermark. MaxCounter={MaxCounter}",
-                    maxCounter);
-                return maxCounter;
-            }
-            finally
-            {
-                if (!wasOpen)
-                {
-                    await connection.CloseAsync();
-                }
-            }
-        }
-
-        public async Task<List<NetCourtDocument>> GetDecisionDocumentsAfterCounterAsync(
-            long lastSeenCounter,
-            int maxBatchSize,
+        public async Task<List<NetCourtDocument>> GetDecisionDocumentsFromDocDateAsync(
+            DateTime startFromDocDate,
             CancellationToken ct)
         {
-            if (maxBatchSize <= 0)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(maxBatchSize),
-                    "Max batch size must be greater than zero.");
-            }
-
             var rows = new List<NetCourtDocument>();
             var connection = _db.Database.GetDbConnection();
             var wasOpen = connection.State == ConnectionState.Open;
@@ -78,7 +34,7 @@ WHERE [DocType] IN (2, 3);";
             {
                 await using var command = connection.CreateCommand();
                 command.CommandText = @"
-SELECT TOP (@maxBatchSize)
+SELECT
     [Counter],
     [TikCounter],
     [ODDocID],
@@ -91,20 +47,14 @@ SELECT TOP (@maxBatchSize)
     [DecisionID]
 FROM [vwNetCourtDocs]
 WHERE [DocType] IN (2, 3)
-  AND [Counter] > @lastSeenCounter
-ORDER BY [Counter] ASC;";
+  AND [DocDate] >= @startFromDocDate
+ORDER BY [DocDate] ASC, [Counter] ASC;";
 
-                var batchParameter = command.CreateParameter();
-                batchParameter.ParameterName = "@maxBatchSize";
-                batchParameter.DbType = DbType.Int32;
-                batchParameter.Value = maxBatchSize;
-                command.Parameters.Add(batchParameter);
-
-                var counterParameter = command.CreateParameter();
-                counterParameter.ParameterName = "@lastSeenCounter";
-                counterParameter.DbType = DbType.Int64;
-                counterParameter.Value = lastSeenCounter;
-                command.Parameters.Add(counterParameter);
+                var startDateParameter = command.CreateParameter();
+                startDateParameter.ParameterName = "@startFromDocDate";
+                startDateParameter.DbType = DbType.Date;
+                startDateParameter.Value = startFromDocDate.Date;
+                command.Parameters.Add(startDateParameter);
 
                 await using var reader = await command.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
@@ -133,10 +83,9 @@ ORDER BY [Counter] ASC;";
             }
 
             _logger.LogInformation(
-                "NETCOURT reader loaded {Count} DocType 2/3 row(s) from vwNetCourtDocs. LastSeenCounter={LastSeenCounter}, MaxBatchSize={MaxBatchSize}",
+                "NETCOURT reader loaded {Count} DocType 2/3 row(s) from vwNetCourtDocs. StartFromDocDate={StartFromDocDate:yyyy-MM-dd}",
                 rows.Count,
-                lastSeenCounter,
-                maxBatchSize);
+                startFromDocDate);
 
             return rows;
         }

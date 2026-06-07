@@ -4,6 +4,7 @@ namespace Odmon.Worker.Configuration
     {
         public bool Enabled { get; set; } = false;
         public int IntervalSeconds { get; set; } = 300;
+        public string StartFromDocDate { get; set; } = "2026-06-07";
         public int MaxBatchSize { get; set; } = 100;
         public string EmailMode { get; set; } = "Test";
         public string TestRecipient { get; set; } = "odmon@ezer-law.com";

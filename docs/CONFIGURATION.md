@@ -350,13 +350,14 @@ Or remove/fix the `KeyVault:VaultUrl` configuration.
 |---|---:|---|
 | `Enabled` | `false` | Enables the dedicated NetCourt polling worker. |
 | `IntervalSeconds` | `300` | Polling interval. |
-| `MaxBatchSize` | `100` | Maximum number of rows read per poll, ordered by `Counter` ascending. |
+| `StartFromDocDate` | `2026-06-07` | Earliest NetCourt `DocDate` eligible for alerting, in `yyyy-MM-dd` format. |
+| `MaxBatchSize` | `100` | Maximum number of untracked eligible documents processed per poll. |
 | `EmailMode` | `Test` | `Test` sends only to `TestRecipient`; `Live` sends to the routed employee. |
 | `TestRecipient` | `odmon@ezer-law.com` | Actual recipient used in Test mode. |
 | `ClientNumberToRecipientEmail` | configured map | Client-number-to-employee routing. |
 | `FallbackRecipientEnabled` | `false` | Allows global `Email:Recipients` only when explicitly enabled. |
 
-On first run, the worker reads only `MAX(Counter)` from `vwNetCourtDocs` for `DocType IN (2, 3)`, stores it in `NetCourtDecisionAlertState.LastSeenCounter`, and returns without reading historical rows, inserting alert rows, or sending email. Later polls read at most `MaxBatchSize` rows where `Counter > LastSeenCounter`, ordered by `Counter` ascending. `DocDate` and `tsCreateDate` are retained only for logging and tracking; they do not control detection. Filenames and free-text fields are not used for classification.
+Every poll reads `vwNetCourtDocs` rows where `DocType IN (2, 3)` and `DocDate >= StartFromDocDate`. Integration DB `DocumentIdentity` tracking removes previously handled rows before `MaxBatchSize` is applied, so older tracked rows cannot block later unprocessed decisions. `tsCreateDate` and `Counter` do not control detection. Filenames and free-text fields are not used for classification.
 
 ## Configuration File Examples
 

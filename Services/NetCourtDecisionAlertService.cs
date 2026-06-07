@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Globalization;
 using Odmon.Worker.Configuration;
 using Odmon.Worker.Data;
 using Odmon.Worker.Models;
@@ -12,7 +13,6 @@ namespace Odmon.Worker.Services
 {
     public class NetCourtDecisionAlertService
     {
-        private const int StateId = 1;
         private readonly IntegrationDbContext _integrationDb;
         private readonly INetCourtDocumentReader _documentReader;
         private readonly INetCourtCaseResolver _caseResolver;
@@ -42,51 +42,32 @@ namespace Odmon.Worker.Services
         public async Task<NetCourtDecisionAlertRunResult> RunAsync(CancellationToken ct)
         {
             var result = new NetCourtDecisionAlertRunResult();
-            var state = await _integrationDb.NetCourtDecisionAlertStates
-                .SingleOrDefaultAsync(x => x.Id == StateId, ct);
-            var firstRun = state?.LastSeenCounter == null;
-
-            if (firstRun)
-            {
-                var maxCounter = await _documentReader.GetMaxDecisionCounterAsync(ct);
-                var initializedAtUtc = DateTime.UtcNow;
-                state ??= new NetCourtDecisionAlertState { Id = StateId };
-                state.LastSeenCounter = maxCounter;
-                state.BaselineCompletedAtUtc ??= initializedAtUtc;
-                state.UpdatedAtUtc = initializedAtUtc;
-                if (_integrationDb.Entry(state).State == EntityState.Detached)
-                {
-                    _integrationDb.NetCourtDecisionAlertStates.Add(state);
-                }
-
-                await _integrationDb.SaveChangesAsync(ct);
-                _logger.LogInformation(
-                    "NETCOURT Counter watermark initialized. LastSeenCounter={LastSeenCounter}, HistoricalRowsScanned=0, AlertRowsInserted=0, EmailsQueued=0",
-                    maxCounter);
-                return result;
-            }
-
-            var lastSeenCounter = state!.LastSeenCounter!.Value;
+            var startFromDocDate = ParseStartFromDocDate();
             var maxBatchSize = Math.Max(1, _settings.MaxBatchSize);
-            var candidates = await _documentReader.GetDecisionDocumentsAfterCounterAsync(
-                lastSeenCounter,
-                maxBatchSize,
+            var eligibleCandidates = await _documentReader.GetDecisionDocumentsFromDocDateAsync(
+                startFromDocDate,
                 ct);
-            candidates = candidates
+            eligibleCandidates = eligibleCandidates
                 .Where(x =>
                     IsDecisionDocument(x) &&
-                    x.Counter > lastSeenCounter)
-                .OrderBy(x => x.Counter)
-                .Take(maxBatchSize)
+                    x.DocDate.HasValue &&
+                    x.DocDate.Value.Date >= startFromDocDate)
+                .OrderBy(x => x.DocDate)
+                .ThenBy(x => x.Counter)
                 .ToList();
-            result.CandidatesDetected = candidates.Count;
+            result.CandidatesDetected = eligibleCandidates.Count;
 
             _logger.LogInformation(
-                "NETCOURT candidates detected. Count={Count}, LastSeenCounter={LastSeenCounter}, MaxBatchSize={MaxBatchSize}",
-                candidates.Count,
-                lastSeenCounter,
+                "NETCOURT candidates detected. Count={Count}, StartFromDocDate={StartFromDocDate:yyyy-MM-dd}, MaxBatchSize={MaxBatchSize}",
+                eligibleCandidates.Count,
+                startFromDocDate,
                 maxBatchSize);
 
+            var candidates = await SelectUntrackedBatchAsync(
+                eligibleCandidates,
+                maxBatchSize,
+                result,
+                ct);
             if (candidates.Count == 0)
             {
                 return result;
@@ -99,24 +80,49 @@ namespace Odmon.Worker.Services
             await AddNewTrackingRowsAsync(candidates, result, ct);
             await ProcessBatchRowsAsync(candidateIdentities, result, ct);
 
-            var batchHighCounter = candidates[^1].Counter;
-            var watermarkState = await _integrationDb.NetCourtDecisionAlertStates
-                .SingleAsync(x => x.Id == StateId, ct);
-            watermarkState.LastSeenCounter = batchHighCounter;
-            watermarkState.UpdatedAtUtc = DateTime.UtcNow;
-            await _integrationDb.SaveChangesAsync(ct);
-
             _logger.LogInformation(
-                "NETCOURT run complete. Candidates={Candidates}, NewTracked={NewTracked}, AlreadyProcessed={AlreadyProcessed}, Queued={Queued}, MissingRouting={MissingRouting}, Failed={Failed}, LastSeenCounter={LastSeenCounter}",
+                "NETCOURT run complete. EligibleCandidates={Candidates}, NewTracked={NewTracked}, AlreadyProcessed={AlreadyProcessed}, Queued={Queued}, MissingRouting={MissingRouting}, Failed={Failed}",
                 result.CandidatesDetected,
                 result.NewTracked,
                 result.AlreadyProcessed,
                 result.EmailsQueued,
                 result.MissingRouting,
-                result.Failed,
-                batchHighCounter);
+                result.Failed);
 
             return result;
+        }
+
+        private async Task<List<NetCourtDocument>> SelectUntrackedBatchAsync(
+            IReadOnlyCollection<NetCourtDocument> candidates,
+            int maxBatchSize,
+            NetCourtDecisionAlertRunResult result,
+            CancellationToken ct)
+        {
+            var distinctCandidates = candidates
+                .DistinctBy(BuildDocumentIdentity)
+                .ToList();
+            var identities = distinctCandidates
+                .Select(BuildDocumentIdentity)
+                .ToArray();
+            var existing = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var identityChunk in identities.Chunk(1000))
+            {
+                var tracked = await _integrationDb.NetCourtDecisionAlerts
+                    .AsNoTracking()
+                    .Where(x => identityChunk.Contains(x.DocumentIdentity))
+                    .Select(x => x.DocumentIdentity)
+                    .ToListAsync(ct);
+                existing.UnionWith(tracked);
+            }
+
+            result.AlreadyProcessed += distinctCandidates.Count(
+                x => existing.Contains(BuildDocumentIdentity(x)));
+
+            return distinctCandidates
+                .Where(x => !existing.Contains(BuildDocumentIdentity(x)))
+                .Take(maxBatchSize)
+                .ToList();
         }
 
         private async Task AddNewTrackingRowsAsync(
@@ -348,6 +354,22 @@ namespace Odmon.Worker.Services
 
         internal static bool IsDecisionDocument(NetCourtDocument document)
             => document.DocType is 2 or 3;
+
+        private DateTime ParseStartFromDocDate()
+        {
+            if (DateTime.TryParseExact(
+                    _settings.StartFromDocDate,
+                    "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var startFromDocDate))
+            {
+                return startFromDocDate.Date;
+            }
+
+            throw new InvalidOperationException(
+                "NetCourtDecisionAlerts:StartFromDocDate must use yyyy-MM-dd format.");
+        }
 
         internal static string BuildEmailBody(
             string displayName,
