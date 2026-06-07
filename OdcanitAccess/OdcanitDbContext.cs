@@ -14,6 +14,7 @@ namespace Odmon.Worker.OdcanitAccess
         public DbSet<OdcanitDiaryEvent> DiaryEvents => Set<OdcanitDiaryEvent>();
         public DbSet<OdcanitUserData> UserData => Set<OdcanitUserData>();
         public DbSet<OdcanitHozlapMainData> HozlapMainData => Set<OdcanitHozlapMainData>();
+        public DbSet<NetCourtDocument> NetCourtDocuments => Set<NetCourtDocument>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -45,6 +46,10 @@ namespace Odmon.Worker.OdcanitAccess
 
             modelBuilder.Entity<OdcanitHozlapMainData>()
                 .ToView("vwHozlapFormsData_TikMainData")
+                .HasNoKey();
+
+            modelBuilder.Entity<NetCourtDocument>()
+                .ToView("vwNetCourtDocs")
                 .HasNoKey();
 
             base.OnModelCreating(modelBuilder);

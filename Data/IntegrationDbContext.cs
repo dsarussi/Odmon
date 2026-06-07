@@ -27,6 +27,8 @@ namespace Odmon.Worker.Data
         public DbSet<VoicenterApiRequestLog> VoicenterApiRequestLogs => Set<VoicenterApiRequestLog>();
         public DbSet<VoicenterQuotaWarningState> VoicenterQuotaWarningStates => Set<VoicenterQuotaWarningState>();
         public DbSet<VoicenterCallProcessingState> VoicenterCallProcessingStates => Set<VoicenterCallProcessingState>();
+        public DbSet<NetCourtDecisionAlert> NetCourtDecisionAlerts => Set<NetCourtDecisionAlert>();
+        public DbSet<NetCourtDecisionAlertState> NetCourtDecisionAlertStates => Set<NetCourtDecisionAlertState>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -241,6 +243,31 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.LastError).HasMaxLength(2000);
                 b.HasIndex(x => x.Status).HasDatabaseName("IX_VoicenterCallProcessingStates_Status");
                 b.HasIndex(x => x.LastSeenUtc).HasDatabaseName("IX_VoicenterCallProcessingStates_LastSeenUtc");
+            });
+
+            modelBuilder.Entity<NetCourtDecisionAlert>(b =>
+            {
+                b.ToTable("NetCourtDecisionAlerts");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => x.DocumentIdentity).IsUnique();
+                b.HasIndex(x => x.Status);
+                b.HasIndex(x => x.CreatedAtUtc);
+                b.Property(x => x.DocumentIdentity).HasMaxLength(128).IsRequired();
+                b.Property(x => x.TikNumber).HasMaxLength(64);
+                b.Property(x => x.Description).HasMaxLength(1000);
+                b.Property(x => x.DecisionDesc).HasMaxLength(2000);
+                b.Property(x => x.IntendedRecipientEmail).HasMaxLength(320);
+                b.Property(x => x.ActualRecipientEmail).HasMaxLength(1000);
+                b.Property(x => x.EmailMode).HasMaxLength(16).IsRequired();
+                b.Property(x => x.Status).HasMaxLength(32).IsRequired();
+                b.Property(x => x.ErrorMessage).HasMaxLength(2000);
+            });
+
+            modelBuilder.Entity<NetCourtDecisionAlertState>(b =>
+            {
+                b.ToTable("NetCourtDecisionAlertState");
+                b.HasKey(x => x.Id);
+                b.Property(x => x.Id).ValueGeneratedNever();
             });
 
             base.OnModelCreating(modelBuilder);

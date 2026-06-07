@@ -342,6 +342,23 @@ Or remove/fix the `KeyVault:VaultUrl` configuration.
 
 **Fix**: See "BoardId is 0" fix above. Also verify index exists (see `SQL_Diagnostics.md`).
 
+## NetCourt Decision Alerts
+
+`NetCourtDecisionAlerts` controls the independent Odcanit `vwNetCourtDocs` decision-email worker.
+
+| Setting | Default | Description |
+|---|---:|---|
+| `Enabled` | `false` | Enables the dedicated NetCourt polling worker. |
+| `IntervalSeconds` | `300` | Polling interval. |
+| `LookbackDays` | `7` | Overlap window; durable document tracking provides final deduplication. |
+| `BaselineOnlyOnFirstRun` | `true` | Records existing DocType 2/3 rows without emailing on the first run. |
+| `EmailMode` | `Test` | `Test` sends only to `TestRecipient`; `Live` sends to the routed employee. |
+| `TestRecipient` | `odmon@ezer-law.com` | Actual recipient used in Test mode. |
+| `ClientNumberToRecipientEmail` | configured map | Client-number-to-employee routing. |
+| `FallbackRecipientEnabled` | `false` | Allows global `Email:Recipients` only when explicitly enabled. |
+
+Only `vwNetCourtDocs` rows with `DocType IN (2, 3)` are eligible. Filenames and free-text fields are not used for classification.
+
 ## Configuration File Examples
 
 ### appsettings.json (Base)

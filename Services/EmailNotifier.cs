@@ -19,9 +19,10 @@ namespace Odmon.Worker.Services
         public bool IsHtml { get; init; }
         public string? Fingerprint { get; init; }
         public EmailMessageType Type { get; init; }
+        public IReadOnlyCollection<string>? Recipients { get; init; }
     }
 
-    public enum EmailMessageType { Critical, DailySummary, Digest }
+    public enum EmailMessageType { Critical, DailySummary, Digest, Direct }
 
     /// <summary>
     /// Production email notifier with deduplication, rate limiting, and non-blocking delivery.
@@ -131,6 +132,67 @@ namespace Odmon.Worker.Services
             }
         }
 
+        public bool QueueEmail(
+            string subject,
+            string body,
+            IReadOnlyCollection<string> recipients,
+            bool isHtml = false)
+        {
+            if (!IsEnabled())
+            {
+                return false;
+            }
+
+            var normalizedRecipients = recipients
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (normalizedRecipients.Length == 0)
+            {
+                _logger.LogWarning("EMAIL DIRECT NOT QUEUED | Subject={Subject}, Reason=no recipients", subject);
+                return false;
+            }
+
+            if (IsRateLimited())
+            {
+                _logger.LogWarning(
+                    "EMAIL DIRECT NOT QUEUED (rate limit) | Subject={Subject}, MaxPerHour={MaxPerHour}",
+                    subject,
+                    GetMaxEmailsPerHour());
+                return false;
+            }
+
+            var queued = _queue.Writer.TryWrite(new EmailMessage
+            {
+                Subject = subject,
+                Body = body,
+                IsHtml = isHtml,
+                Type = EmailMessageType.Direct,
+                Recipients = normalizedRecipients
+            });
+
+            if (queued)
+            {
+                lock (_rateLock)
+                {
+                    _sentTimestamps.Add(DateTime.UtcNow);
+                }
+
+                _logger.LogInformation(
+                    "EMAIL QUEUED | Type=Direct, Subject={Subject}, Recipients={Recipients}",
+                    subject,
+                    string.Join(";", normalizedRecipients));
+            }
+            else
+            {
+                _logger.LogWarning("EMAIL DROPPED (queue full) | Type=Direct, Subject={Subject}", subject);
+            }
+
+            return queued;
+        }
+
         public async Task SendDailySummaryAsync(string subject, string htmlBody, CancellationToken ct)
         {
             if (!IsEnabled()) return;
@@ -178,7 +240,9 @@ namespace Odmon.Worker.Services
             var useTls = _config.GetValue<bool>("Email:UseTls", true);
             var username = _config["Email:Username"] ?? string.Empty;
             var password = _config["Email:Password"] ?? string.Empty;
-            var recipients = _config.GetSection("Email:Recipients").Get<string[]>() ?? Array.Empty<string>();
+            var recipients = message.Recipients?.ToArray()
+                ?? _config.GetSection("Email:Recipients").Get<string[]>()
+                ?? Array.Empty<string>();
 
             if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
             {

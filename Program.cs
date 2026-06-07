@@ -135,6 +135,8 @@ hostBuilder.ConfigureServices((context, services) =>
     });
 
     services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
+    services.AddScoped<INetCourtDocumentReader, SqlNetCourtDocumentReader>();
+    services.AddScoped<INetCourtCaseResolver, NetCourtCaseResolver>();
 
     services.AddScoped<IOdcanitWriter, SqlOdcanitWriter>();
     services.AddScoped<ISkipLogger, SkipLogger>();
@@ -155,6 +157,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.Configure<HearingApprovalBackfillSettings>(config.GetSection("HearingApprovalBackfill"));
     services.Configure<VoicenterCallSummarySettings>(config.GetSection("VoicenterCallSummaries"));
     services.Configure<VoicenterBackfillSettings>(config.GetSection("VoicenterBackfill"));
+    services.Configure<NetCourtDecisionAlertSettings>(config.GetSection("NetCourtDecisionAlerts"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
@@ -196,6 +199,9 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddScoped<OdcanitDocumentWriter>();
     services.AddScoped<DocumentIngestionService>();
     services.AddHostedService<DocumentIngestionWorker>();
+
+    services.AddScoped<NetCourtDecisionAlertService>();
+    services.AddHostedService<NetCourtDecisionAlertWorker>();
 });
 
 var host = hostBuilder.Build();

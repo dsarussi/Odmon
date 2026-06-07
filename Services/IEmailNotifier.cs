@@ -15,6 +15,12 @@ namespace Odmon.Worker.Services
         void QueueCriticalAlert(string subject, string body, string? exceptionType = null, string? source = null, string? alertType = null, string? environmentName = null, string? serverName = null);
 
         /// <summary>
+        /// Queues a normal email to explicit recipients. Global critical-alert recipients are not used.
+        /// Returns false when email is disabled, rate limited, recipients are empty, or the queue is full.
+        /// </summary>
+        bool QueueEmail(string subject, string body, IReadOnlyCollection<string> recipients, bool isHtml = false);
+
+        /// <summary>
         /// Queue a daily summary email. Typically called once per day by the background service.
         /// </summary>
         Task SendDailySummaryAsync(string subject, string htmlBody, CancellationToken ct);
