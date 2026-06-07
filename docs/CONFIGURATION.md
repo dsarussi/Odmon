@@ -350,13 +350,13 @@ Or remove/fix the `KeyVault:VaultUrl` configuration.
 |---|---:|---|
 | `Enabled` | `false` | Enables the dedicated NetCourt polling worker. |
 | `IntervalSeconds` | `300` | Polling interval. |
-| `LookbackDays` | `7` | Overlap window after initialization; the query is always clamped to the durable start point. |
+| `MaxBatchSize` | `100` | Maximum number of rows read per poll, ordered by `Counter` ascending. |
 | `EmailMode` | `Test` | `Test` sends only to `TestRecipient`; `Live` sends to the routed employee. |
 | `TestRecipient` | `odmon@ezer-law.com` | Actual recipient used in Test mode. |
 | `ClientNumberToRecipientEmail` | configured map | Client-number-to-employee routing. |
 | `FallbackRecipientEnabled` | `false` | Allows global `Email:Recipients` only when explicitly enabled. |
 
-On first run, the worker stores the current UTC time in `NetCourtDecisionAlertState.BaselineCompletedAtUtc` and returns without querying historical documents, inserting alert rows, or sending email. Only `vwNetCourtDocs` rows with `DocType IN (2, 3)` and `tsCreateDate` at or after that start point are eligible. Filenames and free-text fields are not used for classification.
+On first run, the worker reads only `MAX(Counter)` from `vwNetCourtDocs` for `DocType IN (2, 3)`, stores it in `NetCourtDecisionAlertState.LastSeenCounter`, and returns without reading historical rows, inserting alert rows, or sending email. Later polls read at most `MaxBatchSize` rows where `Counter > LastSeenCounter`, ordered by `Counter` ascending. `DocDate` and `tsCreateDate` are retained only for logging and tracking; they do not control detection. Filenames and free-text fields are not used for classification.
 
 ## Configuration File Examples
 

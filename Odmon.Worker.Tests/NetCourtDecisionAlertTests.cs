@@ -14,24 +14,25 @@ namespace Odmon.Worker.Tests
     public class NetCourtDecisionAlertTests
     {
         [Fact]
-        public async Task FirstRun_InitializesStartPoint_WithoutHistoricalRows()
+        public async Task FirstRun_StoresMaxCounter_WithoutHistoricalRows()
         {
             await using var db = CreateDb();
             var reader = new FakeDocumentReader
             {
+                MaxCounter = 299746,
                 Documents = { Decision(counter: 1, courtDocumentId: 101) }
             };
             var email = new FakeEmailNotifier();
             var service = CreateService(db, reader, email, "Test");
-            var beforeRunUtc = DateTime.UtcNow;
 
             await service.RunAsync(CancellationToken.None);
-            var afterRunUtc = DateTime.UtcNow;
 
-            Assert.Equal(0, reader.CallCount);
+            Assert.Equal(1, reader.MaxCounterCallCount);
+            Assert.Equal(0, reader.BatchCallCount);
             Assert.Empty(await db.NetCourtDecisionAlerts.ToListAsync());
-            var startFromUtc = (await db.NetCourtDecisionAlertStates.SingleAsync()).BaselineCompletedAtUtc;
-            Assert.InRange(startFromUtc!.Value, beforeRunUtc, afterRunUtc);
+            Assert.Equal(
+                299746,
+                (await db.NetCourtDecisionAlertStates.SingleAsync()).LastSeenCounter);
         }
 
         [Fact]
@@ -40,6 +41,7 @@ namespace Odmon.Worker.Tests
             await using var db = CreateDb();
             var reader = new FakeDocumentReader
             {
+                MaxCounter = 2,
                 Documents = { Decision(counter: 2, courtDocumentId: 102) }
             };
             var email = new FakeEmailNotifier();
@@ -52,19 +54,17 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task DocumentBeforeStartPoint_IsIgnored()
+        public async Task LaterRun_ProcessesOnlyCountersAboveWatermark()
         {
             await using var db = CreateDb();
-            var startFromUtc = DateTime.UtcNow;
-            await MarkStartPointAsync(db, startFromUtc);
+            await MarkWatermarkAsync(db, 20);
             var reader = new FakeDocumentReader
             {
                 Documents =
                 {
-                    Decision(
-                        counter: 20,
-                        courtDocumentId: 120,
-                        createdAtUtc: startFromUtc.AddSeconds(-1))
+                    Decision(counter: 19, courtDocumentId: 119),
+                    Decision(counter: 20, courtDocumentId: 120),
+                    Decision(counter: 21, courtDocumentId: 121)
                 }
             };
             var email = new FakeEmailNotifier();
@@ -72,45 +72,136 @@ namespace Odmon.Worker.Tests
 
             var result = await service.RunAsync(CancellationToken.None);
 
-            Assert.Equal(startFromUtc, reader.LastCreatedSinceUtc);
-            Assert.Equal(0, result.CandidatesDetected);
-            Assert.Empty(await db.NetCourtDecisionAlerts.ToListAsync());
-            Assert.Empty(email.DirectMessages);
+            Assert.Equal(20, reader.LastRequestedCounter);
+            Assert.Equal(1, result.CandidatesDetected);
+            Assert.Equal(
+                21,
+                (await db.NetCourtDecisionAlerts.SingleAsync()).NetCourtCounter);
+            Assert.Equal(
+                21,
+                (await db.NetCourtDecisionAlertStates.SingleAsync()).LastSeenCounter);
         }
 
         [Fact]
-        public async Task DocumentAfterStartPoint_IsProcessedNormally()
+        public async Task NoRows_DoesNotChangeWatermarkState()
         {
             await using var db = CreateDb();
-            var startFromUtc = DateTime.UtcNow.AddMinutes(-1);
-            await MarkStartPointAsync(db, startFromUtc);
+            var originalUpdatedAtUtc = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            db.NetCourtDecisionAlertStates.Add(new NetCourtDecisionAlertState
+            {
+                Id = 1,
+                LastSeenCounter = 20,
+                BaselineCompletedAtUtc = originalUpdatedAtUtc,
+                UpdatedAtUtc = originalUpdatedAtUtc
+            });
+            await db.SaveChangesAsync();
+            var reader = new FakeDocumentReader();
+            var service = CreateService(db, reader, new FakeEmailNotifier(), "Test");
+
+            await service.RunAsync(CancellationToken.None);
+
+            var state = await db.NetCourtDecisionAlertStates.SingleAsync();
+            Assert.Equal(20, state.LastSeenCounter);
+            Assert.Equal(originalUpdatedAtUtc, state.UpdatedAtUtc);
+        }
+
+        [Fact]
+        public async Task QueryUsesMaxBatchSize_AndAdvancesToHandledBatchHighCounter()
+        {
+            await using var db = CreateDb();
+            await MarkWatermarkAsync(db, 20);
+            var reader = new FakeDocumentReader
+            {
+                Documents =
+                {
+                    Decision(counter: 21, courtDocumentId: 121),
+                    Decision(counter: 22, courtDocumentId: 122),
+                    Decision(counter: 23, courtDocumentId: 123)
+                }
+            };
+            var email = new FakeEmailNotifier();
+            var service = CreateService(db, reader, email, "Test", maxBatchSize: 2);
+
+            var result = await service.RunAsync(CancellationToken.None);
+
+            Assert.Equal(2, reader.LastMaxBatchSize);
+            Assert.Equal(2, result.EmailsQueued);
+            Assert.Equal(2, await db.NetCourtDecisionAlerts.CountAsync());
+            Assert.Equal(
+                22,
+                (await db.NetCourtDecisionAlertStates.SingleAsync()).LastSeenCounter);
+        }
+
+        [Fact]
+        public async Task RowsAreProcessedInAscendingCounterOrder()
+        {
+            await using var db = CreateDb();
+            await MarkWatermarkAsync(db, 100);
+            var reader = new FakeDocumentReader
+            {
+                Documents =
+                {
+                    Decision(counter: 103, courtDocumentId: 103, tikCounter: 103),
+                    Decision(counter: 101, courtDocumentId: 101, tikCounter: 101),
+                    Decision(counter: 102, courtDocumentId: 102, tikCounter: 102)
+                }
+            };
+            var resolver = new FakeCaseResolver
+            {
+                Cases =
+                {
+                    RoutedCase(101),
+                    RoutedCase(102),
+                    RoutedCase(103)
+                }
+            };
+            var email = new FakeEmailNotifier();
+            var service = CreateService(db, reader, email, "Test", resolver);
+
+            await service.RunAsync(CancellationToken.None);
+
+            Assert.Equal(
+                new[] { "9/101", "9/102", "9/103" },
+                email.DirectMessages.Select(x => x.Subject.Split(' ').Last()).ToArray());
+        }
+
+        [Fact]
+        public async Task TimestampAndDocDateDoNotAffectCounterDetection()
+        {
+            await using var db = CreateDb();
+            await MarkWatermarkAsync(db, 200);
             var reader = new FakeDocumentReader
             {
                 Documents =
                 {
                     Decision(
-                        counter: 21,
-                        courtDocumentId: 121,
-                        createdAtUtc: startFromUtc.AddSeconds(1))
+                        counter: 202,
+                        courtDocumentId: 202,
+                        createdAtUtc: DateTime.Today,
+                        docDate: DateTime.Today.AddYears(-5)),
+                    Decision(
+                        counter: 201,
+                        courtDocumentId: 201,
+                        createdAtUtc: DateTime.Today,
+                        docDate: DateTime.Today.AddYears(5))
                 }
             };
             var email = new FakeEmailNotifier();
             var service = CreateService(db, reader, email, "Test");
 
-            var result = await service.RunAsync(CancellationToken.None);
+            await service.RunAsync(CancellationToken.None);
 
-            Assert.Equal(1, result.EmailsQueued);
-            Assert.Single(email.DirectMessages);
+            Assert.Equal(2, email.DirectMessages.Count);
             Assert.Equal(
-                NetCourtDecisionAlertStatuses.TestEmailQueued,
-                (await db.NetCourtDecisionAlerts.SingleAsync()).Status);
+                202,
+                (await db.NetCourtDecisionAlertStates.SingleAsync()).LastSeenCounter);
         }
 
         [Fact]
         public async Task NewDecision_InTestMode_QueuesOnceOnlyToTestRecipient()
         {
             await using var db = CreateDb();
-            await MarkStartPointAsync(db, DateTime.UtcNow.AddMinutes(-1));
+            await MarkWatermarkAsync(db, 0);
             var reader = new FakeDocumentReader
             {
                 Documents = { Decision(counter: 3, courtDocumentId: 103, tikCounter: 77) }
@@ -139,7 +230,7 @@ namespace Odmon.Worker.Tests
         public async Task NewDecision_InLiveMode_QueuesToRoutedEmployee()
         {
             await using var db = CreateDb();
-            await MarkStartPointAsync(db, DateTime.UtcNow.AddMinutes(-1));
+            await MarkWatermarkAsync(db, 0);
             var reader = new FakeDocumentReader
             {
                 Documents = { Decision(counter: 4, courtDocumentId: 104, tikCounter: 88) }
@@ -163,7 +254,7 @@ namespace Odmon.Worker.Tests
         public async Task MissingRouting_IsRecordedAndDoesNotQueueOrCrash()
         {
             await using var db = CreateDb();
-            await MarkStartPointAsync(db, DateTime.UtcNow.AddMinutes(-1));
+            await MarkWatermarkAsync(db, 0);
             var reader = new FakeDocumentReader
             {
                 Documents = { Decision(counter: 5, courtDocumentId: 105, tikCounter: 99) }
@@ -190,13 +281,16 @@ namespace Odmon.Worker.Tests
             Assert.Equal(
                 NetCourtDecisionAlertStatuses.MissingRouting,
                 (await db.NetCourtDecisionAlerts.SingleAsync()).Status);
+            Assert.Equal(
+                5,
+                (await db.NetCourtDecisionAlertStates.SingleAsync()).LastSeenCounter);
         }
 
         [Fact]
         public async Task OtherDocTypes_AreIgnoredEvenIfReaderReturnsThem()
         {
             await using var db = CreateDb();
-            await MarkStartPointAsync(db, DateTime.UtcNow.AddMinutes(-1));
+            await MarkWatermarkAsync(db, 0);
             var reader = new FakeDocumentReader
             {
                 Documents =
@@ -281,7 +375,8 @@ namespace Odmon.Worker.Tests
             FakeDocumentReader reader,
             FakeEmailNotifier email,
             string emailMode,
-            FakeCaseResolver? resolver = null)
+            FakeCaseResolver? resolver = null,
+            int maxBatchSize = 100)
         {
             resolver ??= new FakeCaseResolver
             {
@@ -305,6 +400,7 @@ namespace Odmon.Worker.Tests
             var settings = new NetCourtDecisionAlertSettings
             {
                 Enabled = true,
+                MaxBatchSize = maxBatchSize,
                 EmailMode = emailMode,
                 TestRecipient = "odmon@ezer-law.com",
                 FallbackRecipientEnabled = false,
@@ -344,50 +440,71 @@ namespace Odmon.Worker.Tests
             return new IntegrationDbContext(options);
         }
 
-        private static async Task MarkStartPointAsync(
+        private static async Task MarkWatermarkAsync(
             IntegrationDbContext db,
-            DateTime startFromUtc)
+            long lastSeenCounter)
         {
             db.NetCourtDecisionAlertStates.Add(new NetCourtDecisionAlertState
             {
                 Id = 1,
-                BaselineCompletedAtUtc = startFromUtc,
-                UpdatedAtUtc = startFromUtc
+                LastSeenCounter = lastSeenCounter,
+                BaselineCompletedAtUtc = DateTime.UtcNow,
+                UpdatedAtUtc = DateTime.UtcNow
             });
             await db.SaveChangesAsync();
         }
+
+        private static OdcanitCase RoutedCase(int tikCounter)
+            => new()
+            {
+                TikCounter = tikCounter,
+                TikNumber = $"9/{tikCounter}",
+                ClientVisualID = "2\\123"
+            };
 
         private static NetCourtDocument Decision(
             long counter,
             long courtDocumentId,
             int tikCounter = 77,
-            DateTime? createdAtUtc = null)
+            DateTime? createdAtUtc = null,
+            DateTime? docDate = null)
             => new()
             {
                 Counter = counter,
                 TikCounter = tikCounter,
                 CourtDocumentID = courtDocumentId,
                 DocType = 2,
-                DocDate = createdAtUtc ?? DateTime.UtcNow,
+                DocDate = docDate ?? createdAtUtc ?? DateTime.UtcNow,
                 tsCreateDate = createdAtUtc ?? DateTime.UtcNow
             };
 
         private sealed class FakeDocumentReader : INetCourtDocumentReader
         {
             public List<NetCourtDocument> Documents { get; } = new();
-            public int CallCount { get; private set; }
-            public DateTime? LastCreatedSinceUtc { get; private set; }
+            public long MaxCounter { get; set; }
+            public int MaxCounterCallCount { get; private set; }
+            public int BatchCallCount { get; private set; }
+            public long? LastRequestedCounter { get; private set; }
+            public int? LastMaxBatchSize { get; private set; }
 
-            public Task<List<NetCourtDocument>> GetDecisionDocumentsAsync(
-                DateTime? createdSinceUtc,
+            public Task<long> GetMaxDecisionCounterAsync(CancellationToken ct)
+            {
+                MaxCounterCallCount++;
+                return Task.FromResult(MaxCounter);
+            }
+
+            public Task<List<NetCourtDocument>> GetDecisionDocumentsAfterCounterAsync(
+                long lastSeenCounter,
+                int maxBatchSize,
                 CancellationToken ct)
             {
-                CallCount++;
-                LastCreatedSinceUtc = createdSinceUtc;
+                BatchCallCount++;
+                LastRequestedCounter = lastSeenCounter;
+                LastMaxBatchSize = maxBatchSize;
                 return Task.FromResult(Documents
-                    .Where(x =>
-                        !createdSinceUtc.HasValue ||
-                        x.tsCreateDate >= createdSinceUtc.Value)
+                    .Where(x => x.DocType is 2 or 3 && x.Counter > lastSeenCounter)
+                    .OrderBy(x => x.Counter)
+                    .Take(maxBatchSize)
                     .ToList());
             }
         }

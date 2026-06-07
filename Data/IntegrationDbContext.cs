@@ -268,6 +268,7 @@ namespace Odmon.Worker.Data
                 b.ToTable("NetCourtDecisionAlertState");
                 b.HasKey(x => x.Id);
                 b.Property(x => x.Id).ValueGeneratedNever();
+                b.Property(x => x.LastSeenCounter);
             });
 
             base.OnModelCreating(modelBuilder);

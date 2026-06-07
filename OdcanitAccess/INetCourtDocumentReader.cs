@@ -4,8 +4,11 @@ namespace Odmon.Worker.OdcanitAccess
 {
     public interface INetCourtDocumentReader
     {
-        Task<List<NetCourtDocument>> GetDecisionDocumentsAsync(
-            DateTime? createdSinceUtc,
+        Task<long> GetMaxDecisionCounterAsync(CancellationToken ct);
+
+        Task<List<NetCourtDocument>> GetDecisionDocumentsAfterCounterAsync(
+            long lastSeenCounter,
+            int maxBatchSize,
             CancellationToken ct);
     }
 }

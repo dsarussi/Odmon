@@ -5,7 +5,7 @@ Run against IntegrationDb only, with NetCourtDecisionAlertWorker stopped.
 This script:
   1. Deletes only NetCourtDecisionAlerts rows whose Status is 'Baseline'.
   2. Deletes the singleton state row so the next worker run initializes
-     BaselineCompletedAtUtc to the current UTC time without scanning history.
+     LastSeenCounter from the current MAX(Counter) without scanning history.
 
 Review the preview counts before executing.
 */

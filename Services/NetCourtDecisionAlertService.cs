@@ -44,14 +44,16 @@ namespace Odmon.Worker.Services
             var result = new NetCourtDecisionAlertRunResult();
             var state = await _integrationDb.NetCourtDecisionAlertStates
                 .SingleOrDefaultAsync(x => x.Id == StateId, ct);
-            var firstRun = state?.BaselineCompletedAtUtc == null;
+            var firstRun = state?.LastSeenCounter == null;
 
             if (firstRun)
             {
-                var initializedStartFromUtc = DateTime.UtcNow;
+                var maxCounter = await _documentReader.GetMaxDecisionCounterAsync(ct);
+                var initializedAtUtc = DateTime.UtcNow;
                 state ??= new NetCourtDecisionAlertState { Id = StateId };
-                state.BaselineCompletedAtUtc = initializedStartFromUtc;
-                state.UpdatedAtUtc = initializedStartFromUtc;
+                state.LastSeenCounter = maxCounter;
+                state.BaselineCompletedAtUtc ??= initializedAtUtc;
+                state.UpdatedAtUtc = initializedAtUtc;
                 if (_integrationDb.Entry(state).State == EntityState.Detached)
                 {
                     _integrationDb.NetCourtDecisionAlertStates.Add(state);
@@ -59,43 +61,60 @@ namespace Odmon.Worker.Services
 
                 await _integrationDb.SaveChangesAsync(ct);
                 _logger.LogInformation(
-                    "NETCOURT start point initialized. StartFromUtc={StartFromUtc:O}, HistoricalRowsScanned=0, AlertRowsInserted=0, EmailsQueued=0",
-                    initializedStartFromUtc);
+                    "NETCOURT Counter watermark initialized. LastSeenCounter={LastSeenCounter}, HistoricalRowsScanned=0, AlertRowsInserted=0, EmailsQueued=0",
+                    maxCounter);
                 return result;
             }
 
-            var lookbackDays = Math.Max(1, _settings.LookbackDays);
-            var overlapCutoffUtc = DateTime.UtcNow.AddDays(-lookbackDays);
-            var startFromUtc = state!.BaselineCompletedAtUtc!.Value;
-            var cutoffUtc = overlapCutoffUtc > startFromUtc
-                ? overlapCutoffUtc
-                : startFromUtc;
-            var candidates = await _documentReader.GetDecisionDocumentsAsync(cutoffUtc, ct);
+            var lastSeenCounter = state!.LastSeenCounter!.Value;
+            var maxBatchSize = Math.Max(1, _settings.MaxBatchSize);
+            var candidates = await _documentReader.GetDecisionDocumentsAfterCounterAsync(
+                lastSeenCounter,
+                maxBatchSize,
+                ct);
             candidates = candidates
                 .Where(x =>
                     IsDecisionDocument(x) &&
-                    x.tsCreateDate.HasValue &&
-                    x.tsCreateDate.Value >= startFromUtc)
+                    x.Counter > lastSeenCounter)
+                .OrderBy(x => x.Counter)
+                .Take(maxBatchSize)
                 .ToList();
             result.CandidatesDetected = candidates.Count;
 
             _logger.LogInformation(
-                "NETCOURT candidates detected. Count={Count}, StartFromUtc={StartFromUtc:O}, QueryCutoffUtc={CutoffUtc:O}",
+                "NETCOURT candidates detected. Count={Count}, LastSeenCounter={LastSeenCounter}, MaxBatchSize={MaxBatchSize}",
                 candidates.Count,
-                startFromUtc,
-                cutoffUtc);
+                lastSeenCounter,
+                maxBatchSize);
 
+            if (candidates.Count == 0)
+            {
+                return result;
+            }
+
+            var candidateIdentities = candidates
+                .Select(BuildDocumentIdentity)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
             await AddNewTrackingRowsAsync(candidates, result, ct);
-            await ProcessRetryableRowsAsync(result, ct);
+            await ProcessBatchRowsAsync(candidateIdentities, result, ct);
+
+            var batchHighCounter = candidates[^1].Counter;
+            var watermarkState = await _integrationDb.NetCourtDecisionAlertStates
+                .SingleAsync(x => x.Id == StateId, ct);
+            watermarkState.LastSeenCounter = batchHighCounter;
+            watermarkState.UpdatedAtUtc = DateTime.UtcNow;
+            await _integrationDb.SaveChangesAsync(ct);
 
             _logger.LogInformation(
-                "NETCOURT run complete. Candidates={Candidates}, NewTracked={NewTracked}, AlreadyProcessed={AlreadyProcessed}, Queued={Queued}, MissingRouting={MissingRouting}, Failed={Failed}",
+                "NETCOURT run complete. Candidates={Candidates}, NewTracked={NewTracked}, AlreadyProcessed={AlreadyProcessed}, Queued={Queued}, MissingRouting={MissingRouting}, Failed={Failed}, LastSeenCounter={LastSeenCounter}",
                 result.CandidatesDetected,
                 result.NewTracked,
                 result.AlreadyProcessed,
                 result.EmailsQueued,
                 result.MissingRouting,
-                result.Failed);
+                result.Failed,
+                batchHighCounter);
 
             return result;
         }
@@ -149,16 +168,19 @@ namespace Odmon.Worker.Services
             }
         }
 
-        private async Task ProcessRetryableRowsAsync(
+        private async Task ProcessBatchRowsAsync(
+            IReadOnlyCollection<string> candidateIdentities,
             NetCourtDecisionAlertRunResult result,
             CancellationToken ct)
         {
             var rows = await _integrationDb.NetCourtDecisionAlerts
                 .Where(x =>
-                    x.Status == NetCourtDecisionAlertStatuses.Pending ||
-                    x.Status == NetCourtDecisionAlertStatuses.ResolutionFailed ||
-                    x.Status == NetCourtDecisionAlertStatuses.QueueFailed)
-                .OrderBy(x => x.CreatedAtUtc)
+                    candidateIdentities.Contains(x.DocumentIdentity) &&
+                    (x.Status == NetCourtDecisionAlertStatuses.Pending ||
+                     x.Status == NetCourtDecisionAlertStatuses.ResolutionFailed ||
+                     x.Status == NetCourtDecisionAlertStatuses.QueueFailed))
+                .OrderBy(x => x.NetCourtCounter)
+                .ThenBy(x => x.Id)
                 .ToListAsync(ct);
 
             if (rows.Count == 0)

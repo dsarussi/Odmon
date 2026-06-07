@@ -18,10 +18,54 @@ namespace Odmon.Worker.OdcanitAccess
             _logger = logger;
         }
 
-        public async Task<List<NetCourtDocument>> GetDecisionDocumentsAsync(
-            DateTime? createdSinceUtc,
+        public async Task<long> GetMaxDecisionCounterAsync(CancellationToken ct)
+        {
+            var connection = _db.Database.GetDbConnection();
+            var wasOpen = connection.State == ConnectionState.Open;
+            if (!wasOpen)
+            {
+                await connection.OpenAsync(ct);
+            }
+
+            try
+            {
+                await using var command = connection.CreateCommand();
+                command.CommandText = @"
+SELECT COALESCE(MAX([Counter]), 0)
+FROM [vwNetCourtDocs]
+WHERE [DocType] IN (2, 3);";
+
+                var value = await command.ExecuteScalarAsync(ct);
+                var maxCounter = value is null or DBNull
+                    ? 0L
+                    : Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture);
+
+                _logger.LogInformation(
+                    "NETCOURT reader loaded current DocType 2/3 high watermark. MaxCounter={MaxCounter}",
+                    maxCounter);
+                return maxCounter;
+            }
+            finally
+            {
+                if (!wasOpen)
+                {
+                    await connection.CloseAsync();
+                }
+            }
+        }
+
+        public async Task<List<NetCourtDocument>> GetDecisionDocumentsAfterCounterAsync(
+            long lastSeenCounter,
+            int maxBatchSize,
             CancellationToken ct)
         {
+            if (maxBatchSize <= 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(maxBatchSize),
+                    "Max batch size must be greater than zero.");
+            }
+
             var rows = new List<NetCourtDocument>();
             var connection = _db.Database.GetDbConnection();
             var wasOpen = connection.State == ConnectionState.Open;
@@ -34,7 +78,7 @@ namespace Odmon.Worker.OdcanitAccess
             {
                 await using var command = connection.CreateCommand();
                 command.CommandText = @"
-SELECT
+SELECT TOP (@maxBatchSize)
     [Counter],
     [TikCounter],
     [ODDocID],
@@ -47,16 +91,20 @@ SELECT
     [DecisionID]
 FROM [vwNetCourtDocs]
 WHERE [DocType] IN (2, 3)
-  AND (@createdSinceUtc IS NULL OR [tsCreateDate] >= @createdSinceUtc)
-ORDER BY [tsCreateDate], [Counter];";
+  AND [Counter] > @lastSeenCounter
+ORDER BY [Counter] ASC;";
 
-                var cutoffParameter = command.CreateParameter();
-                cutoffParameter.ParameterName = "@createdSinceUtc";
-                cutoffParameter.DbType = DbType.DateTime2;
-                cutoffParameter.Value = createdSinceUtc.HasValue
-                    ? createdSinceUtc.Value
-                    : DBNull.Value;
-                command.Parameters.Add(cutoffParameter);
+                var batchParameter = command.CreateParameter();
+                batchParameter.ParameterName = "@maxBatchSize";
+                batchParameter.DbType = DbType.Int32;
+                batchParameter.Value = maxBatchSize;
+                command.Parameters.Add(batchParameter);
+
+                var counterParameter = command.CreateParameter();
+                counterParameter.ParameterName = "@lastSeenCounter";
+                counterParameter.DbType = DbType.Int64;
+                counterParameter.Value = lastSeenCounter;
+                command.Parameters.Add(counterParameter);
 
                 await using var reader = await command.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
@@ -85,9 +133,10 @@ ORDER BY [tsCreateDate], [Counter];";
             }
 
             _logger.LogInformation(
-                "NETCOURT reader loaded {Count} DocType 2/3 row(s) from vwNetCourtDocs. CreatedSinceUtc={CreatedSinceUtc}",
+                "NETCOURT reader loaded {Count} DocType 2/3 row(s) from vwNetCourtDocs. LastSeenCounter={LastSeenCounter}, MaxBatchSize={MaxBatchSize}",
                 rows.Count,
-                createdSinceUtc?.ToString("O") ?? "<all>");
+                lastSeenCounter,
+                maxBatchSize);
 
             return rows;
         }
