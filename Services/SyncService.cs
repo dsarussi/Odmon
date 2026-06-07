@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -27,7 +28,7 @@ namespace Odmon.Worker.Services
     public partial class SyncService
     {
         private const string DefaultClientPhoneColumnId = "phone_mkwe10tx";
-        private const string DefaultClientEmailColumnId = "email_mkwefwgy";
+        private const string DefaultDriverEmailColumnId = "email_mkwefwgy";
         private static readonly TimeSpan ColumnCacheTtl = TimeSpan.FromMinutes(30);
         private readonly ICaseSource _caseSource;
         private readonly IntegrationDbContext _integrationDb;
@@ -1030,7 +1031,22 @@ namespace Odmon.Worker.Services
 
             var mainPhoneColumnId = ResolveClientPhoneColumnId();
             TryAddPhoneColumn(columnValues, mainPhoneColumnId, normalizedPolicyHolderPhone, c.TikCounter, "Policy holder phone (טלפון column)");
-            TryAddEmailColumn(columnValues, ResolveClientEmailColumnId(), c.ClientEmail);
+            var driverEmailColumnId = ResolveDriverEmailColumnId();
+            if (TryAddValidatedEmailColumn(columnValues, driverEmailColumnId, c.DriverEmail))
+            {
+                _logger.LogDebug(
+                    "DriverEmail populated for TikCounter={TikCounter}, ColumnId={ColumnId}",
+                    c.TikCounter,
+                    driverEmailColumnId);
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "DriverEmail omitted for TikCounter={TikCounter}, ColumnId={ColumnId}, Reason={Reason}",
+                    c.TikCounter,
+                    driverEmailColumnId,
+                    string.IsNullOrWhiteSpace(c.DriverEmail) ? "missing" : "invalid");
+            }
 
             TryAddDateColumn(columnValues, _mondaySettings.CaseOpenDateColumnId, c.tsCreateDate);
             TryAddDateColumn(columnValues, _mondaySettings.EventDateColumnId, c.EventDate);
@@ -1458,6 +1474,39 @@ namespace Odmon.Worker.Services
             }
 
             columnValues[columnId] = new EmailColumnValue { email = emailAddress.Trim(), text = emailAddress.Trim() };
+        }
+
+        internal static bool TryAddValidatedEmailColumn(
+            Dictionary<string, object> columnValues,
+            string? columnId,
+            string? emailAddress)
+        {
+            if (string.IsNullOrWhiteSpace(columnId) || !IsValidEmail(emailAddress))
+            {
+                return false;
+            }
+
+            var trimmed = emailAddress!.Trim();
+            columnValues[columnId] = new EmailColumnValue { email = trimmed, text = trimmed };
+            return true;
+        }
+
+        internal static bool IsValidEmail(string? emailAddress)
+        {
+            if (string.IsNullOrWhiteSpace(emailAddress))
+            {
+                return false;
+            }
+
+            var trimmed = emailAddress.Trim();
+            try
+            {
+                return new MailAddress(trimmed).Address.Equals(trimmed, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
         }
 
         private sealed class EmailColumnValue
@@ -2650,11 +2699,11 @@ namespace Odmon.Worker.Services
                 : _mondaySettings.ClientPhoneColumnId!;
         }
 
-        private string ResolveClientEmailColumnId()
+        private string ResolveDriverEmailColumnId()
         {
-            return string.IsNullOrWhiteSpace(_mondaySettings.ClientEmailColumnId)
-                ? DefaultClientEmailColumnId
-                : _mondaySettings.ClientEmailColumnId!;
+            return string.IsNullOrWhiteSpace(_mondaySettings.DriverEmailColumnId)
+                ? DefaultDriverEmailColumnId
+                : _mondaySettings.DriverEmailColumnId!;
         }
 
         private static bool IsMappingTestCompatible(MondayItemMapping mapping)
@@ -3322,7 +3371,7 @@ namespace Odmon.Worker.Services
             AppendStr(sb, c.TikNumber);
             AppendStr(sb, c.ClientVisualID);
             AppendStr(sb, c.Additional ?? c.HozlapTikNumber);
-            AppendStr(sb, c.ClientEmail);
+            AppendStr(sb, c.DriverEmail);
             AppendStr(sb, c.Notes);
             AppendStr(sb, c.ClientAddress);
             AppendStr(sb, c.ClientTaxId);

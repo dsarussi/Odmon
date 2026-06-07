@@ -649,10 +649,7 @@ namespace Odmon.Worker.OdcanitAccess
                         defendantAddressFromUserData = true;
                     }
 
-                    if (UserDataFieldHandlers.TryGetValue(key, out var handler))
-                    {
-                        handler(odcanitCase, row);
-                    }
+                    ApplyUserDataField(odcanitCase, row);
                 }
 
                 _logger.LogDebug(
@@ -685,6 +682,11 @@ namespace Odmon.Worker.OdcanitAccess
                     odcanitCase.DriverPhone ?? "<null>");
 
                 _logger.LogDebug(
+                    "DriverEmail enrichment for TikCounter {TikCounter}: {Status}",
+                    odcanitCase.TikCounter,
+                    string.IsNullOrWhiteSpace(odcanitCase.DriverEmail) ? "omitted (missing UserData value)" : "populated");
+
+                _logger.LogDebug(
                     "Mapped ThirdPartyLawyerEmail='{Email}', ThirdPartyLawyerFax='{Fax}', ThirdPartyLawyerAddress='{Address}', CourtName from 'עיר בית משפט'='{LegalCourtName}' for TikCounter {TikCounter}",
                     odcanitCase.ThirdPartyLawyerEmail ?? "<null>",
                     odcanitCase.ThirdPartyLawyerFax ?? "<null>",
@@ -714,6 +716,18 @@ namespace Odmon.Worker.OdcanitAccess
                 .Replace('’', '\'')
                 .Replace('״', '"')
                 .Trim();
+        }
+
+        internal static bool ApplyUserDataField(OdcanitCase odcanitCase, OdcanitUserData row)
+        {
+            var key = NormalizeUserFieldName(row.FieldName);
+            if (key == null || !UserDataFieldHandlers.TryGetValue(key, out var handler))
+            {
+                return false;
+            }
+
+            handler(odcanitCase, row);
+            return true;
         }
 
         private static Dictionary<string, Action<OdcanitCase, OdcanitUserData>> BuildUserDataFieldHandlers()
@@ -768,6 +782,7 @@ namespace Odmon.Worker.OdcanitAccess
             Add("Driver: id", (c, row) => c.DriverId = row.strData);
             Add("סלולרי נהג", (c, row) => c.DriverPhone = row.strData);
             Add("Driver: phone", (c, row) => c.DriverPhone = row.strData);
+            Add("אימייל נהג", (c, row) => c.DriverEmail = row.strData?.Trim());
             Add("שם בעל פוליסה", (c, row) => c.PolicyHolderName = row.strData);
             Add("Policy holder: name", (c, row) => c.PolicyHolderName = row.strData);
             Add("ת.ז. בעל פוליסה", (c, row) => c.PolicyHolderId = row.strData);

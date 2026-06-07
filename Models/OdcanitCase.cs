@@ -92,6 +92,8 @@ namespace Odmon.Worker.Models
         [NotMapped]
         public string? DriverPhone { get; set; }
         [NotMapped]
+        public string? DriverEmail { get; set; }
+        [NotMapped]
         public string? WitnessName { get; set; }
         [NotMapped]
         public string? WitnessPhone { get; set; }

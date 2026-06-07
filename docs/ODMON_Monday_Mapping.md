@@ -57,7 +57,7 @@ This document lists all field mappings from Odcanit to Monday.com, including dat
 | Monday Column | Column ID | Odcanit Source | Notes |
 |--------------|-----------|----------------|-------|
 | טלפון | phone_mkwe10tx | `OdcanitCase.PolicyHolderPhone` (normalized) | Phone normalized to E.164 format (+972...). Precedence: PolicyHolderPhone > DriverPhone > ClientPhone |
-| דוא"ל | email_mkwefwgy | `OdcanitCase.ClientEmail` | From vwExportToOuterSystems_UserData (Mobile/Email) |
+| אימייל נהג | email_mkwefwgy | `OdcanitCase.DriverEmail` | From legal UserData only (PageName: "פרטי תיק נזיקין מליגל", FieldName: "אימייל נהג"). Missing or invalid values are omitted. Client/general/policy-holder email is not sent to this column. |
 | כתובת לקוח | text_mkwjcc69 | `OdcanitCase.ClientAddress` | From vwExportToOuterSystems_UserData (FullAddress) |
 | ח.פ. לקוח | text_mkwjzsvg | `OdcanitCase.ClientTaxId` | From legal user data (UserData view vwExportToOuterSystems_UserData, FieldName: "ח.פ. לקוח") |
 

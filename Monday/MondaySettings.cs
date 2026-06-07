@@ -8,7 +8,7 @@ namespace Odmon.Worker.Monday
         public string? ToDoGroupId { get; set; } = "topics";
         public string? TestGroupId { get; set; } = "topics";
         public string? ClientPhoneColumnId { get; set; } = "phone_mkwe10tx";
-        public string? ClientEmailColumnId { get; set; } = "email_mkwefwgy";
+        public string? DriverEmailColumnId { get; set; } = "email_mkwefwgy";
         public string? CaseNumberColumnId { get; set; } = "text_mkwe19hn";
         public string? ClientNumberColumnId { get; set; } = "dropdown_mkxjrssr";
         /// <summary>
