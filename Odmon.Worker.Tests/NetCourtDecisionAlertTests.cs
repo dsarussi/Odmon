@@ -14,7 +14,7 @@ namespace Odmon.Worker.Tests
     public class NetCourtDecisionAlertTests
     {
         [Fact]
-        public async Task FirstRun_BaselinesExistingDecisions_WithoutEmail()
+        public async Task FirstRun_InitializesStartPoint_WithoutHistoricalRows()
         {
             await using var db = CreateDb();
             var reader = new FakeDocumentReader
@@ -23,38 +23,94 @@ namespace Odmon.Worker.Tests
             };
             var email = new FakeEmailNotifier();
             var service = CreateService(db, reader, email, "Test");
+            var beforeRunUtc = DateTime.UtcNow;
 
-            var result = await service.RunAsync(CancellationToken.None);
+            await service.RunAsync(CancellationToken.None);
+            var afterRunUtc = DateTime.UtcNow;
 
-            Assert.Equal(1, result.Baselined);
-            Assert.Empty(email.DirectMessages);
-            var tracked = await db.NetCourtDecisionAlerts.SingleAsync();
-            Assert.Equal(NetCourtDecisionAlertStatuses.Baseline, tracked.Status);
-            Assert.NotNull((await db.NetCourtDecisionAlertStates.SingleAsync()).BaselineCompletedAtUtc);
+            Assert.Equal(0, reader.CallCount);
+            Assert.Empty(await db.NetCourtDecisionAlerts.ToListAsync());
+            var startFromUtc = (await db.NetCourtDecisionAlertStates.SingleAsync()).BaselineCompletedAtUtc;
+            Assert.InRange(startFromUtc!.Value, beforeRunUtc, afterRunUtc);
         }
 
         [Fact]
-        public async Task EmptyFirstRun_StillCompletesBaseline_AndNextDecisionIsEmailed()
+        public async Task FirstRun_DoesNotQueueEmail()
         {
             await using var db = CreateDb();
-            var reader = new FakeDocumentReader();
+            var reader = new FakeDocumentReader
+            {
+                Documents = { Decision(counter: 2, courtDocumentId: 102) }
+            };
             var email = new FakeEmailNotifier();
             var service = CreateService(db, reader, email, "Test");
 
             await service.RunAsync(CancellationToken.None);
-            reader.Documents.Add(Decision(counter: 2, courtDocumentId: 102));
+
+            Assert.Empty(email.DirectMessages);
+            Assert.Empty(await db.NetCourtDecisionAlerts.ToListAsync());
+        }
+
+        [Fact]
+        public async Task DocumentBeforeStartPoint_IsIgnored()
+        {
+            await using var db = CreateDb();
+            var startFromUtc = DateTime.UtcNow;
+            await MarkStartPointAsync(db, startFromUtc);
+            var reader = new FakeDocumentReader
+            {
+                Documents =
+                {
+                    Decision(
+                        counter: 20,
+                        courtDocumentId: 120,
+                        createdAtUtc: startFromUtc.AddSeconds(-1))
+                }
+            };
+            var email = new FakeEmailNotifier();
+            var service = CreateService(db, reader, email, "Test");
+
+            var result = await service.RunAsync(CancellationToken.None);
+
+            Assert.Equal(startFromUtc, reader.LastCreatedSinceUtc);
+            Assert.Equal(0, result.CandidatesDetected);
+            Assert.Empty(await db.NetCourtDecisionAlerts.ToListAsync());
+            Assert.Empty(email.DirectMessages);
+        }
+
+        [Fact]
+        public async Task DocumentAfterStartPoint_IsProcessedNormally()
+        {
+            await using var db = CreateDb();
+            var startFromUtc = DateTime.UtcNow.AddMinutes(-1);
+            await MarkStartPointAsync(db, startFromUtc);
+            var reader = new FakeDocumentReader
+            {
+                Documents =
+                {
+                    Decision(
+                        counter: 21,
+                        courtDocumentId: 121,
+                        createdAtUtc: startFromUtc.AddSeconds(1))
+                }
+            };
+            var email = new FakeEmailNotifier();
+            var service = CreateService(db, reader, email, "Test");
 
             var result = await service.RunAsync(CancellationToken.None);
 
             Assert.Equal(1, result.EmailsQueued);
             Assert.Single(email.DirectMessages);
+            Assert.Equal(
+                NetCourtDecisionAlertStatuses.TestEmailQueued,
+                (await db.NetCourtDecisionAlerts.SingleAsync()).Status);
         }
 
         [Fact]
         public async Task NewDecision_InTestMode_QueuesOnceOnlyToTestRecipient()
         {
             await using var db = CreateDb();
-            await MarkBaselineCompleteAsync(db);
+            await MarkStartPointAsync(db, DateTime.UtcNow.AddMinutes(-1));
             var reader = new FakeDocumentReader
             {
                 Documents = { Decision(counter: 3, courtDocumentId: 103, tikCounter: 77) }
@@ -83,7 +139,7 @@ namespace Odmon.Worker.Tests
         public async Task NewDecision_InLiveMode_QueuesToRoutedEmployee()
         {
             await using var db = CreateDb();
-            await MarkBaselineCompleteAsync(db);
+            await MarkStartPointAsync(db, DateTime.UtcNow.AddMinutes(-1));
             var reader = new FakeDocumentReader
             {
                 Documents = { Decision(counter: 4, courtDocumentId: 104, tikCounter: 88) }
@@ -107,7 +163,7 @@ namespace Odmon.Worker.Tests
         public async Task MissingRouting_IsRecordedAndDoesNotQueueOrCrash()
         {
             await using var db = CreateDb();
-            await MarkBaselineCompleteAsync(db);
+            await MarkStartPointAsync(db, DateTime.UtcNow.AddMinutes(-1));
             var reader = new FakeDocumentReader
             {
                 Documents = { Decision(counter: 5, courtDocumentId: 105, tikCounter: 99) }
@@ -140,7 +196,7 @@ namespace Odmon.Worker.Tests
         public async Task OtherDocTypes_AreIgnoredEvenIfReaderReturnsThem()
         {
             await using var db = CreateDb();
-            await MarkBaselineCompleteAsync(db);
+            await MarkStartPointAsync(db, DateTime.UtcNow.AddMinutes(-1));
             var reader = new FakeDocumentReader
             {
                 Documents =
@@ -249,7 +305,6 @@ namespace Odmon.Worker.Tests
             var settings = new NetCourtDecisionAlertSettings
             {
                 Enabled = true,
-                BaselineOnlyOnFirstRun = true,
                 EmailMode = emailMode,
                 TestRecipient = "odmon@ezer-law.com",
                 FallbackRecipientEnabled = false,
@@ -289,13 +344,15 @@ namespace Odmon.Worker.Tests
             return new IntegrationDbContext(options);
         }
 
-        private static async Task MarkBaselineCompleteAsync(IntegrationDbContext db)
+        private static async Task MarkStartPointAsync(
+            IntegrationDbContext db,
+            DateTime startFromUtc)
         {
             db.NetCourtDecisionAlertStates.Add(new NetCourtDecisionAlertState
             {
                 Id = 1,
-                BaselineCompletedAtUtc = DateTime.UtcNow,
-                UpdatedAtUtc = DateTime.UtcNow
+                BaselineCompletedAtUtc = startFromUtc,
+                UpdatedAtUtc = startFromUtc
             });
             await db.SaveChangesAsync();
         }
@@ -303,25 +360,36 @@ namespace Odmon.Worker.Tests
         private static NetCourtDocument Decision(
             long counter,
             long courtDocumentId,
-            int tikCounter = 77)
+            int tikCounter = 77,
+            DateTime? createdAtUtc = null)
             => new()
             {
                 Counter = counter,
                 TikCounter = tikCounter,
                 CourtDocumentID = courtDocumentId,
                 DocType = 2,
-                DocDate = DateTime.UtcNow,
-                tsCreateDate = DateTime.UtcNow
+                DocDate = createdAtUtc ?? DateTime.UtcNow,
+                tsCreateDate = createdAtUtc ?? DateTime.UtcNow
             };
 
         private sealed class FakeDocumentReader : INetCourtDocumentReader
         {
             public List<NetCourtDocument> Documents { get; } = new();
+            public int CallCount { get; private set; }
+            public DateTime? LastCreatedSinceUtc { get; private set; }
 
             public Task<List<NetCourtDocument>> GetDecisionDocumentsAsync(
                 DateTime? createdSinceUtc,
                 CancellationToken ct)
-                => Task.FromResult(Documents.ToList());
+            {
+                CallCount++;
+                LastCreatedSinceUtc = createdSinceUtc;
+                return Task.FromResult(Documents
+                    .Where(x =>
+                        !createdSinceUtc.HasValue ||
+                        x.tsCreateDate >= createdSinceUtc.Value)
+                    .ToList());
+            }
         }
 
         private sealed class FakeCaseResolver : INetCourtCaseResolver

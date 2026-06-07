@@ -46,15 +46,12 @@ namespace Odmon.Worker.Services
                 .SingleOrDefaultAsync(x => x.Id == StateId, ct);
             var firstRun = state?.BaselineCompletedAtUtc == null;
 
-            if (firstRun && _settings.BaselineOnlyOnFirstRun)
+            if (firstRun)
             {
-                var historicalRows = await _documentReader.GetDecisionDocumentsAsync(null, ct);
-                result.CandidatesDetected = historicalRows.Count;
-                result.Baselined = await RecordBaselineAsync(historicalRows, ct);
-
+                var initializedStartFromUtc = DateTime.UtcNow;
                 state ??= new NetCourtDecisionAlertState { Id = StateId };
-                state.BaselineCompletedAtUtc = DateTime.UtcNow;
-                state.UpdatedAtUtc = DateTime.UtcNow;
+                state.BaselineCompletedAtUtc = initializedStartFromUtc;
+                state.UpdatedAtUtc = initializedStartFromUtc;
                 if (_integrationDb.Entry(state).State == EntityState.Detached)
                 {
                     _integrationDb.NetCourtDecisionAlertStates.Add(state);
@@ -62,32 +59,30 @@ namespace Odmon.Worker.Services
 
                 await _integrationDb.SaveChangesAsync(ct);
                 _logger.LogInformation(
-                    "NETCOURT baseline completed. Candidates={Candidates}, Recorded={Recorded}, EmailsSent=0",
-                    historicalRows.Count,
-                    result.Baselined);
+                    "NETCOURT start point initialized. StartFromUtc={StartFromUtc:O}, HistoricalRowsScanned=0, AlertRowsInserted=0, EmailsQueued=0",
+                    initializedStartFromUtc);
                 return result;
             }
 
-            if (firstRun)
-            {
-                state ??= new NetCourtDecisionAlertState { Id = StateId };
-                state.BaselineCompletedAtUtc = DateTime.UtcNow;
-                state.UpdatedAtUtc = DateTime.UtcNow;
-                _integrationDb.NetCourtDecisionAlertStates.Add(state);
-                await _integrationDb.SaveChangesAsync(ct);
-            }
-
             var lookbackDays = Math.Max(1, _settings.LookbackDays);
-            var cutoffUtc = DateTime.UtcNow.AddDays(-lookbackDays);
+            var overlapCutoffUtc = DateTime.UtcNow.AddDays(-lookbackDays);
+            var startFromUtc = state!.BaselineCompletedAtUtc!.Value;
+            var cutoffUtc = overlapCutoffUtc > startFromUtc
+                ? overlapCutoffUtc
+                : startFromUtc;
             var candidates = await _documentReader.GetDecisionDocumentsAsync(cutoffUtc, ct);
             candidates = candidates
-                .Where(IsDecisionDocument)
+                .Where(x =>
+                    IsDecisionDocument(x) &&
+                    x.tsCreateDate.HasValue &&
+                    x.tsCreateDate.Value >= startFromUtc)
                 .ToList();
             result.CandidatesDetected = candidates.Count;
 
             _logger.LogInformation(
-                "NETCOURT candidates detected. Count={Count}, CutoffUtc={CutoffUtc:O}",
+                "NETCOURT candidates detected. Count={Count}, StartFromUtc={StartFromUtc:O}, QueryCutoffUtc={CutoffUtc:O}",
                 candidates.Count,
+                startFromUtc,
                 cutoffUtc);
 
             await AddNewTrackingRowsAsync(candidates, result, ct);
@@ -103,42 +98,6 @@ namespace Odmon.Worker.Services
                 result.Failed);
 
             return result;
-        }
-
-        private async Task<int> RecordBaselineAsync(
-            IReadOnlyCollection<NetCourtDocument> documents,
-            CancellationToken ct)
-        {
-            var identities = documents.Select(BuildDocumentIdentity).Distinct().ToArray();
-            var existing = identities.Length == 0
-                ? new HashSet<string>(StringComparer.Ordinal)
-                : (await _integrationDb.NetCourtDecisionAlerts
-                    .AsNoTracking()
-                    .Where(x => identities.Contains(x.DocumentIdentity))
-                    .Select(x => x.DocumentIdentity)
-                    .ToListAsync(ct))
-                    .ToHashSet(StringComparer.Ordinal);
-
-            var added = 0;
-            foreach (var document in documents.Where(IsDecisionDocument))
-            {
-                var identity = BuildDocumentIdentity(document);
-                if (!existing.Add(identity))
-                {
-                    continue;
-                }
-
-                _integrationDb.NetCourtDecisionAlerts.Add(
-                    CreateTrackingRow(document, identity, NetCourtDecisionAlertStatuses.Baseline));
-                added++;
-            }
-
-            if (added > 0)
-            {
-                await _integrationDb.SaveChangesAsync(ct);
-            }
-
-            return added;
         }
 
         private async Task AddNewTrackingRowsAsync(
@@ -436,7 +395,6 @@ namespace Odmon.Worker.Services
     public class NetCourtDecisionAlertRunResult
     {
         public int CandidatesDetected { get; set; }
-        public int Baselined { get; set; }
         public int NewTracked { get; set; }
         public int AlreadyProcessed { get; set; }
         public int EmailsQueued { get; set; }
