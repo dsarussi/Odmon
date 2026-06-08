@@ -23,7 +23,8 @@ namespace Odmon.Worker.Services
             string body,
             IReadOnlyCollection<string> recipients,
             bool isHtml = false,
-            IReadOnlyCollection<EmailAttachmentDescriptor>? attachments = null);
+            IReadOnlyCollection<EmailAttachmentDescriptor>? attachments = null,
+            IReadOnlyCollection<string>? bccRecipients = null);
 
         /// <summary>
         /// Queue a daily summary email. Typically called once per day by the background service.

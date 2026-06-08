@@ -34,6 +34,30 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public async Task QueueEmail_DirectMessageCarriesBccWithoutReplacingTo()
+        {
+            using var notifier = CreateNotifier();
+
+            Assert.True(notifier.QueueEmail(
+                "subject",
+                "body",
+                new[] { "employee@example.com" },
+                bccRecipients: new[] { "monitor@example.com" }));
+
+            var message = await notifier.Reader.ReadAsync();
+            Assert.Equal(new[] { "employee@example.com" }, message.Recipients);
+            Assert.Equal(new[] { "monitor@example.com" }, message.BccRecipients);
+
+            using var mail = EmailNotifier.CreateMailMessage(
+                message,
+                "odmon@example.com",
+                message.Recipients!,
+                includeAttachments: true);
+            Assert.Equal("employee@example.com", Assert.Single(mail.To).Address);
+            Assert.Equal("monitor@example.com", Assert.Single(mail.Bcc).Address);
+        }
+
+        [Fact]
         public async Task MailMessage_DisposeReleasesAttachmentStream()
         {
             Directory.CreateDirectory(_testRoot);
@@ -45,6 +69,7 @@ namespace Odmon.Worker.Tests
                 Body = "body",
                 Type = EmailMessageType.Direct,
                 Recipients = new[] { "employee@example.com" },
+                BccRecipients = new[] { "monitor@example.com" },
                 Attachments = new[]
                 {
                     new EmailAttachmentDescriptor(path, "decision.pdf", "application/pdf")
@@ -58,6 +83,7 @@ namespace Odmon.Worker.Tests
                        includeAttachments: true))
             {
                 Assert.Single(mail.Attachments);
+                Assert.Equal("monitor@example.com", Assert.Single(mail.Bcc).Address);
                 Assert.Equal("decision.pdf", mail.Attachments[0].Name);
                 Assert.Equal("application/pdf", mail.Attachments[0].ContentType.MediaType);
             }
@@ -80,7 +106,20 @@ namespace Odmon.Worker.Tests
             var message = await notifier.Reader.ReadAsync();
             Assert.Equal(EmailMessageType.Critical, message.Type);
             Assert.Null(message.Recipients);
+            Assert.Null(message.BccRecipients);
             Assert.Null(message.Attachments);
+        }
+
+        [Fact]
+        public async Task DailySummary_DoesNotInheritNetCourtBcc()
+        {
+            using var notifier = CreateNotifier();
+
+            await notifier.SendDailySummaryAsync("summary", "<p>body</p>", CancellationToken.None);
+
+            var message = await notifier.Reader.ReadAsync();
+            Assert.Equal(EmailMessageType.DailySummary, message.Type);
+            Assert.Null(message.BccRecipients);
         }
 
         private static EmailNotifier CreateNotifier()
@@ -90,7 +129,8 @@ namespace Odmon.Worker.Tests
                 {
                     ["Email:Enabled"] = "true",
                     ["Email:MaxEmailsPerHour"] = "100",
-                    ["Email:Recipients:0"] = "global@example.com"
+                    ["Email:Recipients:0"] = "global@example.com",
+                    ["NetCourtDecisionAlerts:BccRecipients:0"] = "monitor@example.com"
                 })
                 .Build();
 

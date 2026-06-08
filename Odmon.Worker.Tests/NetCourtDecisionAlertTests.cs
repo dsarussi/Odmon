@@ -177,6 +177,7 @@ namespace Odmon.Worker.Tests
             Assert.Equal(new[] { "odmon@ezer-law.com" }, message.Recipients);
             Assert.DoesNotContain("amir@ezer-law.com", message.Recipients);
             Assert.DoesNotContain("yonatan@ezer-law.com", message.Recipients);
+            Assert.Empty(message.BccRecipients);
             Assert.Equal("החלטה חדשה בתיק 9/1984", message.Subject);
             Assert.Contains("שלום יונתן", message.Body);
             Assert.Contains("מצב בדיקה - המייל המקורי היה מיועד אל: yonatan@ezer-law.com", message.Body);
@@ -202,6 +203,7 @@ namespace Odmon.Worker.Tests
 
             var message = Assert.Single(email.DirectMessages);
             Assert.Equal(new[] { "amir@ezer-law.com" }, message.Recipients);
+            Assert.Empty(message.BccRecipients);
             Assert.Equal("שלום אמיר" + Environment.NewLine + Environment.NewLine +
                          "התקבלה החלטה חדשה בתיק - 5/2000", message.Body);
             Assert.DoesNotContain("מצב בדיקה", message.Body);
@@ -231,7 +233,13 @@ namespace Odmon.Worker.Tests
                 }
             };
             var email = new FakeEmailNotifier();
-            var service = CreateService(db, reader, email, "Live", resolver);
+            var service = CreateService(
+                db,
+                reader,
+                email,
+                "Live",
+                resolver,
+                bccRecipients: new[] { "odmon@ezer-law.com" });
 
             var result = await service.RunAsync(CancellationToken.None);
 
@@ -251,17 +259,23 @@ namespace Odmon.Worker.Tests
                 Documents = { Decision(counter: 30, courtDocumentId: 130, odDocId: null) }
             };
             var email = new FakeEmailNotifier();
-            var fileResolver = new FakeDocumentFileResolver();
+            var fileResolver = new FakeDocumentFileResolver
+            {
+                Result = NetCourtDocumentFileResult.Unavailable("ODDocID is null.")
+            };
             var service = CreateService(
                 db,
                 reader,
                 email,
                 "Test",
-                fileResolver: fileResolver);
+                fileResolver: fileResolver,
+                attachDecisionPdf: true);
 
             await service.RunAsync(CancellationToken.None);
 
-            Assert.Empty(Assert.Single(email.DirectMessages).Attachments);
+            var message = Assert.Single(email.DirectMessages);
+            Assert.Empty(message.Attachments);
+            Assert.Contains("לא צורף קובץ ההחלטה: מזהה המסמך חסר", message.Body);
             Assert.Equal(new long?[] { null }, fileResolver.RequestedOdDocIds);
         }
 
@@ -289,11 +303,18 @@ namespace Odmon.Worker.Tests
                 reader,
                 email,
                 "Test",
-                fileResolver: fileResolver);
+                fileResolver: fileResolver,
+                attachDecisionPdf: true);
 
             await service.RunAsync(CancellationToken.None);
 
-            Assert.Empty(Assert.Single(email.DirectMessages).Attachments);
+            var message = Assert.Single(email.DirectMessages);
+            Assert.Empty(message.Attachments);
+            Assert.Contains("לא צורף קובץ ההחלטה:", message.Body);
+            if (reason.Contains("size", StringComparison.OrdinalIgnoreCase))
+            {
+                Assert.Contains("גדול מהמגבלה המותרת", message.Body);
+            }
         }
 
         [Fact]
@@ -314,11 +335,14 @@ namespace Odmon.Worker.Tests
                 reader,
                 email,
                 "Test",
-                fileResolver: fileResolver);
+                fileResolver: fileResolver,
+                attachDecisionPdf: true);
 
             await service.RunAsync(CancellationToken.None);
 
-            Assert.Empty(Assert.Single(email.DirectMessages).Attachments);
+            var message = Assert.Single(email.DirectMessages);
+            Assert.Empty(message.Attachments);
+            Assert.Contains("לא צורף קובץ ההחלטה: לא ניתן היה לקרוא את קובץ ההחלטה", message.Body);
         }
 
         [Fact]
@@ -336,7 +360,8 @@ namespace Odmon.Worker.Tests
                 reader,
                 email,
                 "Test",
-                fileResolver: fileResolver);
+                fileResolver: fileResolver,
+                attachDecisionPdf: true);
 
             await service.RunAsync(CancellationToken.None);
 
@@ -363,7 +388,8 @@ namespace Odmon.Worker.Tests
                 reader,
                 email,
                 "Live",
-                fileResolver: AvailableFileResolver());
+                fileResolver: AvailableFileResolver(),
+                attachDecisionPdf: true);
 
             await service.RunAsync(CancellationToken.None);
 
@@ -390,7 +416,8 @@ namespace Odmon.Worker.Tests
                 reader,
                 email,
                 "Test",
-                fileResolver: fileResolver);
+                fileResolver: fileResolver,
+                attachDecisionPdf: true);
 
             await service.RunAsync(CancellationToken.None);
             await service.RunAsync(CancellationToken.None);
@@ -479,7 +506,50 @@ namespace Odmon.Worker.Tests
             var direct = await notifier.Reader.ReadAsync();
 
             Assert.Null(critical.Recipients);
+            Assert.Null(critical.BccRecipients);
             Assert.Equal(new[] { "employee@example.com" }, direct.Recipients);
+        }
+
+        [Theory]
+        [InlineData("Live", "amir@ezer-law.com")]
+        [InlineData("Test", "odmon@ezer-law.com")]
+        public async Task NetCourtEmail_ConfiguredBccDoesNotReplacePrimaryRecipient(
+            string emailMode,
+            string expectedRecipient)
+        {
+            await using var db = CreateDb();
+            var reader = new FakeDocumentReader
+            {
+                Documents = { Decision(counter: 50, courtDocumentId: 150, tikCounter: 88) }
+            };
+            var email = new FakeEmailNotifier();
+            var service = CreateService(
+                db,
+                reader,
+                email,
+                emailMode,
+                bccRecipients: new[] { "odmon@ezer-law.com" });
+
+            await service.RunAsync(CancellationToken.None);
+
+            var message = Assert.Single(email.DirectMessages);
+            Assert.Equal(new[] { expectedRecipient }, message.Recipients);
+            Assert.Equal(new[] { "odmon@ezer-law.com" }, message.BccRecipients);
+        }
+
+        [Fact]
+        public void WorkerOperationalFailure_UsesCriticalAlertInfrastructure()
+        {
+            var email = new FakeEmailNotifier();
+            var exception = new InvalidOperationException("SQL unavailable");
+
+            Workers.NetCourtDecisionAlertWorker.QueueOperationalFailure(email, exception);
+
+            var alert = Assert.Single(email.CriticalAlerts);
+            Assert.Equal("NetCourt Decision Alert Failure", alert.AlertType);
+            Assert.Equal(nameof(Workers.NetCourtDecisionAlertWorker), alert.Source);
+            Assert.Contains("SQL unavailable", alert.Body);
+            Assert.Empty(email.DirectMessages);
         }
 
         private static NetCourtDecisionAlertService CreateService(
@@ -490,7 +560,9 @@ namespace Odmon.Worker.Tests
             FakeCaseResolver? resolver = null,
             int maxBatchSize = 100,
             string startFromDocDate = "2026-06-07",
-            FakeDocumentFileResolver? fileResolver = null)
+            FakeDocumentFileResolver? fileResolver = null,
+            bool attachDecisionPdf = false,
+            string[]? bccRecipients = null)
         {
             resolver ??= new FakeCaseResolver
             {
@@ -516,8 +588,10 @@ namespace Odmon.Worker.Tests
                 Enabled = true,
                 StartFromDocDate = startFromDocDate,
                 MaxBatchSize = maxBatchSize,
+                AttachDecisionPdf = attachDecisionPdf,
                 EmailMode = emailMode,
                 TestRecipient = "odmon@ezer-law.com",
+                BccRecipients = bccRecipients ?? Array.Empty<string>(),
                 FallbackRecipientEnabled = false,
                 ClientNumberToRecipientEmail = new Dictionary<int, string>
                 {
@@ -623,18 +697,21 @@ namespace Odmon.Worker.Tests
         private sealed class FakeEmailNotifier : IEmailNotifier
         {
             public List<DirectMessage> DirectMessages { get; } = new();
+            public List<CriticalAlert> CriticalAlerts { get; } = new();
 
             public bool QueueEmail(
                 string subject,
                 string body,
                 IReadOnlyCollection<string> recipients,
                 bool isHtml = false,
-                IReadOnlyCollection<EmailAttachmentDescriptor>? attachments = null)
+                IReadOnlyCollection<EmailAttachmentDescriptor>? attachments = null,
+                IReadOnlyCollection<string>? bccRecipients = null)
             {
                 DirectMessages.Add(new DirectMessage(
                     subject,
                     body,
                     recipients.ToArray(),
+                    bccRecipients?.ToArray() ?? Array.Empty<string>(),
                     attachments?.ToArray() ?? Array.Empty<EmailAttachmentDescriptor>()));
                 return true;
             }
@@ -648,6 +725,11 @@ namespace Odmon.Worker.Tests
                 string? environmentName = null,
                 string? serverName = null)
             {
+                CriticalAlerts.Add(new CriticalAlert(
+                    subject,
+                    body,
+                    source,
+                    alertType));
             }
 
             public Task SendDailySummaryAsync(
@@ -667,7 +749,14 @@ namespace Odmon.Worker.Tests
             string Subject,
             string Body,
             string[] Recipients,
+            string[] BccRecipients,
             EmailAttachmentDescriptor[] Attachments);
+
+        private sealed record CriticalAlert(
+            string Subject,
+            string Body,
+            string? Source,
+            string? AlertType);
 
         private sealed class FakeDocumentFileResolver : INetCourtDocumentFileResolver
         {

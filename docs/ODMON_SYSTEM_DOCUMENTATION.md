@@ -56,6 +56,7 @@ ODMON is a .NET 8 worker service that runs as a Windows Service. It hosts multip
 | Document ingestion | Monday → Odcanit | Download files from Monday, import into Odcanit |
 | Accident story | Monday → Odcanit | Compose questionnaire answers into annex text |
 | Call summaries | Voicenter → Odcanit | Attach AI call summaries as case annexes |
+| NetCourt decisions | Odcanit → Email | Alert routed employees about new decision documents, with best-effort PDF attachment |
 | Monitoring | Internal | Daily summary email, critical alerts, failure tracking |
 
 ---
@@ -118,6 +119,7 @@ All workers, services, and infrastructure are registered in `Program.cs`. Key re
 - **Singletons:** `WorkerCoordinator`, `VoicenterApiClient`, `EmailNotifier`
 - **Scoped (per-cycle):** `SyncService`, `VoicenterCallSummaryService`, `DocumentIngestionService`, `HearingApprovalSyncService`, `HearingNearestSyncService`, `NispahWriterService`
 - **Hosted services:** `SyncWorker`, `DocumentIngestionWorker`, `EmailBackgroundService`, `VoicenterCallSummaryWorker`, `HearingBackfillWorker`, `HearingApprovalBackfillWorker`
+- **NetCourt services:** `NetCourtDecisionAlertWorker`, `NetCourtDecisionAlertService`, `SqlNetCourtDocumentReader`, `SqlNetCourtDocumentFileResolver`
 - **DbContexts:** `IntegrationDbContext`, `OdcanitDbContext` (both scoped, SQL Server)
 
 ---
@@ -709,6 +711,7 @@ Configuration values are resolved in this order (later overrides earlier):
 | `VoicenterCallSummaries` | Voicenter integration | `Enabled`, `IntervalHours`, `LookbackHours`, `NispahTypeName`, `OnlyAnsweredCalls`, `MinimumDurationSeconds`, `ThrottleMs`, `TestMode`, `TestCallId`, `AlertOnUnhandledException`, `AlertOnStaleWorker`, `StaleWorkerThresholdHours`, `FailureAlertCooldownMinutes`, `WeeklyUsageWarningThreshold`, `WeeklyUsageHardLimit`, `UsageWarningEmailEnabled` |
 | `VoicenterBackfill` | One-shot Voicenter call summary backfill (recover missed calls after quota outage) | `Enable`, `FromUtc`, `ToUtc`, `MaxCalls`, `ForceRecheck`, `DryRun` |
 | `Email` | SMTP and alerting | `Enabled`, `SmtpHost`, `SmtpPort`, `UseTls`, `Username`, `Recipients[]`, `MaxEmailsPerHour`, `DedupWindowMinutes`, `DigestIntervalMinutes`, `DailySummaryTimeIsrael` |
+| `NetCourtDecisionAlerts` | NetCourt decision email worker | `Enabled`, `StartFromDocDate`, `EmailMode`, `TestRecipient`, `BccRecipients[]`, routing map, attachment size and allowed roots |
 | `HearingBackfill` | Bulk hearing import | `Enable`, `SourceTable`, `BoardId`, `BatchSize` |
 | `HearingApprovalBackfill` | Historical approval backfill | `Enable`, `DryRun`, `MaxItems`, `OnlyTikCounters`, `ThrottleMs` |
 | `Testing` | Test case source | `Enable`, `Source`, `TikCounters[]`, `TableName` |

@@ -10,15 +10,18 @@ namespace Odmon.Worker.Workers
     {
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly IConfiguration _configuration;
+        private readonly IEmailNotifier _emailNotifier;
         private readonly ILogger<NetCourtDecisionAlertWorker> _logger;
 
         public NetCourtDecisionAlertWorker(
             IServiceScopeFactory scopeFactory,
             IConfiguration configuration,
+            IEmailNotifier emailNotifier,
             ILogger<NetCourtDecisionAlertWorker> logger)
         {
             _scopeFactory = scopeFactory;
             _configuration = configuration;
+            _emailNotifier = emailNotifier;
             _logger = logger;
         }
 
@@ -72,10 +75,21 @@ namespace Odmon.Worker.Workers
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "NetCourtDecisionAlertWorker run failed.");
+                    QueueOperationalFailure(_emailNotifier, ex);
                 }
             }
 
             _logger.LogInformation("NetCourtDecisionAlertWorker stopped.");
+        }
+
+        internal static void QueueOperationalFailure(IEmailNotifier emailNotifier, Exception exception)
+        {
+            emailNotifier.QueueCriticalAlert(
+                "NetCourt decision alert worker failed",
+                exception.ToString(),
+                exception.GetType().FullName,
+                nameof(NetCourtDecisionAlertWorker),
+                "NetCourt Decision Alert Failure");
         }
     }
 }

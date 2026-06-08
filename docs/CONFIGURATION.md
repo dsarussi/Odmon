@@ -348,19 +348,43 @@ Or remove/fix the `KeyVault:VaultUrl` configuration.
 
 | Setting | Default | Description |
 |---|---:|---|
-| `Enabled` | `false` | Enables the dedicated NetCourt polling worker. |
+| `Enabled` | `true` | Enables the dedicated NetCourt polling worker. Keep disabled until deployment checks are complete. |
 | `IntervalSeconds` | `300` | Polling interval. |
 | `StartFromDocDate` | `2026-06-07` | Earliest NetCourt `DocDate` eligible for alerting, in `yyyy-MM-dd` format. |
 | `MaxBatchSize` | `100` | Maximum number of untracked eligible documents processed per poll. |
 | `AttachDecisionPdf` | `true` | Best-effort attachment of the resolved Odcanit decision PDF. Attachment failure never blocks the email. |
-| `MaxAttachmentBytes` | `10485760` | Maximum PDF attachment size (10 MB by default). |
+| `MaxAttachmentBytes` | `26214400` | Maximum PDF attachment size (25 MB by default). |
 | `AttachmentAllowedRoots` | Odlight document roots | Allowed local/UNC roots for procedure-resolved attachment paths. |
-| `EmailMode` | `Test` | `Test` sends only to `TestRecipient`; `Live` sends to the routed employee. |
+| `EmailMode` | `Live` | `Test` sends only to `TestRecipient`; `Live` sends to the routed employee. |
 | `TestRecipient` | `odmon@ezer-law.com` | Actual recipient used in Test mode. |
+| `BccRecipients` | `["odmon@ezer-law.com"]` | NetCourt-only monitoring BCC recipients. These never replace the primary `To` recipient. |
 | `ClientNumberToRecipientEmail` | configured map | Client-number-to-employee routing. |
 | `FallbackRecipientEnabled` | `false` | Allows global `Email:Recipients` only when explicitly enabled. |
 
 Every poll reads `vwNetCourtDocs` rows where `DocType IN (2, 3)` and `DocDate >= StartFromDocDate`. Integration DB `DocumentIdentity` tracking removes previously handled rows before `MaxBatchSize` is applied, so older tracked rows cannot block later unprocessed decisions. `tsCreateDate` and `Counter` do not control detection. Filenames and free-text fields are not used for classification.
+
+PDF paths are resolved only through `dbo.procDocumentsGroup_BuildDocPath` using `ODDocID` and the extension `.pdf`. The resolved file must remain under an allowed Odlight root, exist, be readable, have a `.pdf` extension, be within the configured size limit, and pass the lightweight PDF signature check. Attachment handling is best effort: when any check fails, the alert is still queued and its body includes a short Hebrew explanation.
+
+Live routing:
+
+| Client numbers | Primary recipient |
+|---|---|
+| `2`, `15` | `yonatan@ezer-law.com` |
+| `5`, `8`, `3`, `23`, `253` | `amir@ezer-law.com` |
+
+When routing is missing and `FallbackRecipientEnabled=false`, the row is recorded as `MissingRouting` and no email is sent, including no BCC-only email. Worker/database failures continue through `QueueCriticalAlert` and global `Email:Recipients`; NetCourt BCC settings do not apply to operational alerts, daily summaries, or other ODMON email types.
+
+Deployment checklist:
+
+1. Confirm the Integration DB migrations are current and SMTP credentials are available.
+2. Verify `StartFromDocDate` is the intended business start date.
+3. Start with `EmailMode=Test`, `Enabled=true`, and `TestRecipient=odmon@ezer-law.com`.
+4. Confirm decision detection, routing logs, BCC count, and PDF attachment behavior without contacting employees.
+5. Confirm the service account can read both configured Odlight roots.
+6. Change only `EmailMode` to `Live` after the test evidence is reviewed.
+7. Keep `FallbackRecipientEnabled=false`; unmapped clients must be handled through configuration review.
+
+See [NETCOURT_DECISION_ALERTS.md](NETCOURT_DECISION_ALERTS.md) for the feature runbook.
 
 ## Configuration File Examples
 

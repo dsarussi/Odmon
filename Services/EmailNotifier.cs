@@ -21,13 +21,15 @@ namespace Odmon.Worker.Services
         public string? Fingerprint { get; init; }
         public EmailMessageType Type { get; init; }
         public IReadOnlyCollection<string>? Recipients { get; init; }
+        public IReadOnlyCollection<string>? BccRecipients { get; init; }
         public IReadOnlyCollection<EmailAttachmentDescriptor>? Attachments { get; init; }
     }
 
     public sealed record EmailAttachmentDescriptor(
         string FilePath,
         string FileName,
-        string ContentType);
+        string ContentType,
+        string? UnavailableBodyNote = null);
 
     public enum EmailMessageType { Critical, DailySummary, Digest, Direct }
 
@@ -144,7 +146,8 @@ namespace Odmon.Worker.Services
             string body,
             IReadOnlyCollection<string> recipients,
             bool isHtml = false,
-            IReadOnlyCollection<EmailAttachmentDescriptor>? attachments = null)
+            IReadOnlyCollection<EmailAttachmentDescriptor>? attachments = null,
+            IReadOnlyCollection<string>? bccRecipients = null)
         {
             if (!IsEnabled())
             {
@@ -163,6 +166,12 @@ namespace Odmon.Worker.Services
                 return false;
             }
 
+            var normalizedBccRecipients = bccRecipients?
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray() ?? Array.Empty<string>();
+
             if (IsRateLimited())
             {
                 _logger.LogWarning(
@@ -179,6 +188,7 @@ namespace Odmon.Worker.Services
                 IsHtml = isHtml,
                 Type = EmailMessageType.Direct,
                 Recipients = normalizedRecipients,
+                BccRecipients = normalizedBccRecipients,
                 Attachments = attachments?
                     .Where(x =>
                         !string.IsNullOrWhiteSpace(x.FilePath) &&
@@ -196,9 +206,10 @@ namespace Odmon.Worker.Services
                 }
 
                 _logger.LogInformation(
-                    "EMAIL QUEUED | Type=Direct, Subject={Subject}, Recipients={Recipients}",
+                    "EMAIL QUEUED | Type=Direct, Subject={Subject}, Recipients={Recipients}, BccCount={BccCount}",
                     subject,
-                    string.Join(";", normalizedRecipients));
+                    string.Join(";", normalizedRecipients),
+                    normalizedBccRecipients.Length);
             }
             else
             {
@@ -294,8 +305,11 @@ namespace Odmon.Worker.Services
 #pragma warning restore SYSLIB0014
 
                     _logger.LogInformation(
-                        "EMAIL SENT | Type={Type}, Subject={Subject}, Recipients={Recipients}",
-                        message.Type, message.Subject, string.Join(";", recipients));
+                        "EMAIL SENT | Type={Type}, Subject={Subject}, Recipients={Recipients}, BccCount={BccCount}",
+                        message.Type,
+                        message.Subject,
+                        string.Join(";", recipients),
+                        message.BccRecipients?.Count ?? 0);
 
                     lock (_rateLock)
                     {
@@ -349,7 +363,16 @@ namespace Odmon.Worker.Services
                     message.Type,
                     message.Subject,
                     ex.Message);
-                return CreateMailMessage(message, username, recipients, includeAttachments: false);
+                var mail = CreateMailMessage(message, username, recipients, includeAttachments: false);
+                var unavailableBodyNote = message.Attachments?
+                    .Select(x => x.UnavailableBodyNote)
+                    .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+                if (!string.IsNullOrWhiteSpace(unavailableBodyNote))
+                {
+                    mail.Body += $"{Environment.NewLine}{Environment.NewLine}{unavailableBodyNote}";
+                }
+
+                return mail;
             }
         }
 
@@ -376,6 +399,17 @@ namespace Odmon.Worker.Services
                     if (!string.IsNullOrWhiteSpace(recipient))
                     {
                         mail.To.Add(recipient.Trim());
+                    }
+                }
+
+                if (message.BccRecipients != null)
+                {
+                    foreach (var bccRecipient in message.BccRecipients)
+                    {
+                        if (!string.IsNullOrWhiteSpace(bccRecipient))
+                        {
+                            mail.Bcc.Add(bccRecipient.Trim());
+                        }
                     }
                 }
 

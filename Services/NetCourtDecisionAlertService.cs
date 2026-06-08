@@ -258,13 +258,19 @@ namespace Odmon.Worker.Services
                     row.TikNumber!,
                     _settings.IsTestMode,
                     intendedRecipient);
-                var attachments = await ResolveAttachmentAsync(row, ct);
+                var attachmentResult = await ResolveAttachmentAsync(row, ct);
+                if (!string.IsNullOrWhiteSpace(attachmentResult.HebrewFailureReason))
+                {
+                    body += $"{Environment.NewLine}{Environment.NewLine}" +
+                            $"לא צורף קובץ ההחלטה: {attachmentResult.HebrewFailureReason}";
+                }
 
                 if (!_emailNotifier.QueueEmail(
                         subject,
                         body,
                         actualRecipients,
-                        attachments: attachments))
+                        attachments: attachmentResult.Attachments,
+                        bccRecipients: BuildBccRecipients()))
                 {
                     row.Status = NetCourtDecisionAlertStatuses.QueueFailed;
                     row.ErrorMessage = "Email could not be queued.";
@@ -284,27 +290,28 @@ namespace Odmon.Worker.Services
                 result.EmailsQueued++;
 
                 _logger.LogInformation(
-                    attachments.Count > 0
-                        ? "NETCOURT email queued with attachment. EmailMode={EmailMode}, Identity={Identity}, TikNumber={TikNumber}, IntendedRecipient={IntendedRecipient}, ActualRecipient={ActualRecipient}, ODDocID={ODDocID}"
-                        : "NETCOURT email queued without attachment. EmailMode={EmailMode}, Identity={Identity}, TikNumber={TikNumber}, IntendedRecipient={IntendedRecipient}, ActualRecipient={ActualRecipient}, ODDocID={ODDocID}",
+                    attachmentResult.Attachments.Count > 0
+                        ? "NETCOURT email queued with attachment. EmailMode={EmailMode}, Identity={Identity}, TikNumber={TikNumber}, IntendedRecipient={IntendedRecipient}, ActualRecipient={ActualRecipient}, BccCount={BccCount}, ODDocID={ODDocID}"
+                        : "NETCOURT email queued without attachment. EmailMode={EmailMode}, Identity={Identity}, TikNumber={TikNumber}, IntendedRecipient={IntendedRecipient}, ActualRecipient={ActualRecipient}, BccCount={BccCount}, ODDocID={ODDocID}",
                     NormalizeEmailMode(),
                     row.DocumentIdentity,
                     row.TikNumber,
                     row.IntendedRecipientEmail,
                     row.ActualRecipientEmail,
+                    BuildBccRecipients().Length,
                     row.ODDocID);
             }
 
             await _integrationDb.SaveChangesAsync(ct);
         }
 
-        private async Task<IReadOnlyCollection<EmailAttachmentDescriptor>> ResolveAttachmentAsync(
+        private async Task<AttachmentResolution> ResolveAttachmentAsync(
             NetCourtDecisionAlert row,
             CancellationToken ct)
         {
             if (!_settings.AttachDecisionPdf)
             {
-                return Array.Empty<EmailAttachmentDescriptor>();
+                return AttachmentResolution.Disabled;
             }
 
             try
@@ -317,16 +324,16 @@ namespace Odmon.Worker.Services
                     string.IsNullOrWhiteSpace(resolved.FilePath) ||
                     string.IsNullOrWhiteSpace(resolved.FileName))
                 {
-                    return Array.Empty<EmailAttachmentDescriptor>();
+                    return AttachmentResolution.Unavailable(
+                        TranslateAttachmentFailureReason(resolved.ErrorMessage));
                 }
 
-                return new[]
-                {
+                return AttachmentResolution.Available(
                     new EmailAttachmentDescriptor(
                         resolved.FilePath,
                         resolved.FileName,
-                        "application/pdf")
-                };
+                        "application/pdf",
+                        "לא צורף קובץ ההחלטה: לא ניתן היה לקרוא את הקובץ בזמן שליחת המייל"));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -340,8 +347,42 @@ namespace Odmon.Worker.Services
                     row.ODDocID,
                     row.TikNumber,
                     ex.Message);
-                return Array.Empty<EmailAttachmentDescriptor>();
+                return AttachmentResolution.Unavailable(
+                    "לא ניתן היה לקרוא את קובץ ההחלטה");
             }
+        }
+
+        private string[] BuildBccRecipients()
+            => (_settings.BccRecipients ?? Array.Empty<string>())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+        internal static string TranslateAttachmentFailureReason(string? reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason))
+                return "לא ניתן היה לצרף את קובץ ההחלטה";
+            if (reason.Contains("ODDocID", StringComparison.OrdinalIgnoreCase))
+                return "מזהה המסמך חסר";
+            if (reason.Contains("empty", StringComparison.OrdinalIgnoreCase) ||
+                reason.Contains("resolution failed", StringComparison.OrdinalIgnoreCase))
+                return "לא ניתן היה לאתר את קובץ ההחלטה";
+            if (reason.Contains("outside allowed roots", StringComparison.OrdinalIgnoreCase))
+                return "נתיב הקובץ אינו מורשה";
+            if (reason.Contains("does not exist", StringComparison.OrdinalIgnoreCase))
+                return "קובץ ההחלטה לא נמצא";
+            if (reason.Contains("size", StringComparison.OrdinalIgnoreCase) ||
+                reason.Contains("too large", StringComparison.OrdinalIgnoreCase))
+                return "קובץ ההחלטה גדול מהמגבלה המותרת";
+            if (reason.Contains("magic", StringComparison.OrdinalIgnoreCase) ||
+                reason.Contains("extension", StringComparison.OrdinalIgnoreCase))
+                return "קובץ ההחלטה אינו PDF תקין";
+            if (reason.Contains("access", StringComparison.OrdinalIgnoreCase) ||
+                reason.Contains("read", StringComparison.OrdinalIgnoreCase) ||
+                reason.Contains("IOException", StringComparison.OrdinalIgnoreCase))
+                return "לא ניתן לקרוא את קובץ ההחלטה";
+            return "לא ניתן היה לצרף את קובץ ההחלטה";
         }
 
         internal bool TryResolveRecipients(
@@ -489,6 +530,20 @@ namespace Odmon.Worker.Services
             var sqlException = ex.InnerException as SqlException
                 ?? ex.GetBaseException() as SqlException;
             return sqlException?.Number is 2601 or 2627;
+        }
+
+        private sealed record AttachmentResolution(
+            IReadOnlyCollection<EmailAttachmentDescriptor> Attachments,
+            string? HebrewFailureReason)
+        {
+            public static AttachmentResolution Disabled { get; } =
+                new(Array.Empty<EmailAttachmentDescriptor>(), null);
+
+            public static AttachmentResolution Available(EmailAttachmentDescriptor attachment)
+                => new(new[] { attachment }, null);
+
+            public static AttachmentResolution Unavailable(string reason)
+                => new(Array.Empty<EmailAttachmentDescriptor>(), reason);
         }
     }
 
