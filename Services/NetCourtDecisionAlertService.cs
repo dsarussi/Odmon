@@ -16,6 +16,7 @@ namespace Odmon.Worker.Services
         private readonly IntegrationDbContext _integrationDb;
         private readonly INetCourtDocumentReader _documentReader;
         private readonly INetCourtCaseResolver _caseResolver;
+        private readonly INetCourtDocumentFileResolver _documentFileResolver;
         private readonly IEmailNotifier _emailNotifier;
         private readonly IConfiguration _configuration;
         private readonly NetCourtDecisionAlertSettings _settings;
@@ -25,6 +26,7 @@ namespace Odmon.Worker.Services
             IntegrationDbContext integrationDb,
             INetCourtDocumentReader documentReader,
             INetCourtCaseResolver caseResolver,
+            INetCourtDocumentFileResolver documentFileResolver,
             IEmailNotifier emailNotifier,
             IConfiguration configuration,
             IOptions<NetCourtDecisionAlertSettings> settings,
@@ -33,6 +35,7 @@ namespace Odmon.Worker.Services
             _integrationDb = integrationDb;
             _documentReader = documentReader;
             _caseResolver = caseResolver;
+            _documentFileResolver = documentFileResolver;
             _emailNotifier = emailNotifier;
             _configuration = configuration;
             _settings = settings.Value;
@@ -255,8 +258,13 @@ namespace Odmon.Worker.Services
                     row.TikNumber!,
                     _settings.IsTestMode,
                     intendedRecipient);
+                var attachments = await ResolveAttachmentAsync(row, ct);
 
-                if (!_emailNotifier.QueueEmail(subject, body, actualRecipients))
+                if (!_emailNotifier.QueueEmail(
+                        subject,
+                        body,
+                        actualRecipients,
+                        attachments: attachments))
                 {
                     row.Status = NetCourtDecisionAlertStatuses.QueueFailed;
                     row.ErrorMessage = "Email could not be queued.";
@@ -276,16 +284,64 @@ namespace Odmon.Worker.Services
                 result.EmailsQueued++;
 
                 _logger.LogInformation(
-                    _settings.IsTestMode
-                        ? "NETCOURT test email queued. Identity={Identity}, TikNumber={TikNumber}, IntendedRecipient={IntendedRecipient}, ActualRecipient={ActualRecipient}"
-                        : "NETCOURT live email queued. Identity={Identity}, TikNumber={TikNumber}, IntendedRecipient={IntendedRecipient}, ActualRecipient={ActualRecipient}",
+                    attachments.Count > 0
+                        ? "NETCOURT email queued with attachment. EmailMode={EmailMode}, Identity={Identity}, TikNumber={TikNumber}, IntendedRecipient={IntendedRecipient}, ActualRecipient={ActualRecipient}, ODDocID={ODDocID}"
+                        : "NETCOURT email queued without attachment. EmailMode={EmailMode}, Identity={Identity}, TikNumber={TikNumber}, IntendedRecipient={IntendedRecipient}, ActualRecipient={ActualRecipient}, ODDocID={ODDocID}",
+                    NormalizeEmailMode(),
                     row.DocumentIdentity,
                     row.TikNumber,
                     row.IntendedRecipientEmail,
-                    row.ActualRecipientEmail);
+                    row.ActualRecipientEmail,
+                    row.ODDocID);
             }
 
             await _integrationDb.SaveChangesAsync(ct);
+        }
+
+        private async Task<IReadOnlyCollection<EmailAttachmentDescriptor>> ResolveAttachmentAsync(
+            NetCourtDecisionAlert row,
+            CancellationToken ct)
+        {
+            if (!_settings.AttachDecisionPdf)
+            {
+                return Array.Empty<EmailAttachmentDescriptor>();
+            }
+
+            try
+            {
+                var resolved = await _documentFileResolver.ResolveAsync(
+                    row.ODDocID,
+                    row.TikNumber,
+                    ct);
+                if (!resolved.IsAvailable ||
+                    string.IsNullOrWhiteSpace(resolved.FilePath) ||
+                    string.IsNullOrWhiteSpace(resolved.FileName))
+                {
+                    return Array.Empty<EmailAttachmentDescriptor>();
+                }
+
+                return new[]
+                {
+                    new EmailAttachmentDescriptor(
+                        resolved.FilePath,
+                        resolved.FileName,
+                        "application/pdf")
+                };
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "NETCOURT attachment skipped because resolution failed unexpectedly. ODDocID={ODDocID}, TikNumber={TikNumber}, Reason={Reason}",
+                    row.ODDocID,
+                    row.TikNumber,
+                    ex.Message);
+                return Array.Empty<EmailAttachmentDescriptor>();
+            }
         }
 
         internal bool TryResolveRecipients(

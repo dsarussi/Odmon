@@ -137,6 +137,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddScoped<IOdcanitChangeFeed, SqlOdcanitChangeFeed>();
     services.AddScoped<INetCourtDocumentReader, SqlNetCourtDocumentReader>();
     services.AddScoped<INetCourtCaseResolver, NetCourtCaseResolver>();
+    services.AddScoped<INetCourtDocumentFileResolver, SqlNetCourtDocumentFileResolver>();
 
     services.AddScoped<IOdcanitWriter, SqlOdcanitWriter>();
     services.AddScoped<ISkipLogger, SkipLogger>();

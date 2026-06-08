@@ -352,6 +352,9 @@ Or remove/fix the `KeyVault:VaultUrl` configuration.
 | `IntervalSeconds` | `300` | Polling interval. |
 | `StartFromDocDate` | `2026-06-07` | Earliest NetCourt `DocDate` eligible for alerting, in `yyyy-MM-dd` format. |
 | `MaxBatchSize` | `100` | Maximum number of untracked eligible documents processed per poll. |
+| `AttachDecisionPdf` | `true` | Best-effort attachment of the resolved Odcanit decision PDF. Attachment failure never blocks the email. |
+| `MaxAttachmentBytes` | `10485760` | Maximum PDF attachment size (10 MB by default). |
+| `AttachmentAllowedRoots` | Odlight document roots | Allowed local/UNC roots for procedure-resolved attachment paths. |
 | `EmailMode` | `Test` | `Test` sends only to `TestRecipient`; `Live` sends to the routed employee. |
 | `TestRecipient` | `odmon@ezer-law.com` | Actual recipient used in Test mode. |
 | `ClientNumberToRecipientEmail` | configured map | Client-number-to-employee routing. |

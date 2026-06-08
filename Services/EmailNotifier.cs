@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Mail;
+using System.Net.Mime;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Channels;
@@ -20,7 +21,13 @@ namespace Odmon.Worker.Services
         public string? Fingerprint { get; init; }
         public EmailMessageType Type { get; init; }
         public IReadOnlyCollection<string>? Recipients { get; init; }
+        public IReadOnlyCollection<EmailAttachmentDescriptor>? Attachments { get; init; }
     }
+
+    public sealed record EmailAttachmentDescriptor(
+        string FilePath,
+        string FileName,
+        string ContentType);
 
     public enum EmailMessageType { Critical, DailySummary, Digest, Direct }
 
@@ -136,7 +143,8 @@ namespace Odmon.Worker.Services
             string subject,
             string body,
             IReadOnlyCollection<string> recipients,
-            bool isHtml = false)
+            bool isHtml = false,
+            IReadOnlyCollection<EmailAttachmentDescriptor>? attachments = null)
         {
             if (!IsEnabled())
             {
@@ -170,7 +178,14 @@ namespace Odmon.Worker.Services
                 Body = body,
                 IsHtml = isHtml,
                 Type = EmailMessageType.Direct,
-                Recipients = normalizedRecipients
+                Recipients = normalizedRecipients,
+                Attachments = attachments?
+                    .Where(x =>
+                        !string.IsNullOrWhiteSpace(x.FilePath) &&
+                        !string.IsNullOrWhiteSpace(x.FileName) &&
+                        !string.IsNullOrWhiteSpace(x.ContentType))
+                    .Take(1)
+                    .ToArray()
             });
 
             if (queued)
@@ -270,19 +285,10 @@ namespace Odmon.Worker.Services
                         Timeout = 30_000
                     };
 
-                    using var mail = new MailMessage
-                    {
-                        From = new MailAddress(username, "ODMON Monitor"),
-                        Subject = message.Subject,
-                        Body = message.Body,
-                        IsBodyHtml = message.IsHtml
-                    };
-
-                    foreach (var r in recipients)
-                    {
-                        if (!string.IsNullOrWhiteSpace(r))
-                            mail.To.Add(r.Trim());
-                    }
+                    using var mail = CreateMailMessageBestEffort(
+                        message,
+                        username,
+                        recipients);
 
                     await smtp.SendMailAsync(mail, ct);
 #pragma warning restore SYSLIB0014
@@ -325,6 +331,74 @@ namespace Odmon.Worker.Services
             }
 
             return false;
+        }
+
+        private MailMessage CreateMailMessageBestEffort(
+            EmailMessage message,
+            string username,
+            IReadOnlyCollection<string> recipients)
+        {
+            try
+            {
+                return CreateMailMessage(message, username, recipients, includeAttachments: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(
+                    "EMAIL attachment unavailable at send time; sending without attachment. Type={Type}, Subject={Subject}, Reason={Reason}",
+                    message.Type,
+                    message.Subject,
+                    ex.Message);
+                return CreateMailMessage(message, username, recipients, includeAttachments: false);
+            }
+        }
+
+        internal static MailMessage CreateMailMessage(
+            EmailMessage message,
+            string username,
+            IReadOnlyCollection<string> recipients,
+            bool includeAttachments)
+        {
+            var mail = new MailMessage
+            {
+                From = new MailAddress(username, "ODMON Monitor"),
+                Subject = message.Subject,
+                Body = message.Body,
+                IsBodyHtml = message.IsHtml,
+                SubjectEncoding = Encoding.UTF8,
+                BodyEncoding = Encoding.UTF8
+            };
+
+            try
+            {
+                foreach (var recipient in recipients)
+                {
+                    if (!string.IsNullOrWhiteSpace(recipient))
+                    {
+                        mail.To.Add(recipient.Trim());
+                    }
+                }
+
+                if (includeAttachments && message.Attachments != null)
+                {
+                    foreach (var descriptor in message.Attachments.Take(1))
+                    {
+                        var attachment = new Attachment(
+                            descriptor.FilePath,
+                            descriptor.ContentType);
+                        attachment.Name = descriptor.FileName;
+                        attachment.NameEncoding = Encoding.UTF8;
+                        mail.Attachments.Add(attachment);
+                    }
+                }
+
+                return mail;
+            }
+            catch
+            {
+                mail.Dispose();
+                throw;
+            }
         }
 
         internal static bool IsSmtpAuthFailure(SmtpException ex)

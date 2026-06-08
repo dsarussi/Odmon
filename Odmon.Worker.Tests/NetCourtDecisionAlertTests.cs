@@ -243,6 +243,163 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public async Task NullOdDocId_QueuesEmailWithoutAttachment()
+        {
+            await using var db = CreateDb();
+            var reader = new FakeDocumentReader
+            {
+                Documents = { Decision(counter: 30, courtDocumentId: 130, odDocId: null) }
+            };
+            var email = new FakeEmailNotifier();
+            var fileResolver = new FakeDocumentFileResolver();
+            var service = CreateService(
+                db,
+                reader,
+                email,
+                "Test",
+                fileResolver: fileResolver);
+
+            await service.RunAsync(CancellationToken.None);
+
+            Assert.Empty(Assert.Single(email.DirectMessages).Attachments);
+            Assert.Equal(new long?[] { null }, fileResolver.RequestedOdDocIds);
+        }
+
+        [Theory]
+        [InlineData("Resolved path is empty.")]
+        [InlineData("Resolved path is outside allowed roots.")]
+        [InlineData("File does not exist.")]
+        [InlineData("File exceeds the configured attachment size limit.")]
+        [InlineData("File does not start with PDF magic bytes.")]
+        [InlineData("Access denied.")]
+        public async Task UnavailableAttachment_QueuesEmailWithoutAttachment(string reason)
+        {
+            await using var db = CreateDb();
+            var reader = new FakeDocumentReader
+            {
+                Documents = { Decision(counter: 31, courtDocumentId: 131, odDocId: 2259074) }
+            };
+            var email = new FakeEmailNotifier();
+            var fileResolver = new FakeDocumentFileResolver
+            {
+                Result = NetCourtDocumentFileResult.Unavailable(reason)
+            };
+            var service = CreateService(
+                db,
+                reader,
+                email,
+                "Test",
+                fileResolver: fileResolver);
+
+            await service.RunAsync(CancellationToken.None);
+
+            Assert.Empty(Assert.Single(email.DirectMessages).Attachments);
+        }
+
+        [Fact]
+        public async Task FileAccessException_QueuesEmailWithoutAttachment()
+        {
+            await using var db = CreateDb();
+            var reader = new FakeDocumentReader
+            {
+                Documents = { Decision(counter: 32, courtDocumentId: 132, odDocId: 2259074) }
+            };
+            var email = new FakeEmailNotifier();
+            var fileResolver = new FakeDocumentFileResolver
+            {
+                ExceptionToThrow = new IOException("File temporarily unavailable.")
+            };
+            var service = CreateService(
+                db,
+                reader,
+                email,
+                "Test",
+                fileResolver: fileResolver);
+
+            await service.RunAsync(CancellationToken.None);
+
+            Assert.Empty(Assert.Single(email.DirectMessages).Attachments);
+        }
+
+        [Fact]
+        public async Task ValidPdf_InTestMode_QueuesOnlyToTestRecipientWithAttachment()
+        {
+            await using var db = CreateDb();
+            var reader = new FakeDocumentReader
+            {
+                Documents = { Decision(counter: 33, courtDocumentId: 133, odDocId: 2259074) }
+            };
+            var email = new FakeEmailNotifier();
+            var fileResolver = AvailableFileResolver();
+            var service = CreateService(
+                db,
+                reader,
+                email,
+                "Test",
+                fileResolver: fileResolver);
+
+            await service.RunAsync(CancellationToken.None);
+
+            var message = Assert.Single(email.DirectMessages);
+            Assert.Equal(new[] { "odmon@ezer-law.com" }, message.Recipients);
+            Assert.DoesNotContain("amir@ezer-law.com", message.Recipients);
+            Assert.DoesNotContain("yonatan@ezer-law.com", message.Recipients);
+            var attachment = Assert.Single(message.Attachments);
+            Assert.Equal("decision.pdf", attachment.FileName);
+            Assert.Equal("application/pdf", attachment.ContentType);
+        }
+
+        [Fact]
+        public async Task ValidPdf_InLiveMode_QueuesToEmployeeWithAttachment()
+        {
+            await using var db = CreateDb();
+            var reader = new FakeDocumentReader
+            {
+                Documents = { Decision(counter: 34, courtDocumentId: 134, tikCounter: 88, odDocId: 2259074) }
+            };
+            var email = new FakeEmailNotifier();
+            var service = CreateService(
+                db,
+                reader,
+                email,
+                "Live",
+                fileResolver: AvailableFileResolver());
+
+            await service.RunAsync(CancellationToken.None);
+
+            var message = Assert.Single(email.DirectMessages);
+            Assert.Equal(new[] { "amir@ezer-law.com" }, message.Recipients);
+            Assert.Single(message.Attachments);
+        }
+
+        [Fact]
+        public async Task AttachmentFailure_DoesNotCauseDuplicateAlert()
+        {
+            await using var db = CreateDb();
+            var reader = new FakeDocumentReader
+            {
+                Documents = { Decision(counter: 35, courtDocumentId: 135, odDocId: 2259074) }
+            };
+            var email = new FakeEmailNotifier();
+            var fileResolver = new FakeDocumentFileResolver
+            {
+                ExceptionToThrow = new IOException("Unavailable.")
+            };
+            var service = CreateService(
+                db,
+                reader,
+                email,
+                "Test",
+                fileResolver: fileResolver);
+
+            await service.RunAsync(CancellationToken.None);
+            await service.RunAsync(CancellationToken.None);
+
+            Assert.Single(email.DirectMessages);
+            Assert.Single(fileResolver.RequestedOdDocIds);
+        }
+
+        [Fact]
         public async Task OtherDocTypes_AreIgnoredEvenIfReaderReturnsThem()
         {
             await using var db = CreateDb();
@@ -332,7 +489,8 @@ namespace Odmon.Worker.Tests
             string emailMode,
             FakeCaseResolver? resolver = null,
             int maxBatchSize = 100,
-            string startFromDocDate = "2026-06-07")
+            string startFromDocDate = "2026-06-07",
+            FakeDocumentFileResolver? fileResolver = null)
         {
             resolver ??= new FakeCaseResolver
             {
@@ -378,11 +536,13 @@ namespace Odmon.Worker.Tests
                     ["Email:Recipients:0"] = "global@example.com"
                 })
                 .Build();
+            fileResolver ??= new FakeDocumentFileResolver();
 
             return new NetCourtDecisionAlertService(
                 db,
                 reader,
                 resolver,
+                fileResolver,
                 email,
                 configuration,
                 Options.Create(settings),
@@ -397,17 +557,30 @@ namespace Odmon.Worker.Tests
             return new IntegrationDbContext(options);
         }
 
+        private static FakeDocumentFileResolver AvailableFileResolver()
+            => new()
+            {
+                Result = new NetCourtDocumentFileResult(
+                    @"\\dc22\Odlight\Docs\case\decision.pdf",
+                    "decision.pdf",
+                    true,
+                    1024,
+                    null)
+            };
+
         private static NetCourtDocument Decision(
             long counter,
             long courtDocumentId,
             int tikCounter = 77,
             DateTime? createdAtUtc = null,
-            DateTime? docDate = null)
+            DateTime? docDate = null,
+            long? odDocId = null)
             => new()
             {
                 Counter = counter,
                 TikCounter = tikCounter,
                 CourtDocumentID = courtDocumentId,
+                ODDocID = odDocId,
                 DocType = 2,
                 DocDate = docDate ?? createdAtUtc ?? DateTime.UtcNow,
                 tsCreateDate = createdAtUtc ?? DateTime.UtcNow
@@ -455,12 +628,14 @@ namespace Odmon.Worker.Tests
                 string subject,
                 string body,
                 IReadOnlyCollection<string> recipients,
-                bool isHtml = false)
+                bool isHtml = false,
+                IReadOnlyCollection<EmailAttachmentDescriptor>? attachments = null)
             {
                 DirectMessages.Add(new DirectMessage(
                     subject,
                     body,
-                    recipients.ToArray()));
+                    recipients.ToArray(),
+                    attachments?.ToArray() ?? Array.Empty<EmailAttachmentDescriptor>()));
                 return true;
             }
 
@@ -491,6 +666,29 @@ namespace Odmon.Worker.Tests
         private sealed record DirectMessage(
             string Subject,
             string Body,
-            string[] Recipients);
+            string[] Recipients,
+            EmailAttachmentDescriptor[] Attachments);
+
+        private sealed class FakeDocumentFileResolver : INetCourtDocumentFileResolver
+        {
+            public NetCourtDocumentFileResult Result { get; set; } =
+                NetCourtDocumentFileResult.Unavailable("Unavailable in test.");
+            public Exception? ExceptionToThrow { get; set; }
+            public List<long?> RequestedOdDocIds { get; } = new();
+
+            public Task<NetCourtDocumentFileResult> ResolveAsync(
+                long? odDocId,
+                string? tikNumber,
+                CancellationToken ct)
+            {
+                RequestedOdDocIds.Add(odDocId);
+                if (ExceptionToThrow != null)
+                {
+                    throw ExceptionToThrow;
+                }
+
+                return Task.FromResult(Result);
+            }
+        }
     }
 }

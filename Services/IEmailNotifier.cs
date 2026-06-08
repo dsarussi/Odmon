@@ -18,7 +18,12 @@ namespace Odmon.Worker.Services
         /// Queues a normal email to explicit recipients. Global critical-alert recipients are not used.
         /// Returns false when email is disabled, rate limited, recipients are empty, or the queue is full.
         /// </summary>
-        bool QueueEmail(string subject, string body, IReadOnlyCollection<string> recipients, bool isHtml = false);
+        bool QueueEmail(
+            string subject,
+            string body,
+            IReadOnlyCollection<string> recipients,
+            bool isHtml = false,
+            IReadOnlyCollection<EmailAttachmentDescriptor>? attachments = null);
 
         /// <summary>
         /// Queue a daily summary email. Typically called once per day by the background service.
