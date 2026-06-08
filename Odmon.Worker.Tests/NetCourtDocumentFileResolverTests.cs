@@ -174,6 +174,14 @@ namespace Odmon.Worker.Tests
             Assert.Equal(".pdf", SqlNetCourtDocumentFileResolver.PdfDocumentExtension);
         }
 
+        [Fact]
+        public void StoredProcedureCommand_UsesVerifiedPositionalArgumentOrder()
+        {
+            Assert.Equal(
+                "EXEC dbo.procDocumentsGroup_BuildDocPath @docCounterValue, @docExtensionValue, @protectedDocPathValue OUTPUT;",
+                SqlNetCourtDocumentFileResolver.BuildDocPathCommandText);
+        }
+
         private SqlNetCourtDocumentFileResolver CreateResolver(long maxAttachmentBytes = 10485760)
         {
             var dbOptions = new DbContextOptionsBuilder<OdcanitDbContext>()

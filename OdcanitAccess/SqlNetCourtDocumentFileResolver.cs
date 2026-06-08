@@ -9,9 +9,10 @@ namespace Odmon.Worker.OdcanitAccess
 {
     public sealed class SqlNetCourtDocumentFileResolver : INetCourtDocumentFileResolver
     {
-        private const string StoredProcedureName = "dbo.procDocumentsGroup_BuildDocPath";
         private const int FileReadRetryDelayMilliseconds = 300;
         internal const string PdfDocumentExtension = ".pdf";
+        internal const string BuildDocPathCommandText =
+            "EXEC dbo.procDocumentsGroup_BuildDocPath @docCounterValue, @docExtensionValue, @protectedDocPathValue OUTPUT;";
 
         private readonly OdcanitDbContext _db;
         private readonly NetCourtDecisionAlertSettings _settings;
@@ -184,18 +185,20 @@ namespace Odmon.Worker.OdcanitAccess
             try
             {
                 await using var command = (SqlCommand)connection.CreateCommand();
-                command.CommandText = StoredProcedureName;
-                command.CommandType = CommandType.StoredProcedure;
+                // The procedure's deployed parameter names differ from the descriptive
+                // names used by ODMON. Invoke it positionally, matching the verified SQL.
+                command.CommandText = BuildDocPathCommandText;
+                command.CommandType = CommandType.Text;
                 command.CommandTimeout = 15;
-                command.Parameters.Add(new SqlParameter("@DocCounter", SqlDbType.BigInt)
+                command.Parameters.Add(new SqlParameter("@docCounterValue", SqlDbType.BigInt)
                 {
                     Value = odDocId
                 });
-                command.Parameters.Add(new SqlParameter("@DocExtension", SqlDbType.NVarChar, 16)
+                command.Parameters.Add(new SqlParameter("@docExtensionValue", SqlDbType.NVarChar, 16)
                 {
                     Value = PdfDocumentExtension
                 });
-                var pathParameter = new SqlParameter("@ProtectedDocPath", SqlDbType.NVarChar, -1)
+                var pathParameter = new SqlParameter("@protectedDocPathValue", SqlDbType.NVarChar, 4000)
                 {
                     Direction = ParameterDirection.Output
                 };
