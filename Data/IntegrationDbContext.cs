@@ -29,6 +29,8 @@ namespace Odmon.Worker.Data
         public DbSet<VoicenterCallProcessingState> VoicenterCallProcessingStates => Set<VoicenterCallProcessingState>();
         public DbSet<NetCourtDecisionAlert> NetCourtDecisionAlerts => Set<NetCourtDecisionAlert>();
         public DbSet<NetCourtDecisionAlertState> NetCourtDecisionAlertStates => Set<NetCourtDecisionAlertState>();
+        public DbSet<EmailAutomationMailboxState> EmailAutomationMailboxStates => Set<EmailAutomationMailboxState>();
+        public DbSet<EmailAutomationLog> EmailAutomationLogs => Set<EmailAutomationLog>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -269,6 +271,36 @@ namespace Odmon.Worker.Data
                 b.HasKey(x => x.Id);
                 b.Property(x => x.Id).ValueGeneratedNever();
                 b.Property(x => x.LastSeenCounter);
+            });
+
+            modelBuilder.Entity<EmailAutomationMailboxState>(b =>
+            {
+                b.ToTable("EmailAutomationMailboxStates");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.Mailbox, x.FolderId }).IsUnique();
+                b.Property(x => x.Mailbox).HasMaxLength(320).IsRequired();
+                b.Property(x => x.FolderId).HasMaxLength(256).IsRequired();
+                b.Property(x => x.DeltaLink).HasColumnType("nvarchar(max)");
+            });
+
+            modelBuilder.Entity<EmailAutomationLog>(b =>
+            {
+                b.ToTable("EmailAutomationLogs");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => x.IdempotencyKey).IsUnique().HasFilter("[IdempotencyKey] IS NOT NULL");
+                b.HasIndex(x => new { x.Mailbox, x.GraphMessageId });
+                b.HasIndex(x => x.CreatedAtUtc);
+                b.Property(x => x.Mailbox).HasMaxLength(320).IsRequired();
+                b.Property(x => x.RuleName).HasMaxLength(128);
+                b.Property(x => x.InternetMessageId).HasMaxLength(1000);
+                b.Property(x => x.GraphMessageId).HasMaxLength(512).IsRequired();
+                b.Property(x => x.Subject).HasMaxLength(1000);
+                b.Property(x => x.Sender).HasMaxLength(320);
+                b.Property(x => x.DetectedCourtCaseNumber).HasMaxLength(64);
+                b.Property(x => x.TargetEmail).HasMaxLength(320);
+                b.Property(x => x.Action).HasMaxLength(64).IsRequired();
+                b.Property(x => x.IdempotencyKey).HasMaxLength(64);
+                b.Property(x => x.ErrorMessage).HasMaxLength(2000);
             });
 
             base.OnModelCreating(modelBuilder);

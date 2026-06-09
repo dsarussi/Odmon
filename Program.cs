@@ -159,6 +159,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.Configure<VoicenterCallSummarySettings>(config.GetSection("VoicenterCallSummaries"));
     services.Configure<VoicenterBackfillSettings>(config.GetSection("VoicenterBackfill"));
     services.Configure<NetCourtDecisionAlertSettings>(config.GetSection("NetCourtDecisionAlerts"));
+    services.Configure<EmailAutomationSettings>(config.GetSection("EmailAutomation"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
@@ -203,6 +204,15 @@ hostBuilder.ConfigureServices((context, services) =>
 
     services.AddScoped<NetCourtDecisionAlertService>();
     services.AddHostedService<NetCourtDecisionAlertWorker>();
+
+    services.AddSingleton(TimeProvider.System);
+    services.AddHttpClient<IEmailAutomationGraphClient, MicrosoftGraphEmailAutomationClient>(client =>
+    {
+        client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
+        client.Timeout = TimeSpan.FromSeconds(60);
+    });
+    services.AddScoped<EmailAutomationService>();
+    services.AddHostedService<EmailAutomationWorker>();
 });
 
 var host = hostBuilder.Build();
