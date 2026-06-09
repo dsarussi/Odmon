@@ -1,0 +1,195 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using Azure.Core;
+using Azure.Identity;
+using Microsoft.Extensions.Options;
+using Odmon.Worker.Configuration;
+
+namespace Odmon.Worker.Services
+{
+    public sealed class MicrosoftGraphEmailAutomationClient : IEmailAutomationGraphClient
+    {
+        private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
+        private readonly HttpClient _httpClient;
+        private readonly EmailAutomationSettings _settings;
+        private readonly TokenCredential _credential;
+
+        public MicrosoftGraphEmailAutomationClient(
+            HttpClient httpClient,
+            IOptions<EmailAutomationSettings> options)
+        {
+            _httpClient = httpClient;
+            _settings = options.Value;
+            _credential = new ClientSecretCredential(
+                _settings.TenantId,
+                _settings.ClientId,
+                _settings.ClientSecret);
+        }
+
+        public async Task<EmailAutomationDeltaPage> GetDeltaPageAsync(
+            string mailbox,
+            string folderId,
+            string? deltaLink,
+            DateTime processingFromUtc,
+            int pageSize,
+            CancellationToken cancellationToken)
+        {
+            var requestUrl = deltaLink;
+            if (string.IsNullOrWhiteSpace(requestUrl))
+            {
+                var select = "id,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime";
+                var filterTime = Uri.EscapeDataString(processingFromUtc.ToUniversalTime().ToString("O"));
+                requestUrl =
+                    $"users/{Uri.EscapeDataString(mailbox)}/mailFolders/{Uri.EscapeDataString(folderId)}/messages/delta" +
+                    $"?changeType=created&$select={select}&$filter=receivedDateTime%20gt%20{filterTime}";
+            }
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
+            request.Headers.TryAddWithoutValidation("Prefer", $"odata.maxpagesize={Math.Max(1, pageSize)}");
+            await AddAuthorizationAsync(request, cancellationToken);
+
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            await ThrowIfUnsuccessfulAsync(response, cancellationToken);
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            var root = document.RootElement;
+            var messages = new List<EmailAutomationMessage>();
+
+            if (root.TryGetProperty("value", out var values))
+            {
+                foreach (var value in values.EnumerateArray())
+                {
+                    var removed = value.TryGetProperty("@removed", out _);
+                    messages.Add(new EmailAutomationMessage(
+                        GetString(value, "id") ?? string.Empty,
+                        GetString(value, "internetMessageId"),
+                        GetString(value, "subject"),
+                        GetEmailAddress(value, "from"),
+                        GetRecipients(value, "toRecipients"),
+                        GetRecipients(value, "ccRecipients"),
+                        GetDateTime(value, "receivedDateTime"),
+                        removed));
+                }
+            }
+
+            return new EmailAutomationDeltaPage(
+                messages,
+                GetString(root, "@odata.nextLink"),
+                GetString(root, "@odata.deltaLink"));
+        }
+
+        public async Task ForwardMessageAsync(
+            string mailbox,
+            string graphMessageId,
+            string targetEmail,
+            CancellationToken cancellationToken)
+        {
+            var url =
+                $"users/{Uri.EscapeDataString(mailbox)}/messages/{Uri.EscapeDataString(graphMessageId)}/forward";
+            var payload = JsonSerializer.Serialize(new
+            {
+                comment = "ODMON email automation test forward",
+                toRecipients = new[]
+                {
+                    new { emailAddress = new { address = targetEmail } }
+                }
+            });
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
+            await AddAuthorizationAsync(request, cancellationToken);
+
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            await ThrowIfUnsuccessfulAsync(response, cancellationToken);
+        }
+
+        private async Task AddAuthorizationAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var token = await _credential.GetTokenAsync(
+                new TokenRequestContext(GraphScopes),
+                cancellationToken);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
+        }
+
+        private static async Task ThrowIfUnsuccessfulAsync(
+            HttpResponseMessage response,
+            CancellationToken cancellationToken)
+        {
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                TimeSpan? retryAfter = response.Headers.RetryAfter?.Delta;
+                if (retryAfter == null &&
+                    response.Headers.RetryAfter?.Date is DateTimeOffset retryDate)
+                {
+                    retryAfter = retryDate - DateTimeOffset.UtcNow;
+                }
+
+                throw new GraphThrottledException(retryAfter);
+            }
+
+            if (response.IsSuccessStatusCode)
+            {
+                return;
+            }
+
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new HttpRequestException(
+                $"Microsoft Graph returned {(int)response.StatusCode} ({response.ReasonPhrase}). {body}",
+                null,
+                response.StatusCode);
+        }
+
+        private static string? GetString(JsonElement element, string propertyName)
+            => element.TryGetProperty(propertyName, out var value) &&
+               value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+
+        private static DateTime? GetDateTime(JsonElement element, string propertyName)
+            => DateTime.TryParse(
+                GetString(element, propertyName),
+                null,
+                System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var value)
+                ? value.ToUniversalTime()
+                : null;
+
+        private static string? GetEmailAddress(JsonElement element, string propertyName)
+        {
+            if (!element.TryGetProperty(propertyName, out var recipient) ||
+                !recipient.TryGetProperty("emailAddress", out var emailAddress))
+            {
+                return null;
+            }
+
+            return GetString(emailAddress, "address");
+        }
+
+        private static IReadOnlyList<string> GetRecipients(JsonElement element, string propertyName)
+        {
+            if (!element.TryGetProperty(propertyName, out var recipients) ||
+                recipients.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            return recipients.EnumerateArray()
+                .Select(GetNestedAddress)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Cast<string>()
+                .ToArray();
+        }
+
+        private static string? GetNestedAddress(JsonElement recipient)
+            => recipient.TryGetProperty("emailAddress", out var emailAddress)
+                ? GetString(emailAddress, "address")
+                : null;
+    }
+}
