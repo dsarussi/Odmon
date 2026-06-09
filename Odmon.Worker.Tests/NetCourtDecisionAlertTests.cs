@@ -213,6 +213,26 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public async Task Client101_InLiveMode_RoutesToAmir()
+        {
+            await using var db = CreateDb();
+            var service = CreateService(
+                db,
+                new FakeDocumentReader(),
+                new FakeEmailNotifier(),
+                "Live");
+
+            var resolved = service.TryResolveRecipients(
+                101,
+                out var intendedRecipient,
+                out var actualRecipients);
+
+            Assert.True(resolved);
+            Assert.Equal("amir@ezer-law.com", intendedRecipient);
+            Assert.Equal(new[] { "amir@ezer-law.com" }, actualRecipients);
+        }
+
+        [Fact]
         public async Task MissingRouting_IsRecordedAndDoesNotQueueOrCrash()
         {
             await using var db = CreateDb();
@@ -601,7 +621,8 @@ namespace Odmon.Worker.Tests
                     [8] = "amir@ezer-law.com",
                     [3] = "amir@ezer-law.com",
                     [23] = "amir@ezer-law.com",
-                    [253] = "amir@ezer-law.com"
+                    [253] = "amir@ezer-law.com",
+                    [101] = "amir@ezer-law.com"
                 }
             };
             var configuration = new ConfigurationBuilder()
