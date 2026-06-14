@@ -297,6 +297,9 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.Subject).HasMaxLength(1000);
                 b.Property(x => x.Sender).HasMaxLength(320);
                 b.Property(x => x.DetectedCourtCaseNumber).HasMaxLength(64);
+                b.Property(x => x.ResolvedTikNumber).HasMaxLength(64);
+                b.Property(x => x.ResolvedTargetEmail).HasMaxLength(320);
+                b.Property(x => x.ActualForwardTo).HasMaxLength(320);
                 b.Property(x => x.TargetEmail).HasMaxLength(320);
                 b.Property(x => x.Action).HasMaxLength(64).IsRequired();
                 b.Property(x => x.IdempotencyKey).HasMaxLength(64);

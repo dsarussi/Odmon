@@ -11,6 +11,11 @@ namespace Odmon.Worker.Models
         public string? Sender { get; set; }
         public DateTime? ReceivedDateTimeUtc { get; set; }
         public string? DetectedCourtCaseNumber { get; set; }
+        public int? ResolvedTikCounter { get; set; }
+        public string? ResolvedTikNumber { get; set; }
+        public int? ResolvedClientNumber { get; set; }
+        public string? ResolvedTargetEmail { get; set; }
+        public string? ActualForwardTo { get; set; }
         public string? TargetEmail { get; set; }
         public string Action { get; set; } = string.Empty;
         public string? IdempotencyKey { get; set; }
@@ -26,6 +31,8 @@ namespace Odmon.Worker.Models
         public const string DryRunWouldForward = "DryRunWouldForward";
         public const string ForwardedToTestMailbox = "ForwardedToTestMailbox";
         public const string SkippedAlreadyProcessed = "SkippedAlreadyProcessed";
+        public const string NoCaseMatch = "NoCaseMatch";
+        public const string NoClientMatch = "NoClientMatch";
         public const string Failed = "Failed";
     }
 }

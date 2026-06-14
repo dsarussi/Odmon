@@ -212,6 +212,7 @@ hostBuilder.ConfigureServices((context, services) =>
         client.Timeout = TimeSpan.FromSeconds(60);
     });
     services.AddScoped<EmailAutomationService>();
+    services.AddScoped<IEmailAutomationCaseResolver, EmailAutomationCaseResolver>();
     services.AddHostedService<EmailAutomationWorker>();
 });
 
