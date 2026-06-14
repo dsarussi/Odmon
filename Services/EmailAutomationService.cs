@@ -19,6 +19,10 @@ namespace Odmon.Worker.Services
         internal const string EdenEmail = "eden@ezer-law.com";
         private static readonly HashSet<int> AmirClientNumbers = [5, 8, 23, 253, 101, 3];
         private static readonly HashSet<int> YonatanClientNumbers = [2, 15];
+        private static readonly Regex ForwardOrReplyPrefixRegex = new(
+            @"(?:^|[\s\[\(])(?:RE|FW|FWD|השב|הועבר)\s*:",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled,
+            TimeSpan.FromSeconds(1));
 
         private readonly IntegrationDbContext _db;
         private readonly IEmailAutomationGraphClient _graphClient;
@@ -125,12 +129,20 @@ namespace Odmon.Worker.Services
                         break;
                     }
 
-                    forwardsThisCycle += await ProcessMessageAsync(
-                        normalizedMailbox,
-                        mailbox.Rules,
-                        message,
-                        forwardsThisCycle,
-                        cancellationToken);
+                    try
+                    {
+                        forwardsThisCycle += await ProcessMessageAsync(
+                            normalizedMailbox,
+                            mailbox.Rules,
+                            message,
+                            forwardsThisCycle,
+                            cancellationToken);
+                    }
+                    catch (ForwardLimitReachedException)
+                    {
+                        cycleLimitReached = true;
+                        break;
+                    }
                     messagesProcessed++;
                 }
 
@@ -291,7 +303,71 @@ namespace Odmon.Worker.Services
                     EmailAutomationActions.Matched,
                     resolution: resolution);
 
-                if (!rule.TestForwardEnabled)
+                if (rule.TestForwardEnabled)
+                {
+                    if (_settings.RealForwardEnabled)
+                    {
+                        AddAudit(
+                            mailbox,
+                            rule.Name,
+                            message,
+                            item.Match.Value,
+                            resolvedTargetEmail,
+                            EmailAutomationActions.SkippedRealForwardBecauseTestModeEnabled,
+                            "Real forwarding was skipped because test forwarding is enabled.",
+                            resolution: resolution);
+                        _logger.LogWarning(
+                            "EMAILAUTOMATION real forwarding skipped because test mode is enabled. Mailbox={Mailbox}, RuleName={RuleName}, ResolvedTargetEmail={ResolvedTargetEmail}",
+                            mailbox,
+                            rule.Name,
+                            resolvedTargetEmail);
+                    }
+
+                    if (_settings.DryRun)
+                    {
+                        AddAudit(
+                            mailbox,
+                            rule.Name,
+                            message,
+                            item.Match.Value,
+                            rule.TestForwardTo,
+                            EmailAutomationActions.DryRunWouldForward,
+                            resolution: resolution);
+                        continue;
+                    }
+
+                    if (!string.Equals(
+                        rule.TestForwardTo?.Trim(),
+                        AllowedTestRecipient,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        AddAudit(
+                            mailbox,
+                            rule.Name,
+                            message,
+                            item.Match.Value,
+                            rule.TestForwardTo,
+                            EmailAutomationActions.Failed,
+                            "Test forwarding target is not on the phase-one allowlist.",
+                            resolution: resolution);
+                        continue;
+                    }
+
+                    forwarded += await ForwardAsync(
+                        mailbox,
+                        rule.Name,
+                        item.Match.Value,
+                        message,
+                        AllowedTestRecipient,
+                        EmailAutomationActions.ForwardedToTestMailbox,
+                        resolution,
+                        forwardsThisCycle + forwarded,
+                        "test",
+                        cancellationToken);
+                    continue;
+                }
+
+                if (!_settings.RealForwardEnabled)
                 {
                     continue;
                 }
@@ -303,122 +379,191 @@ namespace Odmon.Worker.Services
                         rule.Name,
                         message,
                         item.Match.Value,
-                        rule.TestForwardTo,
+                        resolvedTargetEmail,
                         EmailAutomationActions.DryRunWouldForward,
                         resolution: resolution);
                     continue;
                 }
 
-                if (forwardsThisCycle + forwarded >= Math.Max(0, _settings.MaxForwardsPerCycle))
-                {
-                    continue;
-                }
-
-                if (!string.Equals(
-                    rule.TestForwardTo?.Trim(),
-                    AllowedTestRecipient,
-                    StringComparison.OrdinalIgnoreCase))
+                if (IsRecipient(message.ToRecipients, resolvedTargetEmail) ||
+                    IsRecipient(message.CcRecipients, resolvedTargetEmail))
                 {
                     AddAudit(
                         mailbox,
                         rule.Name,
                         message,
                         item.Match.Value,
-                        rule.TestForwardTo,
-                        EmailAutomationActions.Failed,
-                        "Test forwarding target is not on the phase-one allowlist.",
+                        resolvedTargetEmail,
+                        EmailAutomationActions.SkippedTargetAlreadyRecipient,
+                        "Resolved target is already an original To or Cc recipient.",
                         resolution: resolution);
                     continue;
                 }
 
-                if (string.IsNullOrWhiteSpace(message.InternetMessageId))
+                if (IsForwardOrReplyThread(message.Subject))
                 {
                     AddAudit(
                         mailbox,
                         rule.Name,
                         message,
                         item.Match.Value,
-                        rule.TestForwardTo,
-                        EmailAutomationActions.Failed,
-                        "InternetMessageId is required for forwarding idempotency.",
+                        resolvedTargetEmail,
+                        EmailAutomationActions.SkippedForwardOrReplyThread,
+                        "Subject indicates an already-forwarded or replied thread.",
                         resolution: resolution);
                     continue;
                 }
 
-                var idempotencyKey = CreateIdempotencyKey(
-                    message.InternetMessageId,
-                    rule.Name,
-                    AllowedTestRecipient);
-                if (await _db.EmailAutomationLogs.AnyAsync(
-                    x => x.IdempotencyKey == idempotencyKey,
-                    cancellationToken))
+                if (EmailEquals(message.Sender, resolvedTargetEmail))
                 {
                     AddAudit(
                         mailbox,
                         rule.Name,
                         message,
                         item.Match.Value,
-                        AllowedTestRecipient,
-                        EmailAutomationActions.SkippedAlreadyProcessed,
+                        resolvedTargetEmail,
+                        EmailAutomationActions.SkippedSenderIsResolvedTarget,
+                        "Sender is the resolved target employee.",
                         resolution: resolution);
                     continue;
                 }
 
-                var forwardAudit = AddAudit(
+                if (EmailEquals(message.Sender, AllowedTestRecipient))
+                {
+                    AddAudit(
+                        mailbox,
+                        rule.Name,
+                        message,
+                        item.Match.Value,
+                        resolvedTargetEmail,
+                        EmailAutomationActions.SkippedAutomationGeneratedMessage,
+                        "Sender is the ODMON automation mailbox.",
+                        resolution: resolution);
+                    continue;
+                }
+
+                forwarded += await ForwardAsync(
                     mailbox,
                     rule.Name,
-                    message,
                     item.Match.Value,
-                    AllowedTestRecipient,
-                    EmailAutomationActions.ForwardedToTestMailbox,
-                    idempotencyKey: idempotencyKey,
-                    resolution: resolution,
-                    actualForwardTo: AllowedTestRecipient);
-
-                // Reserve the unique key before the external side effect. This deliberately
-                // provides at-most-once forwarding if Graph's response is ambiguous.
-                await _db.SaveChangesAsync(cancellationToken);
-                try
-                {
-                    _logger.LogInformation(
-                        "EMAILAUTOMATION forwarding to test mailbox. Mailbox={Mailbox}, DetectedCourtCaseNumber={DetectedCourtCaseNumber}, ResolvedTikCounter={ResolvedTikCounter}, ResolvedTikNumber={ResolvedTikNumber}, ResolvedClientNumber={ResolvedClientNumber}, ResolvedTargetEmail={ResolvedTargetEmail}, ActualForwardTo={ActualForwardTo}",
-                        mailbox,
-                        item.Match.Value,
-                        caseMatch.TikCounter,
-                        caseMatch.TikNumber,
-                        clientNumber,
-                        resolvedTargetEmail,
-                        AllowedTestRecipient);
-                    await _graphClient.ForwardMessageAsync(
-                        mailbox,
-                        message.Id,
-                        AllowedTestRecipient,
-                        cancellationToken);
-                    forwardAudit.ProcessedAtUtc = UtcNow();
-                    forwarded++;
-                }
-                catch (GraphThrottledException ex)
-                {
-                    forwardAudit.Action = EmailAutomationActions.Failed;
-                    forwardAudit.ErrorMessage = Truncate(ex.Message, 2000);
-                    await _db.SaveChangesAsync(cancellationToken);
-                    throw;
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    forwardAudit.Action = EmailAutomationActions.Failed;
-                    forwardAudit.ErrorMessage = Truncate(ex.Message, 2000);
-                    _logger.LogError(
-                        ex,
-                        "EMAILAUTOMATION test forward failed. Mailbox={Mailbox}, GraphMessageId={GraphMessageId}, RuleName={RuleName}",
-                        mailbox,
-                        message.Id,
-                        rule.Name);
-                }
+                    message,
+                    resolvedTargetEmail,
+                    EmailAutomationActions.ForwardedToResolvedMailbox,
+                    resolution,
+                    forwardsThisCycle + forwarded,
+                    "resolved",
+                    cancellationToken);
             }
 
             await _db.SaveChangesAsync(cancellationToken);
             return forwarded;
+        }
+
+        private async Task<int> ForwardAsync(
+            string mailbox,
+            string ruleName,
+            string detectedCaseNumber,
+            EmailAutomationMessage message,
+            string targetEmail,
+            string successAction,
+            RoutingResolution resolution,
+            int forwardsThisCycle,
+            string forwardMode,
+            CancellationToken cancellationToken)
+        {
+            if (forwardsThisCycle >= Math.Max(0, _settings.MaxForwardsPerCycle))
+            {
+                throw new ForwardLimitReachedException();
+            }
+
+            if (string.IsNullOrWhiteSpace(message.InternetMessageId))
+            {
+                AddAudit(
+                    mailbox,
+                    ruleName,
+                    message,
+                    detectedCaseNumber,
+                    targetEmail,
+                    EmailAutomationActions.Failed,
+                    "InternetMessageId is required for forwarding idempotency.",
+                    resolution: resolution);
+                return 0;
+            }
+
+            var idempotencyKey = CreateIdempotencyKey(
+                message.InternetMessageId,
+                ruleName,
+                targetEmail);
+            if (await _db.EmailAutomationLogs.AnyAsync(
+                x => x.IdempotencyKey == idempotencyKey,
+                cancellationToken))
+            {
+                AddAudit(
+                    mailbox,
+                    ruleName,
+                    message,
+                    detectedCaseNumber,
+                    targetEmail,
+                    EmailAutomationActions.SkippedAlreadyProcessed,
+                    resolution: resolution);
+                return 0;
+            }
+
+            var forwardAudit = AddAudit(
+                mailbox,
+                ruleName,
+                message,
+                detectedCaseNumber,
+                targetEmail,
+                successAction,
+                idempotencyKey: idempotencyKey,
+                resolution: resolution,
+                actualForwardTo: targetEmail);
+
+            // Reserve the unique key before the external side effect. This deliberately
+            // provides at-most-once forwarding if Graph's response is ambiguous.
+            await _db.SaveChangesAsync(cancellationToken);
+            try
+            {
+                _logger.LogInformation(
+                    "EMAILAUTOMATION forwarding message. ForwardMode={ForwardMode}, Mailbox={Mailbox}, DetectedCourtCaseNumber={DetectedCourtCaseNumber}, ResolvedTikCounter={ResolvedTikCounter}, ResolvedTikNumber={ResolvedTikNumber}, ResolvedClientNumber={ResolvedClientNumber}, ResolvedTargetEmail={ResolvedTargetEmail}, ActualForwardTo={ActualForwardTo}",
+                    forwardMode,
+                    mailbox,
+                    detectedCaseNumber,
+                    resolution.CaseMatch.TikCounter,
+                    resolution.CaseMatch.TikNumber,
+                    resolution.ClientNumber,
+                    resolution.ResolvedTargetEmail,
+                    targetEmail);
+                await _graphClient.ForwardMessageAsync(
+                    mailbox,
+                    message.Id,
+                    targetEmail,
+                    cancellationToken);
+                forwardAudit.ProcessedAtUtc = UtcNow();
+                return 1;
+            }
+            catch (GraphThrottledException ex)
+            {
+                forwardAudit.Action = EmailAutomationActions.Failed;
+                forwardAudit.ErrorMessage = Truncate(ex.Message, 2000);
+                await _db.SaveChangesAsync(cancellationToken);
+                throw;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                forwardAudit.Action = EmailAutomationActions.Failed;
+                forwardAudit.ErrorMessage = Truncate(ex.Message, 2000);
+                _logger.LogError(
+                    ex,
+                    "EMAILAUTOMATION {ForwardMode} forward failed. Mailbox={Mailbox}, GraphMessageId={GraphMessageId}, RuleName={RuleName}, ActualForwardTo={ActualForwardTo}",
+                    forwardMode,
+                    mailbox,
+                    message.Id,
+                    ruleName,
+                    targetEmail);
+                return 0;
+            }
         }
 
         internal static int? ParseClientNumber(string? clientVisualId)
@@ -438,6 +583,23 @@ namespace Odmon.Worker.Services
                 ? YonatanEmail
                 : EdenEmail;
         }
+
+        internal static bool IsForwardOrReplyThread(string? subject)
+            => !string.IsNullOrWhiteSpace(subject) &&
+               ForwardOrReplyPrefixRegex.IsMatch(subject);
+
+        private static bool IsRecipient(
+            IReadOnlyList<string> recipients,
+            string targetEmail)
+            => recipients.Any(x => EmailEquals(x, targetEmail));
+
+        private static bool EmailEquals(string? left, string? right)
+            => !string.IsNullOrWhiteSpace(left) &&
+               !string.IsNullOrWhiteSpace(right) &&
+               string.Equals(
+                   left.Trim(),
+                   right.Trim(),
+                   StringComparison.OrdinalIgnoreCase);
 
         private bool ForwardLimitWouldDefer(
             IReadOnlyList<EmailAutomationRuleSettings> rules,
@@ -538,5 +700,9 @@ namespace Odmon.Worker.Services
             EmailAutomationCaseMatch CaseMatch,
             int? ClientNumber,
             string? ResolvedTargetEmail);
+
+        private sealed class ForwardLimitReachedException : Exception
+        {
+        }
     }
 }

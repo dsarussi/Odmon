@@ -4,6 +4,7 @@ namespace Odmon.Worker.Configuration
     {
         public bool Enabled { get; set; }
         public bool DryRun { get; set; } = true;
+        public bool RealForwardEnabled { get; set; }
         public int IntervalMinutes { get; set; } = 3;
         public int MaxMessagesPerCycle { get; set; } = 50;
         public int MaxForwardsPerCycle { get; set; } = 20;

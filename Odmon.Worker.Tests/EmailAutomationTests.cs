@@ -323,6 +323,224 @@ namespace Odmon.Worker.Tests
                      x.ResolvedTikCounter == 456);
         }
 
+        [Fact]
+        public async Task RealForwardDisabled_DoesNotForward()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(RealForwardMessage());
+            var settings = CreateSettings(
+                dryRun: false,
+                testForwardEnabled: false,
+                realForwardEnabled: false);
+
+            await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
+
+            Assert.Empty(graph.Forwards);
+            Assert.DoesNotContain(
+                db.EmailAutomationLogs,
+                x => x.Action == EmailAutomationActions.ForwardedToResolvedMailbox);
+        }
+
+        [Fact]
+        public async Task DryRunWithRealForwardEnabled_DoesNotForward()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(RealForwardMessage());
+            var settings = CreateSettings(
+                dryRun: true,
+                testForwardEnabled: false,
+                realForwardEnabled: true);
+
+            await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
+
+            Assert.Empty(graph.Forwards);
+            Assert.Contains(
+                db.EmailAutomationLogs,
+                x => x.Action == EmailAutomationActions.DryRunWouldForward &&
+                     x.ResolvedTargetEmail == "amir@ezer-law.com");
+        }
+
+        [Fact]
+        public async Task TestAndRealEnabled_ForwardsOnlyToTestMailbox()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(RealForwardMessage());
+            var settings = CreateSettings(
+                dryRun: false,
+                testForwardEnabled: true,
+                realForwardEnabled: true);
+
+            await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
+
+            Assert.Equal("odmon@ezer-law.com", Assert.Single(graph.Forwards).Target);
+            Assert.Contains(
+                db.EmailAutomationLogs,
+                x => x.Action == EmailAutomationActions.SkippedRealForwardBecauseTestModeEnabled &&
+                     x.ResolvedTargetEmail == "amir@ezer-law.com" &&
+                     x.ActualForwardTo == null);
+            Assert.DoesNotContain(
+                db.EmailAutomationLogs,
+                x => x.Action == EmailAutomationActions.ForwardedToResolvedMailbox);
+        }
+
+        [Fact]
+        public async Task TestForwardMode_IgnoresRealForwardLoopChecks()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(
+                RealForwardMessage(
+                    subject: "RE: Court update 123-45-67",
+                    sender: "amir@ezer-law.com",
+                    toRecipients: ["amir@ezer-law.com"],
+                    ccRecipients: ["amir@ezer-law.com"]));
+            var settings = CreateSettings(
+                dryRun: false,
+                testForwardEnabled: true,
+                realForwardEnabled: true);
+
+            await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
+
+            Assert.Equal("odmon@ezer-law.com", Assert.Single(graph.Forwards).Target);
+            Assert.Contains(
+                db.EmailAutomationLogs,
+                x => x.Action == EmailAutomationActions.ForwardedToTestMailbox);
+            Assert.DoesNotContain(
+                db.EmailAutomationLogs,
+                x => x.Action == EmailAutomationActions.SkippedTargetAlreadyRecipient ||
+                     x.Action == EmailAutomationActions.SkippedForwardOrReplyThread ||
+                     x.Action == EmailAutomationActions.SkippedSenderIsResolvedTarget);
+        }
+
+        [Fact]
+        public async Task RealForwardEnabled_ForwardsToResolvedMailbox()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(RealForwardMessage());
+            var settings = CreateSettings(
+                dryRun: false,
+                testForwardEnabled: false,
+                realForwardEnabled: true);
+
+            await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
+
+            Assert.Equal("amir@ezer-law.com", Assert.Single(graph.Forwards).Target);
+            var audit = Assert.Single(
+                db.EmailAutomationLogs.Where(
+                    x => x.Action == EmailAutomationActions.ForwardedToResolvedMailbox));
+            Assert.Equal("amir@ezer-law.com", audit.ResolvedTargetEmail);
+            Assert.Equal("amir@ezer-law.com", audit.ActualForwardTo);
+        }
+
+        [Fact]
+        public async Task TargetAlreadyInTo_SkipsRealForward()
+        {
+            await AssertRealForwardSkipAsync(
+                RealForwardMessage(toRecipients: ["amir@ezer-law.com"]),
+                EmailAutomationActions.SkippedTargetAlreadyRecipient);
+        }
+
+        [Fact]
+        public async Task TargetAlreadyInCc_SkipsRealForward()
+        {
+            await AssertRealForwardSkipAsync(
+                RealForwardMessage(ccRecipients: ["amir@ezer-law.com"]),
+                EmailAutomationActions.SkippedTargetAlreadyRecipient);
+        }
+
+        [Theory]
+        [InlineData("RE: Court update 123-45-67")]
+        [InlineData("FW: Court update 123-45-67")]
+        [InlineData("FWD: Court update 123-45-67")]
+        [InlineData("השב: Court update 123-45-67")]
+        [InlineData("הועבר: Court update 123-45-67")]
+        [InlineData("Case update FW: 123-45-67")]
+        public async Task ForwardOrReplySubject_SkipsRealForward(string subject)
+        {
+            await AssertRealForwardSkipAsync(
+                RealForwardMessage(subject: subject),
+                EmailAutomationActions.SkippedForwardOrReplyThread);
+        }
+
+        [Fact]
+        public async Task SenderIsResolvedTarget_SkipsRealForward()
+        {
+            await AssertRealForwardSkipAsync(
+                RealForwardMessage(sender: "amir@ezer-law.com"),
+                EmailAutomationActions.SkippedSenderIsResolvedTarget);
+        }
+
+        [Fact]
+        public async Task AutomationSender_SkipsRealForward()
+        {
+            await AssertRealForwardSkipAsync(
+                RealForwardMessage(sender: "odmon@ezer-law.com"),
+                EmailAutomationActions.SkippedAutomationGeneratedMessage);
+        }
+
+        [Fact]
+        public async Task RealForwardIdempotencyPreventsDuplicateForward()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(
+                RealForwardMessage("graph-1", "<same-real@test>"));
+            var settings = CreateSettings(
+                dryRun: false,
+                testForwardEnabled: false,
+                realForwardEnabled: true);
+            var service = CreateService(db, graph, settings);
+            await service.RunAsync(CancellationToken.None);
+
+            graph.Enqueue(
+                RealForwardMessage("graph-2", "<same-real@test>"),
+                "delta-2");
+            await service.RunAsync(CancellationToken.None);
+
+            Assert.Single(graph.Forwards);
+            Assert.Contains(
+                db.EmailAutomationLogs,
+                x => x.GraphMessageId == "graph-2" &&
+                     x.Action == EmailAutomationActions.SkippedAlreadyProcessed);
+        }
+
+        [Fact]
+        public async Task RealForwardLimit_DoesNotAdvanceDeltaPastEligibleMessage()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(RealForwardMessage());
+            var settings = CreateSettings(
+                dryRun: false,
+                testForwardEnabled: false,
+                realForwardEnabled: true);
+            settings.MaxForwardsPerCycle = 0;
+
+            await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
+
+            Assert.Empty(graph.Forwards);
+            var state = Assert.Single(db.EmailAutomationMailboxStates);
+            Assert.Null(state.DeltaLink);
+            Assert.Null(state.LastSuccessfulSyncUtc);
+        }
+
+        private static async Task AssertRealForwardSkipAsync(
+            EmailAutomationMessage message,
+            string expectedAction)
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(message);
+            var settings = CreateSettings(
+                dryRun: false,
+                testForwardEnabled: false,
+                realForwardEnabled: true);
+
+            await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
+
+            Assert.Empty(graph.Forwards);
+            var audit = Assert.Single(
+                db.EmailAutomationLogs.Where(x => x.Action == expectedAction));
+            Assert.Equal("amir@ezer-law.com", audit.ResolvedTargetEmail);
+            Assert.Null(audit.ActualForwardTo);
+        }
+
         private static EmailAutomationCaseMatch CaseMatch(string? clientVisualId)
             => new(456, "5/2000", clientVisualId);
 
@@ -334,6 +552,22 @@ namespace Odmon.Worker.Tests
                 "court@example.test",
                 ["amir@ezer-law.com"],
                 [],
+                BaselineUtc.AddMinutes(1));
+
+        private static EmailAutomationMessage RealForwardMessage(
+            string graphId = "graph-real",
+            string internetMessageId = "<real@test>",
+            string subject = "Court update 123-45-67",
+            string sender = "court@example.test",
+            IReadOnlyList<string>? toRecipients = null,
+            IReadOnlyList<string>? ccRecipients = null)
+            => new(
+                graphId,
+                internetMessageId,
+                subject,
+                sender,
+                toRecipients ?? ["intake@example.test"],
+                ccRecipients ?? [],
                 BaselineUtc.AddMinutes(1));
 
         private static IntegrationDbContext CreateDb()
@@ -379,11 +613,13 @@ namespace Odmon.Worker.Tests
 
         private static EmailAutomationSettings CreateSettings(
             bool dryRun,
-            bool testForwardEnabled)
+            bool testForwardEnabled,
+            bool realForwardEnabled = false)
             => new()
             {
                 Enabled = true,
                 DryRun = dryRun,
+                RealForwardEnabled = realForwardEnabled,
                 MaxMessagesPerCycle = 50,
                 MaxForwardsPerCycle = 20,
                 StartProcessingFromUtc = BaselineUtc,

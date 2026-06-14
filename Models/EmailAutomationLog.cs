@@ -30,7 +30,13 @@ namespace Odmon.Worker.Models
         public const string Matched = "Matched";
         public const string DryRunWouldForward = "DryRunWouldForward";
         public const string ForwardedToTestMailbox = "ForwardedToTestMailbox";
+        public const string ForwardedToResolvedMailbox = "ForwardedToResolvedMailbox";
         public const string SkippedAlreadyProcessed = "SkippedAlreadyProcessed";
+        public const string SkippedRealForwardBecauseTestModeEnabled = "SkippedRealForwardBecauseTestModeEnabled";
+        public const string SkippedTargetAlreadyRecipient = "SkippedTargetAlreadyRecipient";
+        public const string SkippedForwardOrReplyThread = "SkippedForwardOrReplyThread";
+        public const string SkippedSenderIsResolvedTarget = "SkippedSenderIsResolvedTarget";
+        public const string SkippedAutomationGeneratedMessage = "SkippedAutomationGeneratedMessage";
         public const string NoCaseMatch = "NoCaseMatch";
         public const string NoClientMatch = "NoClientMatch";
         public const string Failed = "Failed";
