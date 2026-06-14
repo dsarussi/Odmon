@@ -411,8 +411,37 @@ namespace Odmon.Worker.Tests
                      x.Action == EmailAutomationActions.SkippedSenderIsResolvedTarget);
         }
 
+        [Theory]
+        [InlineData("2\\123", "yonatan@ezer-law.com")]
+        [InlineData("999\\1", "eden@ezer-law.com")]
+        public async Task NonOwnerTarget_RealForwardEnabled_ForwardsToResolvedMailbox(
+            string clientVisualId,
+            string expectedTarget)
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(RealForwardMessage());
+            var settings = CreateSettings(
+                dryRun: false,
+                testForwardEnabled: false,
+                realForwardEnabled: true);
+
+            await CreateService(
+                db,
+                graph,
+                settings,
+                new FakeCaseResolver(CaseMatch(clientVisualId)))
+                .RunAsync(CancellationToken.None);
+
+            Assert.Equal(expectedTarget, Assert.Single(graph.Forwards).Target);
+            var audit = Assert.Single(
+                db.EmailAutomationLogs.Where(
+                    x => x.Action == EmailAutomationActions.ForwardedToResolvedMailbox));
+            Assert.Equal(expectedTarget, audit.ResolvedTargetEmail);
+            Assert.Equal(expectedTarget, audit.ActualForwardTo);
+        }
+
         [Fact]
-        public async Task RealForwardEnabled_ForwardsToResolvedMailbox()
+        public async Task MailboxOwnerTarget_SkipsWithoutError()
         {
             await using var db = CreateDb();
             var graph = new FakeGraphClient(RealForwardMessage());
@@ -423,28 +452,41 @@ namespace Odmon.Worker.Tests
 
             await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
 
-            Assert.Equal("amir@ezer-law.com", Assert.Single(graph.Forwards).Target);
+            Assert.Empty(graph.Forwards);
             var audit = Assert.Single(
                 db.EmailAutomationLogs.Where(
-                    x => x.Action == EmailAutomationActions.ForwardedToResolvedMailbox));
+                    x => x.Action == EmailAutomationActions.SkippedTargetIsMailboxOwner));
             Assert.Equal("amir@ezer-law.com", audit.ResolvedTargetEmail);
-            Assert.Equal("amir@ezer-law.com", audit.ActualForwardTo);
+            Assert.Null(audit.ActualForwardTo);
+            Assert.Null(audit.ErrorMessage);
         }
 
-        [Fact]
-        public async Task TargetAlreadyInTo_SkipsRealForward()
+        [Theory]
+        [InlineData("2\\123", "yonatan@ezer-law.com")]
+        [InlineData("999\\1", "eden@ezer-law.com")]
+        public async Task NonOwnerTargetAlreadyInTo_SkipsRealForward(
+            string clientVisualId,
+            string targetEmail)
         {
             await AssertRealForwardSkipAsync(
-                RealForwardMessage(toRecipients: ["amir@ezer-law.com"]),
-                EmailAutomationActions.SkippedTargetAlreadyRecipient);
+                RealForwardMessage(toRecipients: [targetEmail]),
+                EmailAutomationActions.SkippedTargetAlreadyRecipient,
+                clientVisualId,
+                targetEmail);
         }
 
-        [Fact]
-        public async Task TargetAlreadyInCc_SkipsRealForward()
+        [Theory]
+        [InlineData("2\\123", "yonatan@ezer-law.com")]
+        [InlineData("999\\1", "eden@ezer-law.com")]
+        public async Task NonOwnerTargetAlreadyInCc_SkipsRealForward(
+            string clientVisualId,
+            string targetEmail)
         {
             await AssertRealForwardSkipAsync(
-                RealForwardMessage(ccRecipients: ["amir@ezer-law.com"]),
-                EmailAutomationActions.SkippedTargetAlreadyRecipient);
+                RealForwardMessage(ccRecipients: [targetEmail]),
+                EmailAutomationActions.SkippedTargetAlreadyRecipient,
+                clientVisualId,
+                targetEmail);
         }
 
         [Theory]
@@ -458,15 +500,19 @@ namespace Odmon.Worker.Tests
         {
             await AssertRealForwardSkipAsync(
                 RealForwardMessage(subject: subject),
-                EmailAutomationActions.SkippedForwardOrReplyThread);
+                EmailAutomationActions.SkippedForwardOrReplyThread,
+                "2\\123",
+                "yonatan@ezer-law.com");
         }
 
         [Fact]
         public async Task SenderIsResolvedTarget_SkipsRealForward()
         {
             await AssertRealForwardSkipAsync(
-                RealForwardMessage(sender: "amir@ezer-law.com"),
-                EmailAutomationActions.SkippedSenderIsResolvedTarget);
+                RealForwardMessage(sender: "yonatan@ezer-law.com"),
+                EmailAutomationActions.SkippedSenderIsResolvedTarget,
+                "2\\123",
+                "yonatan@ezer-law.com");
         }
 
         [Fact]
@@ -474,7 +520,9 @@ namespace Odmon.Worker.Tests
         {
             await AssertRealForwardSkipAsync(
                 RealForwardMessage(sender: "odmon@ezer-law.com"),
-                EmailAutomationActions.SkippedAutomationGeneratedMessage);
+                EmailAutomationActions.SkippedAutomationGeneratedMessage,
+                "2\\123",
+                "yonatan@ezer-law.com");
         }
 
         [Fact]
@@ -487,7 +535,11 @@ namespace Odmon.Worker.Tests
                 dryRun: false,
                 testForwardEnabled: false,
                 realForwardEnabled: true);
-            var service = CreateService(db, graph, settings);
+            var service = CreateService(
+                db,
+                graph,
+                settings,
+                new FakeCaseResolver(CaseMatch("2\\123")));
             await service.RunAsync(CancellationToken.None);
 
             graph.Enqueue(
@@ -513,7 +565,12 @@ namespace Odmon.Worker.Tests
                 realForwardEnabled: true);
             settings.MaxForwardsPerCycle = 0;
 
-            await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
+            await CreateService(
+                db,
+                graph,
+                settings,
+                new FakeCaseResolver(CaseMatch("2\\123")))
+                .RunAsync(CancellationToken.None);
 
             Assert.Empty(graph.Forwards);
             var state = Assert.Single(db.EmailAutomationMailboxStates);
@@ -523,7 +580,9 @@ namespace Odmon.Worker.Tests
 
         private static async Task AssertRealForwardSkipAsync(
             EmailAutomationMessage message,
-            string expectedAction)
+            string expectedAction,
+            string clientVisualId,
+            string expectedTarget)
         {
             await using var db = CreateDb();
             var graph = new FakeGraphClient(message);
@@ -532,12 +591,17 @@ namespace Odmon.Worker.Tests
                 testForwardEnabled: false,
                 realForwardEnabled: true);
 
-            await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
+            await CreateService(
+                db,
+                graph,
+                settings,
+                new FakeCaseResolver(CaseMatch(clientVisualId)))
+                .RunAsync(CancellationToken.None);
 
             Assert.Empty(graph.Forwards);
             var audit = Assert.Single(
                 db.EmailAutomationLogs.Where(x => x.Action == expectedAction));
-            Assert.Equal("amir@ezer-law.com", audit.ResolvedTargetEmail);
+            Assert.Equal(expectedTarget, audit.ResolvedTargetEmail);
             Assert.Null(audit.ActualForwardTo);
         }
 

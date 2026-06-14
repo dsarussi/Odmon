@@ -385,6 +385,38 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
+                if (EmailEquals(message.Sender, AllowedTestRecipient))
+                {
+                    AddAudit(
+                        mailbox,
+                        rule.Name,
+                        message,
+                        item.Match.Value,
+                        resolvedTargetEmail,
+                        EmailAutomationActions.SkippedAutomationGeneratedMessage,
+                        "Sender is the ODMON automation mailbox.",
+                        resolution: resolution);
+                    continue;
+                }
+
+                if (EmailEquals(resolvedTargetEmail, mailbox))
+                {
+                    AddAudit(
+                        mailbox,
+                        rule.Name,
+                        message,
+                        item.Match.Value,
+                        resolvedTargetEmail,
+                        EmailAutomationActions.SkippedTargetIsMailboxOwner,
+                        resolution: resolution);
+                    _logger.LogInformation(
+                        "EMAILAUTOMATION real forwarding skipped because resolved target is the monitored mailbox owner. Mailbox={Mailbox}, RuleName={RuleName}, ResolvedTargetEmail={ResolvedTargetEmail}",
+                        mailbox,
+                        rule.Name,
+                        resolvedTargetEmail);
+                    continue;
+                }
+
                 if (IsRecipient(message.ToRecipients, resolvedTargetEmail) ||
                     IsRecipient(message.CcRecipients, resolvedTargetEmail))
                 {
@@ -424,20 +456,6 @@ namespace Odmon.Worker.Services
                         resolvedTargetEmail,
                         EmailAutomationActions.SkippedSenderIsResolvedTarget,
                         "Sender is the resolved target employee.",
-                        resolution: resolution);
-                    continue;
-                }
-
-                if (EmailEquals(message.Sender, AllowedTestRecipient))
-                {
-                    AddAudit(
-                        mailbox,
-                        rule.Name,
-                        message,
-                        item.Match.Value,
-                        resolvedTargetEmail,
-                        EmailAutomationActions.SkippedAutomationGeneratedMessage,
-                        "Sender is the ODMON automation mailbox.",
                         resolution: resolution);
                     continue;
                 }

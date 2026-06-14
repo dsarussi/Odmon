@@ -33,6 +33,7 @@ namespace Odmon.Worker.Models
         public const string ForwardedToResolvedMailbox = "ForwardedToResolvedMailbox";
         public const string SkippedAlreadyProcessed = "SkippedAlreadyProcessed";
         public const string SkippedRealForwardBecauseTestModeEnabled = "SkippedRealForwardBecauseTestModeEnabled";
+        public const string SkippedTargetIsMailboxOwner = "SkippedTargetIsMailboxOwner";
         public const string SkippedTargetAlreadyRecipient = "SkippedTargetAlreadyRecipient";
         public const string SkippedForwardOrReplyThread = "SkippedForwardOrReplyThread";
         public const string SkippedSenderIsResolvedTarget = "SkippedSenderIsResolvedTarget";
