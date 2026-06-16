@@ -12,6 +12,7 @@ using Odmon.Worker.Configuration;
 using Odmon.Worker.Data;
 using Odmon.Worker.Monday;
 using Odmon.Worker.Models;
+using Odmon.Worker.OdcanitAccess;
 
 namespace Odmon.Worker.Services
 {
@@ -27,6 +28,7 @@ namespace Odmon.Worker.Services
         private readonly HearingBackfillSettings _settings;
         private readonly ILogger<HearingBackfillService> _logger;
         private readonly MondayMappingReadService _mappingReader;
+        private readonly IOdcanitReader _odcanitReader;
 
         private const string StatusLabel = "תיק נמצא באמצע תהליך";
 
@@ -45,7 +47,8 @@ namespace Odmon.Worker.Services
             IMondayMetadataProvider metadataProvider,
             IOptions<HearingBackfillSettings> settings,
             ILogger<HearingBackfillService> logger,
-            MondayMappingReadService mappingReader)
+            MondayMappingReadService mappingReader,
+            IOdcanitReader odcanitReader)
         {
             _db = db;
             _mondayClient = mondayClient;
@@ -53,6 +56,7 @@ namespace Odmon.Worker.Services
             _settings = settings.Value;
             _logger = logger;
             _mappingReader = mappingReader;
+            _odcanitReader = odcanitReader;
         }
 
         public async Task<HearingBackfillResult> RunAsync(CancellationToken ct = default)
@@ -110,7 +114,12 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
                     _logger.LogWarning(ex, "HEARING BACKFILL | Could not fetch dropdown labels for {ColumnId}. ClientNumber column will be omitted for all rows.", ClientNumberColumnId);
                 }
 
-                var tikNumbers = batch.Select(r => r.TikNumber).Where(t => !string.IsNullOrWhiteSpace(t)).Distinct().ToList();
+                var tikNumbers = batch
+                    .Select(r => r.TikNumber)
+                    .Where(t => !string.IsNullOrWhiteSpace(t))
+                    .Select(t => t!)
+                    .Distinct()
+                    .ToList();
                 var alreadyMapped = new HashSet<string>(StringComparer.Ordinal);
                 if (tikNumbers.Count > 0)
                 {
@@ -119,7 +128,7 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
                         alreadyMapped.Add(t);
                 }
 
-                var nextTikCounterForBackfill = await GetNextBackfillTikCounterAsync(boardId, ct);
+                var resolvedTikCounters = await _odcanitReader.ResolveTikNumbersToCountersAsync(tikNumbers, ct);
 
                 foreach (var row in batch)
                 {
@@ -137,6 +146,17 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
 
                     try
                     {
+                        if (string.IsNullOrWhiteSpace(row.TikNumber) ||
+                            !resolvedTikCounters.TryGetValue(row.TikNumber.Trim(), out var realTikCounter) ||
+                            realTikCounter <= 0)
+                        {
+                            failed++;
+                            _logger.LogCritical(
+                                "HEARING BACKFILL | Mapping integrity failure: cannot resolve real Odcanit TikCounter for TikNumber={TikNumber}. Monday item will not be created.",
+                                row.TikNumber ?? "<null>");
+                            continue;
+                        }
+
                         var columnValues = BuildColumnValues(row, dropdownLabels, out var dropdownSkipped);
                         if (dropdownSkipped)
                             result.DropdownSkipped++;
@@ -149,7 +169,7 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
                         created++;
                         _logger.LogInformation("HEARING BACKFILL | Created TikNumber={TikNumber}, MondayItemId={MondayItemId}, status={Status}", row.TikNumber, mondayItemId, StatusLabel);
 
-                        await AddMappingAsync(boardId, mondayItemId, row.TikNumber, nextTikCounterForBackfill--, ct);
+                        await AddMappingAsync(boardId, mondayItemId, row.TikNumber, realTikCounter, ct);
                         alreadyMapped.Add(row.TikNumber ?? "");
                     }
                     catch (Exception ex)
@@ -181,24 +201,11 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
             return result;
         }
 
-        private async Task<int> GetNextBackfillTikCounterAsync(long boardId, CancellationToken ct)
-        {
-            var min = await _mappingReader.GetMinNegativeTikCounterAsync(boardId, ct);
-            return (min ?? 0) - 1;
-        }
-
         private async Task AddMappingAsync(long boardId, long mondayItemId, string? tikNumber, int tikCounter, CancellationToken ct)
         {
             try
             {
-                var mapping = new MondayItemMapping
-                {
-                    TikCounter = tikCounter,
-                    TikNumber = tikNumber,
-                    MondayItemId = mondayItemId,
-                    BoardId = boardId,
-                    CreatedAtUtc = DateTime.UtcNow
-                };
+                var mapping = CreateValidatedMapping(boardId, mondayItemId, tikNumber, tikCounter, DateTime.UtcNow);
                 _db.MondayItemMappings.Add(mapping);
                 await _db.SaveChangesAsync(ct);
             }
@@ -206,6 +213,25 @@ OFFSET {{0}} ROWS FETCH NEXT {{1}} ROWS ONLY";
             {
                 _logger.LogWarning(ex, "HEARING BACKFILL | Could not add MondayItemMapping for TikNumber={TikNumber}, MondayItemId={MondayItemId}. Dedup may fail on next run.", tikNumber, mondayItemId);
             }
+        }
+
+        internal static MondayItemMapping CreateValidatedMapping(
+            long boardId,
+            long mondayItemId,
+            string? tikNumber,
+            int tikCounter,
+            DateTime createdAtUtc)
+        {
+            var mapping = new MondayItemMapping
+            {
+                TikCounter = tikCounter,
+                TikNumber = tikNumber,
+                MondayItemId = mondayItemId,
+                BoardId = boardId,
+                CreatedAtUtc = createdAtUtc
+            };
+            MondayItemMappingIntegrityService.ValidateNewMapping(mapping, "HearingBackfill");
+            return mapping;
         }
 
         private Dictionary<string, object> BuildColumnValues(HearingBackfillApr2026 row, HashSet<string>? dropdownLabels, out bool dropdownSkipped)

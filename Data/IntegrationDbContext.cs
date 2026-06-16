@@ -37,6 +37,8 @@ namespace Odmon.Worker.Data
             modelBuilder.Entity<MondayItemMapping>()
                 .HasKey(m => m.Id);
             modelBuilder.Entity<MondayItemMapping>()
+                .ToTable(t => t.HasCheckConstraint("CK_MondayItemMappings_TikCounter_Positive", "[TikCounter] > 0"));
+            modelBuilder.Entity<MondayItemMapping>()
                 .HasIndex(m => m.TikCounter)
                 .IsUnique();
             modelBuilder.Entity<MondayItemMapping>()

@@ -518,7 +518,10 @@ namespace Odmon.Worker.Migrations
 
                     b.HasIndex("TikNumber", "BoardId");
 
-                    b.ToTable("MondayItemMappings");
+                    b.ToTable("MondayItemMappings", t =>
+                        {
+                            t.HasCheckConstraint("CK_MondayItemMappings_TikCounter_Positive", "[TikCounter] > 0");
+                        });
                 });
 
             modelBuilder.Entity("Odmon.Worker.Models.NetCourtDecisionAlert", b =>

@@ -122,6 +122,8 @@ namespace Odmon.Worker.Services
             }
 
             // ── ReadyForMonday gating: skip hearing sync for cases not ready for Monday ──
+            await ValidateMappingIdentityAsync(mappings, boardId, ct);
+
             var tikCountersForReadyCheck = mappings.Select(m => m.TikCounter).Distinct().ToList();
             var casesForReadyCheck = await _odcanitReader.GetCasesByTikCountersAsync(tikCountersForReadyCheck, ct);
             var readyTikCounters = new HashSet<int>(casesForReadyCheck.Where(c => c.IsReadyForMonday).Select(c => c.TikCounter));
@@ -475,6 +477,77 @@ namespace Odmon.Worker.Services
             return hearing.StartDate.HasValue
                    && !string.IsNullOrWhiteSpace(hearing.JudgeName)
                    && !string.IsNullOrWhiteSpace(hearing.City);
+        }
+
+        private async Task ValidateMappingIdentityAsync(
+            IReadOnlyCollection<MondayItemMapping> mappings,
+            long boardId,
+            CancellationToken ct)
+        {
+            var issues = new List<string>();
+
+            foreach (var mapping in mappings)
+            {
+                if (mapping.TikCounter <= 0)
+                {
+                    issues.Add($"Id={mapping.Id},Item={mapping.MondayItemId},TikCounter={mapping.TikCounter},TikNumber={mapping.TikNumber ?? "<null>"},Reason=non_positive_counter");
+                }
+
+                if (mapping.BoardId != boardId)
+                {
+                    issues.Add($"Id={mapping.Id},Item={mapping.MondayItemId},TikCounter={mapping.TikCounter},TikNumber={mapping.TikNumber ?? "<null>"},Reason=board_mismatch");
+                }
+
+                if (mapping.MondayItemId <= 0)
+                {
+                    issues.Add($"Id={mapping.Id},Item={mapping.MondayItemId},TikCounter={mapping.TikCounter},TikNumber={mapping.TikNumber ?? "<null>"},Reason=invalid_monday_item_id");
+                }
+
+                if (string.IsNullOrWhiteSpace(mapping.TikNumber))
+                {
+                    issues.Add($"Id={mapping.Id},Item={mapping.MondayItemId},TikCounter={mapping.TikCounter},TikNumber=<null>,Reason=missing_tik_number");
+                }
+            }
+
+            var tikNumbers = mappings
+                .Where(m => !string.IsNullOrWhiteSpace(m.TikNumber))
+                .Select(m => m.TikNumber!)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            var resolved = await _odcanitReader.ResolveTikNumbersToCountersAsync(tikNumbers, ct);
+            foreach (var mapping in mappings.Where(m => !string.IsNullOrWhiteSpace(m.TikNumber)))
+            {
+                if (!resolved.TryGetValue(mapping.TikNumber!.Trim(), out var realTikCounter))
+                {
+                    _logger.LogWarning(
+                        "HEARING_NEAREST | Mapping TikNumber could not be resolved by Odcanit reader; treating as inconclusive, not fatal. MappingId={MappingId}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikCounter={TikCounter}, TikNumber={TikNumber}",
+                        mapping.Id,
+                        mapping.BoardId,
+                        mapping.MondayItemId,
+                        mapping.TikCounter,
+                        mapping.TikNumber);
+                    continue;
+                }
+
+                if (mapping.TikCounter != realTikCounter)
+                {
+                    issues.Add($"Id={mapping.Id},Item={mapping.MondayItemId},TikCounter={mapping.TikCounter},TikNumber={mapping.TikNumber},RealTikCounter={realTikCounter},Reason=tik_counter_mismatch");
+                }
+            }
+
+            if (issues.Count == 0)
+            {
+                return;
+            }
+
+            var message =
+                $"HearingNearest mapping integrity failed for BoardId={boardId}. " +
+                "A hearing cancellation/transfer could be missed unless mappings use real Odcanit counters. " +
+                $"Issues={string.Join(" | ", issues.Take(20))}";
+
+            _logger.LogCritical("HEARING_NEAREST | {Message}", message);
+            throw new MondayItemMappingIntegrityException(message);
         }
 
         /// <summary>

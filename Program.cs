@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Threading;
 using System.Threading.Tasks;
 using Azure.Extensions.AspNetCore.Configuration.Secrets;
 using Azure.Identity;
@@ -144,6 +145,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddSingleton<IErrorNotifier, LogOnlyErrorNotifier>();
     services.AddSingleton<WorkerCoordinator>();
     services.AddScoped<MondayMappingReadService>();
+    services.AddScoped<MondayItemMappingIntegrityService>();
     services.AddScoped<HearingApprovalSyncService>();
     services.AddScoped<HearingNearestSyncService>();
     services.AddScoped<TokenResolverService>();
@@ -225,6 +227,7 @@ if (IsKeyVaultEnabled(appConfig))
 }
 
 await VerifyIntegrationDbConnectionAsync(host.Services);
+await VerifyMondayItemMappingIntegrityAsync(host.Services);
 
 await host.RunAsync();
 
@@ -403,6 +406,48 @@ static async Task VerifyIntegrationDbConnectionAsync(IServiceProvider services)
     {
         var logger2 = services.GetRequiredService<ILoggerFactory>().CreateLogger("IntegrationDbVerification");
         logger2.LogError(ex, "Failed to verify IntegrationDb connection. This may indicate a configuration or connectivity issue.");
+        throw;
+    }
+}
+
+static async Task VerifyMondayItemMappingIntegrityAsync(IServiceProvider services)
+{
+    using var scope = services.CreateScope();
+    var provider = scope.ServiceProvider;
+    var config = provider.GetRequiredService<IConfiguration>();
+    var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger("MondayItemMappingIntegrity");
+
+    var enabled = config.GetValue<bool?>("MappingIntegrity:StartupCheckEnabled") ?? true;
+    if (!enabled)
+    {
+        logger.LogWarning("MAPPING_INTEGRITY | Startup check disabled by MappingIntegrity:StartupCheckEnabled=false.");
+        return;
+    }
+
+    try
+    {
+        var integrity = provider.GetRequiredService<MondayItemMappingIntegrityService>();
+        await integrity.ThrowIfIntegrityBrokenAsync(CancellationToken.None);
+    }
+    catch (Exception ex)
+    {
+        logger.LogCritical(ex, "MAPPING_INTEGRITY | Critical mapping integrity failure during startup.");
+
+        try
+        {
+            var emailNotifier = provider.GetRequiredService<IEmailNotifier>();
+            emailNotifier.QueueCriticalAlert(
+                "MondayItemMappings integrity check failed",
+                ex.Message,
+                exceptionType: ex.GetType().Name,
+                source: "Startup",
+                alertType: "Mapping Integrity Failure");
+        }
+        catch (Exception alertEx)
+        {
+            logger.LogWarning(alertEx, "MAPPING_INTEGRITY | Failed to queue startup critical alert.");
+        }
+
         throw;
     }
 }

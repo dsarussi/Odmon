@@ -2756,6 +2756,7 @@ namespace Odmon.Worker.Services
             if (mapping != null)
             {
                 lookupMethod = "mapping_by_tikcounter_boardid";
+                MondayItemMappingIntegrityService.ValidateMappingMatchesCase(mapping, c, boardId, "SyncService.MappingLookup");
                 _logger.LogDebug(
                     "Found mapping by TikCounter+BoardId: TikCounter={TikCounter}, BoardId={BoardId}, MondayItemId={MondayItemId}, TikNumber={TikNumber}",
                     c.TikCounter, boardId, mapping.MondayItemId, mapping.TikNumber ?? "<null>");
@@ -2769,6 +2770,7 @@ namespace Odmon.Worker.Services
                 if (mapping != null)
                 {
                     lookupMethod = "mapping_by_tikcounter_fallback";
+                    MondayItemMappingIntegrityService.ValidateMappingMatchesCase(mapping, c, mapping.BoardId == 0 ? boardId : mapping.BoardId, "SyncService.MappingLookupFallback");
                     _logger.LogDebug(
                         "Found mapping by TikCounter fallback: TikCounter={TikCounter}, MondayItemId={MondayItemId}, ExistingTikNumber={ExistingTikNumber}, BoardId={BoardId}",
                         c.TikCounter, mapping.MondayItemId, mapping.TikNumber ?? "<null>", mapping.BoardId);
@@ -2878,6 +2880,7 @@ namespace Odmon.Worker.Services
                             HearingChecksum = ComputeHearingChecksum(c),
                             IsTest = testMode
                         };
+                        MondayItemMappingIntegrityService.ValidateNewMapping(mapping, "SyncService.ApiLookupCreateMapping");
                         _integrationDb.MondayItemMappings.Add(mapping);
                         var saveSw = Stopwatch.StartNew();
                         await _integrationDb.SaveChangesAsync(ct);
@@ -3045,6 +3048,7 @@ namespace Odmon.Worker.Services
                 IsTest = testMode,
                 CreatedAtUtc = DateTime.UtcNow
             };
+            MondayItemMappingIntegrityService.ValidateNewMapping(newMapping, "SyncService.CreateMondayItem");
             _integrationDb.MondayItemMappings.Add(newMapping);
 
             return mondayItemId;

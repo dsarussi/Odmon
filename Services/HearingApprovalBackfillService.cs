@@ -1,11 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Data;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -26,16 +24,15 @@ namespace Odmon.Worker.Services
     /// </summary>
     public class HearingApprovalBackfillService
     {
-        private const string NispahTypeName = "אישור הגעה לדיון";
+        private const string NispahTypeName = "××™×©×•×¨ ×”×’×¢×” ×œ×“×™×•×Ÿ";
         private const string StatusIndexApproved = "1";
         private const string StatusIndexRejected = "2";
-        private const string AnnexTextApproved = "אישר הגעה לדיון";
-        private const string AnnexTextRejected = "לא אישר הגעה לדיון";
+        private const string AnnexTextApproved = "××™×©×¨ ×”×’×¢×” ×œ×“×™×•×Ÿ";
+        private const string AnnexTextRejected = "×œ× ××™×©×¨ ×”×’×¢×” ×œ×“×™×•×Ÿ";
 
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
         private readonly IOdcanitWriter _odcanitWriter;
-        private readonly OdcanitDbContext _odcanitDb;
         private readonly MondaySettings _mondaySettings;
         private readonly HearingApprovalBackfillSettings _settings;
         private readonly ILogger<HearingApprovalBackfillService> _logger;
@@ -45,7 +42,6 @@ namespace Odmon.Worker.Services
             IntegrationDbContext integrationDb,
             IMondayClient mondayClient,
             IOdcanitWriter odcanitWriter,
-            OdcanitDbContext odcanitDb,
             IOptions<MondaySettings> mondayOptions,
             IOptions<HearingApprovalBackfillSettings> settings,
             ILogger<HearingApprovalBackfillService> logger,
@@ -54,7 +50,6 @@ namespace Odmon.Worker.Services
             _integrationDb = integrationDb;
             _mondayClient = mondayClient;
             _odcanitWriter = odcanitWriter;
-            _odcanitDb = odcanitDb;
             _mondaySettings = mondayOptions.Value;
             _settings = settings.Value;
             _logger = logger;
@@ -150,23 +145,13 @@ namespace Odmon.Worker.Services
 
             if (tikCounter <= 0)
             {
-                var resolved = await ResolveTikCounterFromOdcanitAsync(tikNumber, ct);
-                if (resolved == null)
-                {
-                    result.SkippedResolveFailed++;
-                    _logger.LogWarning(
-                        "HEARING_APPROVAL_BACKFILL | Cannot resolve real TikCounter for synthetic mapping: MappingTikCounter={MappingTikCounter}, TikNumber={TikNumber}, ItemId={ItemId} — skipping",
-                        tikCounter, tikNumber, itemId);
-                    return;
-                }
-
-                _logger.LogInformation(
-                    "HEARING_APPROVAL_BACKFILL | Resolved synthetic TikCounter: MappingTikCounter={MappingTikCounter} → RealTikCounter={RealTikCounter} via TikNumber={TikNumber}",
-                    tikCounter, resolved.Value, tikNumber);
-
-                tikCounter = resolved.Value;
-                result.Resolved++;
+                result.SkippedResolveFailed++;
+                _logger.LogCritical(
+                    "HEARING_APPROVAL_BACKFILL | Mapping integrity failure: non-positive TikCounter={TikCounter}, TikNumber={TikNumber}, ItemId={ItemId}. Refusing to write to Odcanit from an invalid mapping.",
+                    tikCounter, tikNumber, itemId);
+                return;
             }
+
 
             var currentIndex = await _mondayClient.GetHearingApprovalStatusAsync(itemId, ct);
 
@@ -216,7 +201,7 @@ namespace Odmon.Worker.Services
             {
                 result.SkippedDryRun++;
                 _logger.LogInformation(
-                    "HEARING_APPROVAL_BACKFILL | [dryrun] Would write: TikCounter={TikCounter}, ItemId={ItemId}, Text='{AnnexText}' — state NOT advanced",
+                    "HEARING_APPROVAL_BACKFILL | [dryrun] Would write: TikCounter={TikCounter}, ItemId={ItemId}, Text='{AnnexText}' â€” state NOT advanced",
                     tikCounter, itemId, annexText);
                 return;
             }
@@ -240,7 +225,7 @@ namespace Odmon.Worker.Services
 
                 result.Failed++;
                 _logger.LogError(ex,
-                    "HEARING_APPROVAL_BACKFILL | Annex write FAILED: TikCounter={TikCounter}, ItemId={ItemId}, Text='{AnnexText}' — state NOT advanced",
+                    "HEARING_APPROVAL_BACKFILL | Annex write FAILED: TikCounter={TikCounter}, ItemId={ItemId}, Text='{AnnexText}' â€” state NOT advanced",
                     tikCounter, itemId, annexText);
                 return;
             }
@@ -273,54 +258,6 @@ namespace Odmon.Worker.Services
             _logger.LogInformation(
                 "HEARING_APPROVAL_BACKFILL | Annex written + state updated: TikCounter={TikCounter}, ItemId={ItemId}, Text='{AnnexText}', Status={Status}",
                 tikCounter, itemId, annexText, currentIndex);
-        }
-
-        /// <summary>
-        /// Resolves a real (positive) TikCounter from Odcanit dbo.MainTik by TikNumber (VisualID).
-        /// Tries column "TikCounter" first, falls back to "Counter" for DB compatibility.
-        /// Returns null if no match or ambiguous.
-        /// </summary>
-        private async Task<int?> ResolveTikCounterFromOdcanitAsync(string tikNumber, CancellationToken ct)
-        {
-            var connection = _odcanitDb.Database.GetDbConnection();
-            var wasClosed = connection.State == ConnectionState.Closed;
-            if (wasClosed) await connection.OpenAsync(ct);
-
-            try
-            {
-                var result = await TryQueryMainTikAsync(connection, "TikCounter", tikNumber, ct);
-                if (result is > 0) return result;
-
-                result = await TryQueryMainTikAsync(connection, "Counter", tikNumber, ct);
-                if (result is > 0) return result;
-
-                return null;
-            }
-            finally
-            {
-                if (wasClosed && connection.State == ConnectionState.Open)
-                    await connection.CloseAsync();
-            }
-        }
-
-        private static async Task<int?> TryQueryMainTikAsync(
-            System.Data.Common.DbConnection connection, string columnName, string tikNumber, CancellationToken ct)
-        {
-            try
-            {
-                await using var cmd = (SqlCommand)connection.CreateCommand();
-                cmd.CommandText = $"SELECT TOP 1 [{columnName}] FROM dbo.MainTik WHERE VisualID = @TikVisualID";
-                cmd.CommandType = CommandType.Text;
-                cmd.CommandTimeout = 15;
-                cmd.Parameters.Add(new SqlParameter("@TikVisualID", SqlDbType.NVarChar, 50) { Value = tikNumber });
-
-                var scalar = await cmd.ExecuteScalarAsync(ct);
-                return scalar is int v ? v : null;
-            }
-            catch (SqlException ex) when (ex.Number == 207)
-            {
-                return null;
-            }
         }
 
         private static string? GetAnnexText(string statusIndex) => statusIndex switch

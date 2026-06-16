@@ -320,17 +320,5 @@ WHERE m.BoardId = @boardId
                 .ToListAsync(ct);
         }
 
-        /// <summary>Returns the smallest negative TikCounter for the board (backfill IDs), or null.</summary>
-        public async Task<int?> GetMinNegativeTikCounterAsync(long boardId, CancellationToken ct)
-        {
-            var rows = await _db.Database.SqlQueryRaw<int>(
-                @"SELECT MIN(TikCounter) AS [Value]
-FROM dbo.MondayItemMappings WITH (NOLOCK)
-WHERE BoardId = @boardId AND TikCounter < 0",
-                new SqlParameter("@boardId", boardId))
-                .ToListAsync(ct);
-
-            return rows.Count > 0 && rows[0] != 0 ? rows[0] : null;
-        }
     }
 }
