@@ -198,9 +198,20 @@ namespace Odmon.Worker.Workers
                     .Where(f => FailureClassifier.IsRealFailure(f.ErrorType, f.Operation))
                     .ToList();
                 var groupedFailures = realFailures
-                    .GroupBy(f => (CaseNumber: f.TikNumber ?? "", Operation: f.Operation ?? "", RootCause: f.ErrorType ?? "Unknown"))
-                    .Select(g => (g.Key.CaseNumber, g.Key.Operation, g.Key.RootCause, Count: g.Count(), FirstOccurrence: g.Min(x => x.OccurredAtUtc)))
-                    .OrderBy(x => x.FirstOccurrence)
+                    .GroupBy(f => (
+                        CaseNumber: f.TikNumber ?? "",
+                        Operation: f.Operation ?? "",
+                        RootCause: f.ErrorType ?? "Unknown",
+                        Message: NormalizeErrorMessage(f.ErrorMessage)))
+                    .Select(g => new DailySummaryFailureGroup(
+                        g.Key.CaseNumber,
+                        g.Key.Operation,
+                        g.Key.RootCause,
+                        g.Key.Message,
+                        g.Count(),
+                        g.Min(x => x.OccurredAtUtc),
+                        g.Max(x => x.OccurredAtUtc)))
+                    .OrderBy(x => x.FirstOccurrenceUtc)
                     .ToList();
                 var realFailureCount = groupedFailures.Count;
 
@@ -254,6 +265,10 @@ namespace Odmon.Worker.Workers
                 var highFailureNote = realFailureCount > 10 || totalRunFailures > 15;
 
                 var subject = $"ODMON Daily Summary — {yesterdayIsrael:yyyy-MM-dd}";
+                var knownBlockedTikVisualIds = _config
+                    .GetSection("Email:DailySummary:KnownBlockedTikVisualIds")
+                    .Get<string[]>() ?? Array.Empty<string>();
+                var configuredVoicenterHardLimit = _config.GetValue<int?>("VoicenterCallSummaries:WeeklyUsageHardLimit");
                 var body = BuildDailySummaryHtml(
                     yesterdayIsrael,
                     casesCreatedCount,
@@ -266,7 +281,10 @@ namespace Odmon.Worker.Workers
                     voicenterWritten, voicenterFailed, lastVcResult,
                     weeklyDetailReq, quotaExceededRecently,
                     circuitBreakerTripped,
-                    highFailureNote);
+                    highFailureNote,
+                    new DailySummaryRenderOptions(
+                        knownBlockedTikVisualIds,
+                        configuredVoicenterHardLimit));
 
                 if (_config.GetValue<bool>("Email:Enabled", false))
                 {
@@ -293,24 +311,34 @@ namespace Odmon.Worker.Workers
             return (startUtc, endUtc);
         }
 
-        private static string BuildDailySummaryHtml(
+        internal static string BuildDailySummaryHtml(
             DateOnly date,
             int casesCreatedCount,
             int hearingsSyncedCount,
             int itemsUpdatedCount,
             int realFailureCount,
-            List<(string CaseNumber, string Operation, string RootCause, int Count, DateTime FirstOccurrence)> groupedFailures,
+            List<DailySummaryFailureGroup> groupedFailures,
             int docIngestionSucceeded,
             List<MondayDocumentImport> docIngestionFailures,
             int voicenterWritten, List<NispahWriteLog> voicenterFailed, Voicenter.VoicenterRunResult? lastVcResult,
             int weeklyDetailReq, bool quotaExceededRecently,
             bool circuitBreakerTripped,
-            bool highFailureNote)
+            bool highFailureNote,
+            DailySummaryRenderOptions? options = null)
         {
             static string E(string s) => System.Net.WebUtility.HtmlEncode(s ?? string.Empty);
+            static string Cell(string? s) => E(string.IsNullOrWhiteSpace(s) ? "N/A" : s.Trim());
 
             var docFailTotal = docIngestionFailures.Count;
-            var docFailScene = docIngestionFailures.Count(d => string.Equals(d.ColumnId, "file_mkyet713", StringComparison.OrdinalIgnoreCase));
+            var docGroups = BuildDocumentFailureGroups(docIngestionFailures, options);
+            var actionableDocGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.Actionable).Take(10).ToList();
+            var staleDocGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.KnownStaleTimeout).ToList();
+            var knownBlockedGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.KnownBlocked).ToList();
+            var knownDataIssueGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.KnownDataIssue).ToList();
+            var actionableDocCount = actionableDocGroups.Sum(g => g.Count);
+            var staleDocCount = staleDocGroups.Sum(g => g.Count);
+            var knownBlockedCount = knownBlockedGroups.Sum(g => g.Count);
+            var knownDataIssueCount = knownDataIssueGroups.Sum(g => g.Count);
 
             // ---- Compute System Status from real signals ----
             // Critical: circuit breaker tripped, OR high failure burst
@@ -324,7 +352,10 @@ namespace Odmon.Worker.Workers
             var critical = circuitBreakerTripped || highFailureNote;
             var warning =
                 realFailureCount > 0
-                || docFailTotal > 0
+                || actionableDocCount > 0
+                || staleDocCount > 0
+                || knownBlockedCount > 0
+                || knownDataIssueCount > 0
                 || voicenterFailed.Count > 0
                 || voicenterQuotaExceeded
                 || (lastVcResult != null && lastVcResult.DetailFetchFailed > 0);
@@ -346,8 +377,11 @@ namespace Odmon.Worker.Workers
                 statusColor = "#b8860b";
                 var reasons = new List<string>();
                 if (voicenterQuotaExceeded) reasons.Add("Voicenter quota exceeded");
-                if (realFailureCount > 0) reasons.Add($"{realFailureCount} real failure(s)");
-                if (docFailTotal > 0) reasons.Add($"{docFailTotal} document ingestion failure(s)");
+                if (realFailureCount > 0) reasons.Add($"{realFailureCount} sync failure(s)");
+                if (actionableDocCount > 0) reasons.Add($"{actionableDocCount} actionable document ingestion failure(s)");
+                if (staleDocCount > 0) reasons.Add($"{staleDocCount} stale document timeout(s) grouped");
+                if (knownBlockedCount > 0) reasons.Add($"{knownBlockedCount} known blocked case failure(s)");
+                if (knownDataIssueCount > 0) reasons.Add($"{knownDataIssueCount} known data issue(s) still open");
                 if (voicenterFailed.Count > 0) reasons.Add($"{voicenterFailed.Count} Voicenter write failure(s)");
                 if (lastVcResult != null && lastVcResult.DetailFetchFailed > 0) reasons.Add($"{lastVcResult.DetailFetchFailed} Voicenter detail fetch failure(s)");
                 statusDetail = reasons.Count > 0
@@ -378,7 +412,7 @@ namespace Odmon.Worker.Workers
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Items updated yesterday</td><td style='padding:4px;'>{itemsUpdatedCount}</td></tr>");
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Document ingestion succeeded</td><td style='padding:4px;'>{docIngestionSucceeded}</td></tr>");
             var docFailStyle = docFailTotal > 0 ? "color:#d35400;font-weight:bold;" : "";
-            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Document ingestion failures</td><td style='padding:4px;{docFailStyle}'>{docFailTotal}{(docFailScene > 0 ? $" (scene-docs: {docFailScene})" : "")}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Document ingestion failures</td><td style='padding:4px;{docFailStyle}'>{docFailTotal}</td></tr>");
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Voicenter annexes written yesterday</td><td style='padding:4px;'>{voicenterWritten}</td></tr>");
             var failStyle = realFailureCount > 0 ? "color:red;font-weight:bold;" : "";
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Real failures yesterday</td><td style='padding:4px;{failStyle}'>{realFailureCount}</td></tr>");
@@ -392,10 +426,10 @@ namespace Odmon.Worker.Workers
             else
             {
                 sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;' cellpadding='6'>");
-                sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>Case Number</th><th style='border:1px solid #ddd;'>Operation</th><th style='border:1px solid #ddd;'>Root Cause</th><th style='border:1px solid #ddd;'>Count</th><th style='border:1px solid #ddd;'>First (UTC)</th></tr>");
+                sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>TikNumber</th><th style='border:1px solid #ddd;'>Operation</th><th style='border:1px solid #ddd;'>Exception type</th><th style='border:1px solid #ddd;'>Message / API response</th><th style='border:1px solid #ddd;'>Count</th><th style='border:1px solid #ddd;'>First (UTC)</th><th style='border:1px solid #ddd;'>Last (UTC)</th></tr>");
                 foreach (var g in groupedFailures)
                 {
-                    sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{E(g.CaseNumber)}</td><td style='border:1px solid #ddd;'>{E(g.Operation)}</td><td style='border:1px solid #ddd;'>{E(g.RootCause)}</td><td style='border:1px solid #ddd;'>{g.Count}</td><td style='border:1px solid #ddd;'>{g.FirstOccurrence:yyyy-MM-dd HH:mm}</td></tr>");
+                    sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{Cell(g.CaseNumber)}</td><td style='border:1px solid #ddd;'>{Cell(g.Operation)}</td><td style='border:1px solid #ddd;'>{Cell(g.ExceptionType)}</td><td style='border:1px solid #ddd;'>{Cell(Truncate(g.Message, 500))}</td><td style='border:1px solid #ddd;'>{g.Count}</td><td style='border:1px solid #ddd;'>{g.FirstOccurrenceUtc:yyyy-MM-dd HH:mm}</td><td style='border:1px solid #ddd;'>{g.LastOccurrenceUtc:yyyy-MM-dd HH:mm}</td></tr>");
                 }
                 sb.AppendLine("</table>");
             }
@@ -412,8 +446,12 @@ namespace Odmon.Worker.Workers
                 anomalies.Add("Worker circuit breaker tripped — incident alert was sent.");
             if (highFailureNote)
                 anomalies.Add("Unusually high failure count yesterday; review issues above.");
-            if (docFailTotal > 0)
-                anomalies.Add($"Document ingestion failure count > 0 ({docFailTotal}). See section below.");
+            if (actionableDocCount > 0)
+                anomalies.Add($"Actionable document ingestion failure count > 0 ({actionableDocCount}). See section below.");
+            if (staleDocCount > 0)
+                anomalies.Add($"{staleDocCount} known/stale document timeout(s) were grouped separately.");
+            if (knownDataIssueCount > 0)
+                anomalies.Add($"{knownDataIssueCount} known data issue(s) remain open and visible.");
 
             if (anomalies.Count > 0)
             {
@@ -432,7 +470,13 @@ namespace Odmon.Worker.Workers
                 sb.AppendLine("<p>None.</p>");
             else
             {
-                sb.AppendLine($"<p>Total: <b>{docFailTotal}</b>{(docFailScene > 0 ? $" &nbsp;|&nbsp; Column file_mkyet713 (scene docs): <b>{docFailScene}</b>" : "")}</p>");
+                sb.AppendLine($"<p>Total: <b>{docFailTotal}</b> &nbsp;|&nbsp; Actionable shown: <b>{actionableDocCount}</b> &nbsp;|&nbsp; Known/stale: <b>{staleDocCount}</b> &nbsp;|&nbsp; Known blocked: <b>{knownBlockedCount}</b> &nbsp;|&nbsp; Known data issues: <b>{knownDataIssueCount}</b></p>");
+                AppendDocumentFailureGroupTable(sb, "Actionable document ingestion failures", actionableDocGroups, Cell, E);
+                AppendDocumentFailureGroupTable(sb, "Known / stale document ingestion failures", staleDocGroups, Cell, E);
+                AppendDocumentFailureGroupTable(sb, "Known blocked cases", knownBlockedGroups, Cell, E);
+                AppendDocumentFailureGroupTable(sb, "Known data issues", knownDataIssueGroups, Cell, E);
+                if (docIngestionFailures.Count < 0)
+                {
                 sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;font-size:13px;' cellpadding='5'>");
                 sb.AppendLine("<tr style='background:#f5f5f5;'>"
                     + "<th style='border:1px solid #ddd;'>TikNumber</th>"
@@ -455,6 +499,7 @@ namespace Odmon.Worker.Workers
                         + "</tr>");
                 }
                 sb.AppendLine("</table>");
+                }
             }
 
             // ---- Voicenter Call Summaries (compact) ----
@@ -495,7 +540,11 @@ namespace Odmon.Worker.Workers
             var vcSkippedNoMatch = lastVcResult?.SkippedNoMatch ?? 0;
             var vcSkippedDup = lastVcResult?.SkippedDuplicate ?? 0;
             var vcSkippedQuota = lastVcResult?.SkippedDueToQuotaExceeded ?? 0;
-            var vcWeeklyLimit = lastVcResult?.WeeklyCallHistoryDetailLimit ?? 0;
+            var configuredHardLimit = options?.VoicenterWeeklyUsageHardLimit;
+            var vcWeeklyLimit = configuredHardLimit.GetValueOrDefault(400);
+            var vcWeeklyLimitConfigured = configuredHardLimit is > 0;
+            if (!vcWeeklyLimitConfigured)
+                vcWeeklyLimit = 0;
             var vcWeeklyWarn = lastVcResult?.WeeklyCallHistoryDetailWarningThreshold ?? 0;
             var vcUsageStyle = vcWeeklyWarn > 0 && weeklyDetailReq >= vcWeeklyWarn ? "color:#b8860b;font-weight:bold;" : "";
 
@@ -509,7 +558,11 @@ namespace Odmon.Worker.Workers
             var vcFailStyle = voicenterFailed.Count > 0 ? "color:red;font-weight:bold;" : "";
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Failed writes (yesterday)</td><td style='padding:4px;{vcFailStyle}'>{voicenterFailed.Count}</td></tr>");
             sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Status</td><td style='padding:4px;{vcStatusStyle}'>{E(vcStatus)}</td></tr>");
-            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Weekly CallHistoryDetail usage</td><td style='padding:4px;{vcUsageStyle}'>{weeklyDetailReq} / {vcWeeklyLimit}</td></tr>");
+            sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Weekly CallHistoryDetail usage</td><td style='padding:4px;{vcUsageStyle}'>{weeklyDetailReq} / {(vcWeeklyLimitConfigured ? vcWeeklyLimit.ToString() : "not configured")}</td></tr>");
+            if (!vcWeeklyLimitConfigured)
+            {
+                sb.AppendLine("<tr><td style='padding:4px 12px 4px 0;'>Voicenter quota config warning</td><td style='padding:4px;color:#b8860b;'>VoicenterCallSummaries:WeeklyUsageHardLimit is missing or zero; expected default is 400.</td></tr>");
+            }
             if (vcSkippedQuota > 0)
             {
                 sb.AppendLine($"<tr><td style='padding:4px 12px 4px 0;'>Skipped due to quota exceeded</td><td style='padding:4px;color:#c0392b;'>{vcSkippedQuota}</td></tr>");
@@ -519,6 +572,160 @@ namespace Odmon.Worker.Workers
             sb.AppendLine("<br/><small>Generated by ODMON Worker email monitor.</small>");
             sb.AppendLine("</body></html>");
             return sb.ToString();
+        }
+
+        internal sealed record DailySummaryRenderOptions(
+            IReadOnlyCollection<string> KnownBlockedTikVisualIds,
+            int? VoicenterWeeklyUsageHardLimit);
+
+        internal sealed record DailySummaryFailureGroup(
+            string CaseNumber,
+            string Operation,
+            string ExceptionType,
+            string Message,
+            int Count,
+            DateTime FirstOccurrenceUtc,
+            DateTime LastOccurrenceUtc);
+
+        private enum DocumentFailureCategory
+        {
+            Actionable,
+            KnownStaleTimeout,
+            KnownBlocked,
+            KnownDataIssue
+        }
+
+        private sealed record DocumentFailureGroup(
+            DocumentFailureCategory Category,
+            string TikVisualId,
+            string ColumnId,
+            string NormalizedError,
+            int Count,
+            DateTime FirstFailureUtc,
+            DateTime LastFailureUtc,
+            int MaxRetryCount,
+            IReadOnlyList<string> SampleFileNames);
+
+        private static List<DocumentFailureGroup> BuildDocumentFailureGroups(
+            IReadOnlyCollection<MondayDocumentImport> failures,
+            DailySummaryRenderOptions? options)
+        {
+            var knownBlocked = new HashSet<string>(
+                options?.KnownBlockedTikVisualIds ?? Array.Empty<string>(),
+                StringComparer.OrdinalIgnoreCase);
+
+            return failures
+                .Select(f => new
+                {
+                    Failure = f,
+                    Tik = string.IsNullOrWhiteSpace(f.TikVisualID) ? "N/A" : f.TikVisualID.Trim(),
+                    Column = string.IsNullOrWhiteSpace(f.ColumnId) ? "N/A" : f.ColumnId.Trim(),
+                    Error = NormalizeErrorMessage(f.ErrorMessage)
+                })
+                .GroupBy(x => new
+                {
+                    x.Tik,
+                    x.Column,
+                    x.Error,
+                    Category = ClassifyDocumentFailure(x.Tik, x.Column, x.Error, knownBlocked)
+                })
+                .Select(g => new DocumentFailureGroup(
+                    g.Key.Category,
+                    g.Key.Tik,
+                    g.Key.Column,
+                    g.Key.Error,
+                    g.Count(),
+                    g.Min(x => x.Failure.CreatedAtUtc),
+                    g.Max(x => x.Failure.UpdatedAtUtc),
+                    g.Max(x => x.Failure.RetryCount),
+                    g.Select(x => x.Failure.OriginalFileName)
+                        .Where(name => !string.IsNullOrWhiteSpace(name))
+                        .Select(name => name.Trim())
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .Take(3)
+                        .ToList()))
+                .OrderByDescending(g => g.LastFailureUtc)
+                .ToList();
+        }
+
+        private static DocumentFailureCategory ClassifyDocumentFailure(
+            string tikVisualId,
+            string columnId,
+            string normalizedError,
+            HashSet<string> knownBlocked)
+        {
+            if (knownBlocked.Contains(tikVisualId))
+                return DocumentFailureCategory.KnownBlocked;
+
+            if (tikVisualId.StartsWith("21/", StringComparison.OrdinalIgnoreCase) ||
+                tikVisualId.StartsWith("21\\", StringComparison.OrdinalIgnoreCase))
+                return DocumentFailureCategory.KnownDataIssue;
+
+            if (string.Equals(columnId, "file_mm1bvngc", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(normalizedError, "Timeout: 2h passed since status ready, no file", StringComparison.OrdinalIgnoreCase))
+                return DocumentFailureCategory.KnownStaleTimeout;
+
+            return DocumentFailureCategory.Actionable;
+        }
+
+        private static void AppendDocumentFailureGroupTable(
+            StringBuilder sb,
+            string title,
+            IReadOnlyCollection<DocumentFailureGroup> groups,
+            Func<string?, string> cell,
+            Func<string, string> encode)
+        {
+            if (groups.Count == 0)
+                return;
+
+            sb.AppendLine($"<h4 style='margin:12px 0 6px;'>{encode(title)}</h4>");
+            sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;font-size:13px;' cellpadding='5'>");
+            sb.AppendLine("<tr style='background:#f5f5f5;'>"
+                + "<th style='border:1px solid #ddd;'>TikNumber / TikVisualID</th>"
+                + "<th style='border:1px solid #ddd;'>ColumnId</th>"
+                + "<th style='border:1px solid #ddd;'>Count</th>"
+                + "<th style='border:1px solid #ddd;'>FirstFailureUtc</th>"
+                + "<th style='border:1px solid #ddd;'>LastFailureUtc</th>"
+                + "<th style='border:1px solid #ddd;'>SampleFileNames</th>"
+                + "<th style='border:1px solid #ddd;'>RetryCount</th>"
+                + "<th style='border:1px solid #ddd;'>LastError</th>"
+                + "</tr>");
+
+            foreach (var g in groups)
+            {
+                var sampleFiles = g.SampleFileNames.Count == 0
+                    ? "N/A"
+                    : string.Join(", ", g.SampleFileNames);
+
+                sb.AppendLine("<tr>"
+                    + $"<td style='border:1px solid #ddd;'>{cell(g.TikVisualId)}</td>"
+                    + $"<td style='border:1px solid #ddd;'>{cell(g.ColumnId)}</td>"
+                    + $"<td style='border:1px solid #ddd;'>{g.Count}</td>"
+                    + $"<td style='border:1px solid #ddd;'>{g.FirstFailureUtc:yyyy-MM-dd HH:mm}</td>"
+                    + $"<td style='border:1px solid #ddd;'>{g.LastFailureUtc:yyyy-MM-dd HH:mm}</td>"
+                    + $"<td style='border:1px solid #ddd;'>{cell(sampleFiles)}</td>"
+                    + $"<td style='border:1px solid #ddd;'>{g.MaxRetryCount}</td>"
+                    + $"<td style='border:1px solid #ddd;'>{cell(Truncate(g.NormalizedError, 500))}</td>"
+                    + "</tr>");
+            }
+
+            sb.AppendLine("</table>");
+        }
+
+        private static string NormalizeErrorMessage(string? message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return "N/A";
+
+            return string.Join(" ", message.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).Trim();
+        }
+
+        private static string Truncate(string? value, int maxLength)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "N/A";
+
+            return value.Length <= maxLength ? value : value[..maxLength] + "...";
         }
 
         // ================================================================
