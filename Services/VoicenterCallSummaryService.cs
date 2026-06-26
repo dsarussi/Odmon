@@ -1,7 +1,5 @@
-using System.Data;
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -18,16 +16,13 @@ namespace Odmon.Worker.Services
         private readonly VoicenterApiClient _api;
         private readonly IOdcanitWriter _odcanitWriter;
         private readonly IntegrationDbContext _integrationDb;
-        private readonly OdcanitDbContext _odcanitDb;
         private readonly VoicenterUsageTracker _usage;
+        private readonly IVoicenterCasePhoneResolver _phoneResolver;
         private readonly VoicenterCallSummarySettings _settings;
         private readonly VoicenterBackfillSettings _backfillSettings;
         private readonly ILogger<VoicenterCallSummaryService> _logger;
 
         internal const string SourceKind = "VoicenterCall";
-
-        private static readonly string[] WitnessFieldNames = ["סלולרי עד"];
-        private static readonly string[] ThirdPartyFieldNames = ["נייד צד ג'", "נייד צד ג", "Third-party driver: phone"];
 
         private static readonly Dictionary<string, string> StatusMap = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -43,8 +38,8 @@ namespace Odmon.Worker.Services
             VoicenterApiClient api,
             IOdcanitWriter odcanitWriter,
             IntegrationDbContext integrationDb,
-            OdcanitDbContext odcanitDb,
             VoicenterUsageTracker usage,
+            IVoicenterCasePhoneResolver phoneResolver,
             IOptions<VoicenterCallSummarySettings> settings,
             IOptions<VoicenterBackfillSettings> backfillSettings,
             ILogger<VoicenterCallSummaryService> logger)
@@ -52,8 +47,8 @@ namespace Odmon.Worker.Services
             _api = api;
             _odcanitWriter = odcanitWriter;
             _integrationDb = integrationDb;
-            _odcanitDb = odcanitDb;
             _usage = usage;
+            _phoneResolver = phoneResolver;
             _settings = settings.Value;
             _backfillSettings = backfillSettings.Value;
             _logger = logger;
@@ -135,6 +130,7 @@ namespace Odmon.Worker.Services
             // ─── Per-CDR processing loop ───
             int processedDetailRequests = 0;
             bool quotaHitDuringCycle = false;
+            var processedCallIds = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var cdr in cdrList)
             {
@@ -154,6 +150,7 @@ namespace Odmon.Worker.Services
                         cdr.Date, cdr.CallerNumber, cdr.TargetNumber);
                     continue;
                 }
+                processedCallIds.Add(cdr.CallID);
 
                 // 2. Already-quota-hit short circuit
                 if (quotaHitDuringCycle)
@@ -182,7 +179,7 @@ namespace Odmon.Worker.Services
                     .AsNoTracking()
                     .FirstOrDefaultAsync(s => s.CallId == cdr.CallID, ct);
 
-                if (existingState != null && IsTerminalStatus(existingState.Status) && !forceRecheck)
+                if (existingState != null && ShouldSkipExistingState(existingState, forceRecheck, DateTime.UtcNow))
                 {
                     if (existingState.Status == VoicenterCallProcessingStatus.Written
                         || existingState.Status == VoicenterCallProcessingStatus.Duplicate)
@@ -278,6 +275,9 @@ namespace Odmon.Worker.Services
                 await ProcessCallDetailAsync(detailResult.Data, result, dryRun, ct);
             }
 
+            if (!quotaHitDuringCycle)
+                await RetryDeferredStatesAsync(bearerToken, result, dryRun, processedCallIds, ct);
+
             await FinalizeWeeklyCountersAsync(result, ct);
 
             if (backfillMode)
@@ -372,20 +372,36 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            var matches = await FindCasesByPhoneAsync(normalizedPhone, ct);
+            var matches = await _phoneResolver.FindCasesByPhoneAsync(normalizedPhone, ct);
             if (matches.Count == 0)
             {
                 result.SkippedNoMatch++;
-                _logger.LogDebug("VOICENTER | Skip no case match | CallID={CallId}, Phone={Phone}",
-                    detail.CallId, MaskPhone(normalizedPhone));
+                _logger.LogInformation(
+                    "VOICENTER | Skip no case match after full Odcanit phone lookup | CallID={CallId}, Phone={Phone}, ResolverScope={ResolverScope}",
+                    detail.CallId,
+                    MaskPhone(normalizedPhone),
+                    _phoneResolver.ScopeName);
                 if (!dryRun)
                     await UpsertProcessingStateAsync(detail.CallId, VoicenterCallProcessingStatus.NoMatch,
-                        tikCounter: null, tikVisualId: null, lastError: "Phone matched no Odcanit cases", ct);
+                        tikCounter: null, tikVisualId: null, lastError: $"Phone matched no Odcanit cases; resolver scope={_phoneResolver.ScopeName}", ct);
                 return;
             }
 
-            _logger.LogInformation("VOICENTER | Matched {Count} case(s) | CallID={CallId}, Phone={Phone}",
-                matches.Count, detail.CallId, MaskPhone(normalizedPhone));
+            _logger.LogInformation(
+                "VOICENTER | Matched {Count} Odcanit case(s) | CallID={CallId}, Phone={Phone}, ResolverScope={ResolverScope}",
+                matches.Count,
+                detail.CallId,
+                MaskPhone(normalizedPhone),
+                _phoneResolver.ScopeName);
+            foreach (var match in matches)
+            {
+                _logger.LogInformation(
+                    "VOICENTER | Odcanit phone match | CallID={CallId}, TikNumber={TikNumber}, TikCounter={TikCounter}, MatchedField={MatchedField}",
+                    detail.CallId,
+                    match.TikNumber,
+                    match.TikCounter,
+                    match.MatchedField);
+            }
 
             var annexText = BuildAnnexText(detail);
             var callIdHash = CallIdToSourceItemId(detail.CallId);
@@ -484,6 +500,156 @@ namespace Odmon.Worker.Services
         }
 
         // ─── Local-state helpers ───
+
+        private bool ShouldSkipExistingState(VoicenterCallProcessingState state, bool forceRecheck, DateTime nowUtc)
+        {
+            if (!IsTerminalStatus(state.Status))
+                return false;
+
+            if (state.Status is VoicenterCallProcessingStatus.Written or VoicenterCallProcessingStatus.Duplicate)
+                return true;
+
+            if (forceRecheck)
+                return false;
+
+            if (state.Status == VoicenterCallProcessingStatus.QuotaExceeded)
+            {
+                var cutoff = nowUtc.AddDays(-Math.Max(0, _settings.ReprocessQuotaExceededLookbackDays));
+                return _settings.ReprocessQuotaExceededLookbackDays <= 0 || state.FirstSeenUtc < cutoff;
+            }
+
+            if (state.Status == VoicenterCallProcessingStatus.NoMatch)
+            {
+                var cutoff = nowUtc.AddDays(-Math.Max(0, _settings.ReprocessNoMatchLookbackDays));
+                return _settings.ReprocessNoMatchLookbackDays <= 0 || state.FirstSeenUtc < cutoff;
+            }
+
+            return true;
+        }
+
+        private async Task RetryDeferredStatesAsync(
+            string bearerToken,
+            VoicenterRunResult result,
+            bool dryRun,
+            HashSet<string> processedCallIds,
+            CancellationToken ct)
+        {
+            var candidates = await LoadDeferredRetryCandidatesAsync(processedCallIds, ct);
+            foreach (var state in candidates)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (await NispahLogsHaveSuccessForCallIdAsync(state.CallId, ct))
+                {
+                    result.SkippedDuplicateBeforeDetail++;
+                    _logger.LogDebug(
+                        "VOICENTER | Skip deferred retry duplicate before detail (NispahWriteLogs proof) | CallID={CallId}, State={State}",
+                        state.CallId,
+                        state.Status);
+                    await UpsertProcessingStateAsync(state.CallId, VoicenterCallProcessingStatus.Written,
+                        tikCounter: null, tikVisualId: null, lastError: null, ct);
+                    continue;
+                }
+
+                VoicenterApiResult<VoicenterCallDetail?> detailResult;
+                try
+                {
+                    _logger.LogInformation(
+                        "VOICENTER | Deferred retry fetching CallHistoryDetail | CallID={CallId}, PriorState={State}",
+                        state.CallId,
+                        state.Status);
+                    detailResult = await _api.FetchCallDetailAsync(bearerToken, state.CallId, ct);
+                }
+                catch (VoicenterQuotaExceededException qx)
+                {
+                    result.ApiLimitExceeded = true;
+                    result.SkippedDueToQuotaExceeded++;
+                    await _usage.RecordRequestAsync(
+                        VoicenterEndpointType.CallHistoryDetail,
+                        state.CallId, qx.HttpStatus, success: false, quotaExceeded: true,
+                        errorMessage: qx.Message, correlationId: null, ct);
+                    await UpsertProcessingStateAsync(state.CallId, VoicenterCallProcessingStatus.QuotaExceeded,
+                        tikCounter: null, tikVisualId: null, lastError: qx.Message, ct);
+                    _logger.LogWarning(
+                        "VOICENTER | Quota exceeded during deferred retry; stopping deferred retries | CallID={CallId}",
+                        state.CallId);
+                    return;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    result.DetailFetchFailed++;
+                    result.Failed++;
+                    if (result.FailedCallIds.Count < 20)
+                        result.FailedCallIds.Add(state.CallId);
+                    await _usage.RecordRequestAsync(
+                        VoicenterEndpointType.CallHistoryDetail,
+                        state.CallId, httpStatus: null, success: false, quotaExceeded: false,
+                        errorMessage: ex.Message, correlationId: null, ct);
+                    await UpsertProcessingStateAsync(state.CallId, VoicenterCallProcessingStatus.Failed,
+                        tikCounter: null, tikVisualId: null, lastError: ex.Message, ct);
+                    _logger.LogError(ex, "VOICENTER | Deferred detail fetch threw | CallID={CallId}", state.CallId);
+                    continue;
+                }
+
+                result.CallHistoryDetailRequestsThisRun++;
+                await _usage.RecordRequestAsync(
+                    VoicenterEndpointType.CallHistoryDetail,
+                    state.CallId,
+                    detailResult.HttpStatus,
+                    success: detailResult.Success,
+                    quotaExceeded: false,
+                    errorMessage: detailResult.ErrorMessage,
+                    correlationId: null,
+                    ct);
+
+                if (!detailResult.Success || detailResult.Data is null)
+                {
+                    result.DetailFetchFailed++;
+                    await UpsertProcessingStateAsync(state.CallId, VoicenterCallProcessingStatus.Failed,
+                        tikCounter: null, tikVisualId: null,
+                        lastError: detailResult.ErrorMessage ?? "Detail fetch returned no payload", ct);
+                    continue;
+                }
+
+                result.DetailsFetched++;
+                await ProcessCallDetailAsync(detailResult.Data, result, dryRun, ct);
+            }
+        }
+
+        private async Task<List<VoicenterCallProcessingState>> LoadDeferredRetryCandidatesAsync(
+            HashSet<string> processedCallIds,
+            CancellationToken ct)
+        {
+            var nowUtc = DateTime.UtcNow;
+            var query = _integrationDb.VoicenterCallProcessingStates.AsNoTracking();
+            var candidates = new List<VoicenterCallProcessingState>();
+
+            if (_settings.ReprocessQuotaExceededLookbackDays > 0)
+            {
+                var cutoff = nowUtc.AddDays(-_settings.ReprocessQuotaExceededLookbackDays);
+                candidates.AddRange(await query
+                    .Where(s => s.Status == VoicenterCallProcessingStatus.QuotaExceeded && s.FirstSeenUtc >= cutoff)
+                    .OrderBy(s => s.FirstSeenUtc)
+                    .ToListAsync(ct));
+            }
+
+            if (_settings.ReprocessNoMatchLookbackDays > 0)
+            {
+                var cutoff = nowUtc.AddDays(-_settings.ReprocessNoMatchLookbackDays);
+                candidates.AddRange(await query
+                    .Where(s => s.Status == VoicenterCallProcessingStatus.NoMatch && s.FirstSeenUtc >= cutoff)
+                    .OrderBy(s => s.FirstSeenUtc)
+                    .ToListAsync(ct));
+            }
+
+            return candidates
+                .Where(s => !processedCallIds.Contains(s.CallId))
+                .GroupBy(s => s.CallId, StringComparer.Ordinal)
+                .Select(g => g.First())
+                .Take(Math.Max(0, _settings.MaxDeferredReprocessCallsPerRun))
+                .ToList();
+        }
 
         private static bool IsTerminalStatus(string status) =>
             status is VoicenterCallProcessingStatus.Written
@@ -603,61 +769,6 @@ namespace Odmon.Worker.Services
 
             if (digits.Length < 9 || digits.Length > 11) return null;
             return digits;
-        }
-
-        // ─── Odcanit phone matching (direct SQL against vwExportToOuterSystems_UserData) ───
-
-        private async Task<List<CasePhoneMatch>> FindCasesByPhoneAsync(string normalizedPhone, CancellationToken ct)
-        {
-            var allFieldNames = WitnessFieldNames.Concat(ThirdPartyFieldNames).ToArray();
-            var matches = new List<CasePhoneMatch>();
-
-            var connection = _odcanitDb.Database.GetDbConnection();
-            if (connection.State != ConnectionState.Open)
-                await connection.OpenAsync(ct);
-
-            await using var command = connection.CreateCommand();
-            command.CommandTimeout = 30;
-
-            var paramNames = new string[allFieldNames.Length];
-            for (int i = 0; i < allFieldNames.Length; i++)
-            {
-                paramNames[i] = $"@fn{i}";
-                command.Parameters.Add(new SqlParameter(paramNames[i], SqlDbType.NVarChar, 200) { Value = allFieldNames[i] });
-            }
-
-            command.CommandText = $@"
-SELECT DISTINCT f.TikCounter, f.TikNumber, ud.FieldName, ud.strData
-FROM vwExportToOuterSystems_UserData ud WITH (NOLOCK)
-INNER JOIN vwExportToOuterSystems_Files f WITH (NOLOCK) ON f.TikCounter = ud.TikCounter
-WHERE ud.FieldName IN ({string.Join(", ", paramNames)})
-  AND ud.strData IS NOT NULL AND LEN(LTRIM(RTRIM(ud.strData))) > 0";
-
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                var tikCounter = reader.GetInt32(0);
-                var tikNumber = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                var fieldName = reader.IsDBNull(2) ? "" : reader.GetString(2);
-                var phoneValue = reader.IsDBNull(3) ? "" : reader.GetString(3);
-
-                var normalizedDbPhone = NormalizeIsraeliPhone(phoneValue);
-                if (normalizedDbPhone == null || normalizedDbPhone != normalizedPhone)
-                    continue;
-
-                var matchedField = WitnessFieldNames.Contains(fieldName) ? "WitnessMobile" : "ThirdPartyDriverMobile";
-                if (!matches.Any(m => m.TikCounter == tikCounter))
-                {
-                    matches.Add(new CasePhoneMatch
-                    {
-                        TikCounter = tikCounter,
-                        TikNumber = tikNumber,
-                        MatchedField = matchedField,
-                    });
-                }
-            }
-
-            return matches;
         }
 
         // ─── Annex text ───

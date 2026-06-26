@@ -46,5 +46,20 @@ namespace Odmon.Worker.Configuration
 
         /// <summary>If false, no warning email is sent even when threshold is reached.</summary>
         public bool UsageWarningEmailEnabled { get; set; } = true;
+
+        /// <summary>Retry calls that were skipped after CallHistoryDetail quota was exhausted. 0 disables.</summary>
+        public int ReprocessQuotaExceededLookbackDays { get; set; } = 14;
+
+        /// <summary>Retry recent NoMatch calls after resolver/phone-data changes. 0 disables.</summary>
+        public int ReprocessNoMatchLookbackDays { get; set; } = 0;
+
+        /// <summary>Hard cap for deferred state retries per cycle.</summary>
+        public int MaxDeferredReprocessCallsPerRun { get; set; } = 50;
+
+        /// <summary>
+        /// Odcanit UserData field names that may contain phone numbers for Voicenter matching.
+        /// When empty, the resolver uses its built-in Odcanit phone-field allowlist.
+        /// </summary>
+        public string[] PhoneFieldNames { get; set; } = [];
     }
 }

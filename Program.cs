@@ -190,6 +190,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddHttpClient("VoicenterDetail");
     services.AddSingleton<VoicenterApiClient>();
     services.AddScoped<VoicenterUsageTracker>();
+    services.AddScoped<IVoicenterCasePhoneResolver, OdcanitVoicenterCasePhoneResolver>();
     services.AddScoped<VoicenterCallSummaryService>();
     services.AddHostedService<VoicenterCallSummaryWorker>();
 
