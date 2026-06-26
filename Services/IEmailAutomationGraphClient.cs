@@ -14,6 +14,7 @@ namespace Odmon.Worker.Services
             string mailbox,
             string graphMessageId,
             string targetEmail,
+            string? comment,
             CancellationToken cancellationToken);
     }
 

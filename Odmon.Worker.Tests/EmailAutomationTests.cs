@@ -238,6 +238,7 @@ namespace Odmon.Worker.Tests
             Assert.Equal(5, audit.ResolvedClientNumber);
             Assert.Equal("123-45-67", audit.DetectedCourtCaseNumber);
             Assert.Equal("odmon@ezer-law.com", Assert.Single(graph.Forwards).Target);
+            Assert.Equal("ODMON email automation test forward", Assert.Single(graph.ForwardComments));
         }
 
         [Theory]
@@ -433,6 +434,7 @@ namespace Odmon.Worker.Tests
                 .RunAsync(CancellationToken.None);
 
             Assert.Equal(expectedTarget, Assert.Single(graph.Forwards).Target);
+            Assert.True(string.IsNullOrEmpty(Assert.Single(graph.ForwardComments)));
             var audit = Assert.Single(
                 db.EmailAutomationLogs.Where(
                     x => x.Action == EmailAutomationActions.ForwardedToResolvedMailbox));
@@ -739,6 +741,7 @@ namespace Odmon.Worker.Tests
                 string mailbox,
                 string graphMessageId,
                 string targetEmail,
+                string? comment,
                 CancellationToken cancellationToken)
             {
                 if (ThrottleForward)
@@ -747,8 +750,11 @@ namespace Odmon.Worker.Tests
                 }
 
                 Forwards.Add((mailbox, graphMessageId, targetEmail));
+                ForwardComments.Add(comment);
                 return Task.CompletedTask;
             }
+
+            public List<string?> ForwardComments { get; } = new();
         }
 
         private sealed class FixedTimeProvider(DateTime utcNow) : TimeProvider

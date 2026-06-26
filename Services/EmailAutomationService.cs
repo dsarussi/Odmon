@@ -557,6 +557,9 @@ namespace Odmon.Worker.Services
                     mailbox,
                     message.Id,
                     targetEmail,
+                    string.Equals(forwardMode, "test", StringComparison.OrdinalIgnoreCase)
+                        ? "ODMON email automation test forward"
+                        : null,
                     cancellationToken);
                 forwardAudit.ProcessedAtUtc = UtcNow();
                 return 1;

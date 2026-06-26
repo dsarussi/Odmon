@@ -210,6 +210,13 @@ WHERE m.BoardId = @boardId
         public Task<MondayItemMapping?> FindReadOnlyAsync(
             int tikCounter, long boardId, CancellationToken ct)
         {
+            if (!_db.Database.IsRelational())
+            {
+                return _db.MondayItemMappings
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(m => m.TikCounter == tikCounter && m.BoardId == boardId, ct);
+            }
+
             return _db.MondayItemMappings
                 .FromSqlRaw(
                     "SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE TikCounter = {0} AND BoardId = {1}",

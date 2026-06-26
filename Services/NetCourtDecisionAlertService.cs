@@ -235,7 +235,7 @@ namespace Odmon.Worker.Services
                     row.IntendedRecipientEmail = null;
                     row.ActualRecipientEmail = null;
                     row.EmailMode = NormalizeEmailMode();
-                    row.ErrorMessage = $"No recipient mapping for client number {row.ClientNumber?.ToString() ?? "<null>"}.";
+                    row.ErrorMessage = $"SkippedMissingRouting: No recipient mapping for client number {row.ClientNumber?.ToString() ?? "<null>"}.";
                     result.MissingRouting++;
                     _logger.LogWarning(
                         "NETCOURT missing routing; alert skipped. Identity={Identity}, TikNumber={TikNumber}, ClientNumber={ClientNumber}, FallbackEnabled={FallbackEnabled}",
@@ -259,6 +259,10 @@ namespace Odmon.Worker.Services
                     _settings.IsTestMode,
                     intendedRecipient);
                 var attachmentResult = await ResolveAttachmentAsync(row, ct);
+                if (attachmentResult.Classification == "AttachmentSkippedTooLarge")
+                {
+                    row.ErrorMessage = "AttachmentSkippedTooLarge: Decision attachment exceeded the configured size limit; email was queued without attachment.";
+                }
                 if (!string.IsNullOrWhiteSpace(attachmentResult.HebrewFailureReason))
                 {
                     body += $"{Environment.NewLine}{Environment.NewLine}" +
@@ -325,7 +329,8 @@ namespace Odmon.Worker.Services
                     string.IsNullOrWhiteSpace(resolved.FileName))
                 {
                     return AttachmentResolution.Unavailable(
-                        TranslateAttachmentFailureReason(resolved.ErrorMessage));
+                        TranslateAttachmentFailureReason(resolved.ErrorMessage),
+                        ClassifyAttachmentFailure(resolved.ErrorMessage));
                 }
 
                 return AttachmentResolution.Available(
@@ -350,6 +355,16 @@ namespace Odmon.Worker.Services
                 return AttachmentResolution.Unavailable(
                     "לא ניתן היה לקרוא את קובץ ההחלטה");
             }
+        }
+
+        private static string? ClassifyAttachmentFailure(string? reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason))
+                return null;
+            return reason.Contains("size", StringComparison.OrdinalIgnoreCase) ||
+                   reason.Contains("too large", StringComparison.OrdinalIgnoreCase)
+                ? "AttachmentSkippedTooLarge"
+                : null;
         }
 
         private string[] BuildBccRecipients()
@@ -534,16 +549,17 @@ namespace Odmon.Worker.Services
 
         private sealed record AttachmentResolution(
             IReadOnlyCollection<EmailAttachmentDescriptor> Attachments,
-            string? HebrewFailureReason)
+            string? HebrewFailureReason,
+            string? Classification)
         {
             public static AttachmentResolution Disabled { get; } =
-                new(Array.Empty<EmailAttachmentDescriptor>(), null);
+                new(Array.Empty<EmailAttachmentDescriptor>(), null, null);
 
             public static AttachmentResolution Available(EmailAttachmentDescriptor attachment)
-                => new(new[] { attachment }, null);
+                => new(new[] { attachment }, null, null);
 
-            public static AttachmentResolution Unavailable(string reason)
-                => new(Array.Empty<EmailAttachmentDescriptor>(), reason);
+            public static AttachmentResolution Unavailable(string reason, string? classification = null)
+                => new(Array.Empty<EmailAttachmentDescriptor>(), reason, classification);
         }
     }
 

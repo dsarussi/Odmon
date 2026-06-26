@@ -85,13 +85,14 @@ namespace Odmon.Worker.Services
             string mailbox,
             string graphMessageId,
             string targetEmail,
+            string? comment,
             CancellationToken cancellationToken)
         {
             var url =
                 $"users/{Uri.EscapeDataString(mailbox)}/messages/{Uri.EscapeDataString(graphMessageId)}/forward";
             var payload = JsonSerializer.Serialize(new
             {
-                comment = "ODMON email automation test forward",
+                comment = comment ?? string.Empty,
                 toRecipients = new[]
                 {
                     new { emailAddress = new { address = targetEmail } }

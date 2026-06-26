@@ -1,4 +1,5 @@
 using Odmon.Worker.Models;
+using Odmon.Worker.Services;
 using Odmon.Worker.Voicenter;
 using Odmon.Worker.Workers;
 using Xunit;
@@ -57,7 +58,7 @@ namespace Odmon.Worker.Tests
 
             var html = Render(docs: docs);
 
-            Assert.Contains("Known / stale document ingestion failures", html);
+            Assert.Contains("Known/Stale document ingestion failures", html);
             Assert.Contains("<td style='border:1px solid #ddd;'>12</td>", html);
             Assert.DoesNotContain("Actionable document ingestion failures</h4>", html);
         }
@@ -177,15 +178,75 @@ namespace Odmon.Worker.Tests
 
             Assert.Contains("59 / 400", html);
             Assert.DoesNotContain("59 / 0", html);
-            Assert.Contains("Known / stale document ingestion failures", html);
+            Assert.Contains("Known/Stale document ingestion failures", html);
             Assert.Contains("Known blocked cases", html);
             Assert.Contains("Known data issues", html);
             Assert.Contains("Column value invalid for status column", html);
         }
 
+        [Fact]
+        public void KnownAndSkippedFailures_RenderOutsideIssuesRequiringAttention()
+        {
+            var html = Render(
+                knownDataIssues: new[]
+                {
+                    new EmailBackgroundService.DailySummaryFailureGroup(
+                        "21/100",
+                        "update",
+                        "KnownBlockedClient",
+                        "Client 21 has no explicit DocumentType business rule.",
+                        2,
+                        new DateTime(2026, 6, 1, 8, 0, 0),
+                        new DateTime(2026, 6, 1, 9, 0, 0))
+                },
+                skippedExpected: new[]
+                {
+                    new EmailBackgroundService.DailySummaryFailureGroup(
+                        "23/159",
+                        "netcourt_skipped_missing_routing",
+                        "SkippedMissingRouting",
+                        "No recipient mapping for client number 23.",
+                        3,
+                        new DateTime(2026, 6, 1, 8, 0, 0),
+                        new DateTime(2026, 6, 1, 9, 0, 0))
+                });
+
+            Assert.Contains("Known Data Issues", html);
+            Assert.Contains("KnownBlockedClient", html);
+            Assert.Contains("Skipped Expected", html);
+            Assert.Contains("SkippedMissingRouting", html);
+            Assert.Contains("Issues Requiring Attention</h3>\r\n<p>None.</p>", html);
+        }
+
+        [Fact]
+        public void InvalidUserFileAndHttp503_RenderInSeparateDocumentBuckets()
+        {
+            var html = Render(
+                docs: new[]
+                {
+                    Doc("5/1", "file_col", "bad.zip", "DENYLIST_EXTENSION; zip"),
+                    Doc("5/2", "file_col", "asset.pdf", "Monday asset download failed with HTTP 503")
+                });
+
+            Assert.Contains("Invalid user file document ingestion failures", html);
+            Assert.Contains("External transient document ingestion failures", html);
+            Assert.DoesNotContain("Actionable document ingestion failures</h4>", html);
+        }
+
+        [Fact]
+        public void FailureClassifier_ExcludesKnownAndSkippedFromRealFailures()
+        {
+            Assert.False(FailureClassifier.IsRealFailure("KnownBlockedClient", "update"));
+            Assert.False(FailureClassifier.IsRealFailure("SkippedMissingRouting", "netcourt_skipped_missing_routing"));
+            Assert.True(FailureClassifier.IsRealFailure("MappingIntegrityMismatch", "update"));
+            Assert.True(FailureClassifier.IsRealFailure("MondayApiException", "update"));
+        }
+
         private static string Render(
             IEnumerable<MondayDocumentImport>? docs = null,
             IEnumerable<EmailBackgroundService.DailySummaryFailureGroup>? failures = null,
+            IEnumerable<EmailBackgroundService.DailySummaryFailureGroup>? knownDataIssues = null,
+            IEnumerable<EmailBackgroundService.DailySummaryFailureGroup>? skippedExpected = null,
             int weeklyDetailReq = 0,
             EmailBackgroundService.DailySummaryRenderOptions? options = null)
         {
@@ -205,7 +266,9 @@ namespace Odmon.Worker.Tests
                 quotaExceededRecently: false,
                 circuitBreakerTripped: false,
                 highFailureNote: false,
-                options: options ?? new EmailBackgroundService.DailySummaryRenderOptions(Array.Empty<string>(), 400));
+                options: options ?? new EmailBackgroundService.DailySummaryRenderOptions(Array.Empty<string>(), 400),
+                knownDataIssueFailures: knownDataIssues?.ToList(),
+                skippedExpectedFailures: skippedExpected?.ToList());
         }
 
         private static MondayDocumentImport Doc(

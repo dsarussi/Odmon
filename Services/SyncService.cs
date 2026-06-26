@@ -2630,6 +2630,12 @@ namespace Odmon.Worker.Services
                     $"Cannot determine DocumentType: failed to parse ClientNumber from ClientVisualID '{clientVisualID ?? "<null>"}'.");
             }
 
+            if (clientNumber.Value == 21)
+            {
+                throw new InvalidOperationException(
+                    $"KNOWN_BLOCKED_CLIENT: Cannot determine DocumentType for ClientNumber 21 (from ClientVisualID '{clientVisualID}'); no explicit business rule is configured.");
+            }
+
             var (docType, _) = DocumentTypeMap.ResolveDocumentType(clientNumber.Value);
             if (docType != null)
                 return docType;
@@ -3151,6 +3157,10 @@ namespace Odmon.Worker.Services
                 if (string.IsNullOrWhiteSpace(fieldValue))
                 {
                     var columnId = GetColumnIdForField(criticalColumn.FieldName);
+                    var validationReason = BuildMissingCriticalFieldValidationReason(
+                        criticalColumn.FieldName,
+                        c.ClientVisualID,
+                        criticalColumn.ValidationMessage);
                     _logger.LogError(
                         "CRITICAL FIELD VALIDATION FAILED: TikCounter={TikCounter}, TikNumber={TikNumber}, Field={FieldName}, ColumnId={ColumnId}, Value=<null/empty>, Reason=MISSING_VALUE. {ValidationMessage}",
                         c.TikCounter,
@@ -3164,7 +3174,7 @@ namespace Odmon.Worker.Services
                         c.TikNumber,
                         columnId ?? "<unknown>",
                         fieldValue,
-                        $"MISSING_VALUE - {criticalColumn.ValidationMessage}");
+                        validationReason);
                 }
 
                 // Check if value exists in Monday column labels
@@ -3559,6 +3569,32 @@ namespace Odmon.Worker.Services
             return clientNumberStr == "6";
         }
 
+        internal static bool IsClient21(string? clientVisualID)
+        {
+            if (string.IsNullOrWhiteSpace(clientVisualID))
+            {
+                return false;
+            }
+
+            var trimmed = clientVisualID.Trim();
+            var separatorIndex = trimmed.IndexOfAny(['\\', '/']);
+            var clientNumberStr = separatorIndex > 0
+                ? trimmed.Substring(0, separatorIndex).Trim()
+                : trimmed;
+
+            return clientNumberStr == "21";
+        }
+
+        internal static string BuildMissingCriticalFieldValidationReason(
+            string fieldName,
+            string? clientVisualID,
+            string validationMessage)
+        {
+            return IsClient21(clientVisualID) && fieldName == "DocumentType"
+                ? $"KNOWN_BLOCKED_CLIENT - ClientNumber 21 has no explicit DocumentType business rule. {validationMessage}"
+                : $"MISSING_VALUE - {validationMessage}";
+        }
+
         // ══════════════════════════════════════════════════════════════════
         // Retry, Dead-Letter, Run-Lock helpers
         // ══════════════════════════════════════════════════════════════════
@@ -3768,7 +3804,14 @@ namespace Odmon.Worker.Services
         {
             try
             {
-                var errorType = ex.GetType().Name;
+                var errorType = ex is MondayItemMappingIntegrityException
+                    ? "MappingIntegrityMismatch"
+                    : ex.GetType().Name;
+                if (ex is CriticalFieldValidationException criticalFieldEx &&
+                    criticalFieldEx.ValidationReason.Contains("KNOWN_BLOCKED_CLIENT", StringComparison.OrdinalIgnoreCase))
+                {
+                    errorType = "KnownBlockedClient";
+                }
                 var errorMessage = Truncate(ex.Message, 2000) ?? string.Empty;
                 _integrationDb.SyncFailures.Add(new SyncFailure
                 {

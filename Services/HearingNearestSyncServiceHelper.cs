@@ -5,16 +5,14 @@ using Odmon.Worker.Models;
 namespace Odmon.Worker.Services
 {
     /// <summary>
-    /// Testable helper for hearing sync update ordering (reschedule vs new vs cancelled).
+    /// Testable helper for hearing sync update ordering.
     /// </summary>
     public static class HearingNearestSyncServiceHelper
     {
         /// <summary>
         /// Computes planned step names in execution order for a given hearing state and snapshot.
+        /// MeetStatus 0 is intentionally not written back to Monday's status column.
         /// </summary>
-        /// <param name="hearing">Selected nearest upcoming hearing (required fields already validated).</param>
-        /// <param name="snapshot">Last synced snapshot, or null if first time.</param>
-        /// <returns>Planned step names in order; and change flags.</returns>
         public static (IReadOnlyList<string> PlannedSteps, bool StartDateChanged, bool StatusChanged, bool JudgeOrCityChanged) ComputePlannedSteps(
             OdcanitDiaryEvent hearing,
             HearingNearestSnapshot? snapshot)
@@ -39,7 +37,7 @@ namespace Odmon.Worker.Services
 
             if (meetStatus == 2)
             {
-                if (statusChanged) plannedSteps.Add("SetStatus_הועבר");
+                if (statusChanged) plannedSteps.Add("SetStatus_Transferred");
                 if (judgeOrCityChanged) plannedSteps.Add("UpdateJudgeCity");
                 if (startDateChanged) plannedSteps.Add("UpdateHearingDate");
             }
@@ -47,11 +45,10 @@ namespace Odmon.Worker.Services
             {
                 if (judgeOrCityChanged) plannedSteps.Add("UpdateJudgeCity");
                 if (startDateChanged) plannedSteps.Add("UpdateHearingDate");
-                if (statusChanged) plannedSteps.Add("SetStatus_פעיל");
             }
             else if (meetStatus == 1)
             {
-                if (statusChanged) plannedSteps.Add("SetStatus_מבוטל");
+                if (statusChanged) plannedSteps.Add("SetStatus_Canceled");
             }
 
             return (plannedSteps, startDateChanged, statusChanged, judgeOrCityChanged);

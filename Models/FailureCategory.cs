@@ -8,6 +8,8 @@ namespace Odmon.Worker.Models
     {
         Critical,
         Operational,
+        KnownDataIssue,
+        SkippedExpected,
         Ignored
     }
 }

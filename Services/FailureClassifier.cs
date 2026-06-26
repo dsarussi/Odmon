@@ -15,7 +15,23 @@ namespace Odmon.Worker.Services
             "update_skipped_inactive",
             "hearing_update_skipped_inactive",
             "hearing_update_skipped_not_ready_or_inactive",
-            "update_skipped_not_ready"
+            "update_skipped_not_ready",
+            "netcourt_skipped_missing_routing",
+            "duplicate_idempotent_skip"
+        };
+
+        private static readonly HashSet<string> KnownDataIssueErrorTypes = new(StringComparer.Ordinal)
+        {
+            "KnownBlockedClient",
+            "KnownDataIssue",
+            "InvalidMapping"
+        };
+
+        private static readonly HashSet<string> SkippedExpectedErrorTypes = new(StringComparer.Ordinal)
+        {
+            "SkippedMissingRouting",
+            "AttachmentSkippedTooLarge",
+            "DuplicateIdempotentSkip"
         };
 
         /// <summary>Exception types that indicate infrastructure/system failure; trigger immediate alerts.</summary>
@@ -37,7 +53,13 @@ namespace Odmon.Worker.Services
         public static FailureCategory Classify(string? errorType, string? operation)
         {
             if (operation != null && IgnoredOperations.Contains(operation))
-                return FailureCategory.Ignored;
+                return FailureCategory.SkippedExpected;
+
+            if (errorType != null && SkippedExpectedErrorTypes.Contains(errorType))
+                return FailureCategory.SkippedExpected;
+
+            if (errorType != null && KnownDataIssueErrorTypes.Contains(errorType))
+                return FailureCategory.KnownDataIssue;
 
             if (errorType != null && CriticalErrorTypes.Contains(errorType))
                 return FailureCategory.Critical;
@@ -50,7 +72,10 @@ namespace Odmon.Worker.Services
         /// </summary>
         public static bool IsRealFailure(string? errorType, string? operation)
         {
-            return Classify(errorType, operation) != FailureCategory.Ignored;
+            var category = Classify(errorType, operation);
+            return category is not FailureCategory.Ignored
+                and not FailureCategory.KnownDataIssue
+                and not FailureCategory.SkippedExpected;
         }
     }
 }

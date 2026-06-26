@@ -194,25 +194,41 @@ namespace Odmon.Worker.Workers
                     .AsNoTracking()
                     .Where(f => f.OccurredAtUtc >= startUtc && f.OccurredAtUtc <= endUtc)
                     .ToListAsync(ct);
-                var realFailures = allFailuresInWindow
-                    .Where(f => FailureClassifier.IsRealFailure(f.ErrorType, f.Operation))
+                static List<DailySummaryFailureGroup> BuildFailureGroups(IEnumerable<SyncFailure> failures)
+                {
+                    return failures
+                        .GroupBy(f => (
+                            CaseNumber: f.TikNumber ?? "",
+                            Operation: f.Operation ?? "",
+                            RootCause: f.ErrorType ?? "Unknown",
+                            Message: NormalizeErrorMessage(f.ErrorMessage)))
+                        .Select(g => new DailySummaryFailureGroup(
+                            g.Key.CaseNumber,
+                            g.Key.Operation,
+                            g.Key.RootCause,
+                            g.Key.Message,
+                            g.Count(),
+                            g.Min(x => x.OccurredAtUtc),
+                            g.Max(x => x.OccurredAtUtc)))
+                        .OrderByDescending(x => x.Count)
+                        .ThenBy(x => x.FirstOccurrenceUtc)
+                        .ToList();
+                }
+
+                var categorizedFailures = allFailuresInWindow
+                    .Select(f => new { Failure = f, Category = FailureClassifier.Classify(f.ErrorType, f.Operation) })
                     .ToList();
-                var groupedFailures = realFailures
-                    .GroupBy(f => (
-                        CaseNumber: f.TikNumber ?? "",
-                        Operation: f.Operation ?? "",
-                        RootCause: f.ErrorType ?? "Unknown",
-                        Message: NormalizeErrorMessage(f.ErrorMessage)))
-                    .Select(g => new DailySummaryFailureGroup(
-                        g.Key.CaseNumber,
-                        g.Key.Operation,
-                        g.Key.RootCause,
-                        g.Key.Message,
-                        g.Count(),
-                        g.Min(x => x.OccurredAtUtc),
-                        g.Max(x => x.OccurredAtUtc)))
-                    .OrderBy(x => x.FirstOccurrenceUtc)
+                var realFailures = categorizedFailures
+                    .Where(x => x.Category is FailureCategory.Critical or FailureCategory.Operational)
+                    .Select(x => x.Failure)
                     .ToList();
+                var groupedFailures = BuildFailureGroups(realFailures);
+                var knownDataIssueFailures = BuildFailureGroups(categorizedFailures
+                    .Where(x => x.Category == FailureCategory.KnownDataIssue)
+                    .Select(x => x.Failure));
+                var skippedExpectedFailures = BuildFailureGroups(categorizedFailures
+                    .Where(x => x.Category == FailureCategory.SkippedExpected)
+                    .Select(x => x.Failure));
                 var realFailureCount = groupedFailures.Count;
 
                 // Document ingestion success / failure counts (yesterday window)
@@ -284,7 +300,9 @@ namespace Odmon.Worker.Workers
                     highFailureNote,
                     new DailySummaryRenderOptions(
                         knownBlockedTikVisualIds,
-                        configuredVoicenterHardLimit));
+                        configuredVoicenterHardLimit),
+                    knownDataIssueFailures,
+                    skippedExpectedFailures);
 
                 if (_config.GetValue<bool>("Email:Enabled", false))
                 {
@@ -324,7 +342,9 @@ namespace Odmon.Worker.Workers
             int weeklyDetailReq, bool quotaExceededRecently,
             bool circuitBreakerTripped,
             bool highFailureNote,
-            DailySummaryRenderOptions? options = null)
+            DailySummaryRenderOptions? options = null,
+            List<DailySummaryFailureGroup>? knownDataIssueFailures = null,
+            List<DailySummaryFailureGroup>? skippedExpectedFailures = null)
         {
             static string E(string s) => System.Net.WebUtility.HtmlEncode(s ?? string.Empty);
             static string Cell(string? s) => E(string.IsNullOrWhiteSpace(s) ? "N/A" : s.Trim());
@@ -332,11 +352,15 @@ namespace Odmon.Worker.Workers
             var docFailTotal = docIngestionFailures.Count;
             var docGroups = BuildDocumentFailureGroups(docIngestionFailures, options);
             var actionableDocGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.Actionable).Take(10).ToList();
-            var staleDocGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.KnownStaleTimeout).ToList();
+            var staleDocGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.KnownStale).ToList();
+            var invalidUserFileGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.InvalidUserFile).ToList();
+            var externalTransientGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.ExternalTransient).ToList();
             var knownBlockedGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.KnownBlocked).ToList();
             var knownDataIssueGroups = docGroups.Where(g => g.Category == DocumentFailureCategory.KnownDataIssue).ToList();
             var actionableDocCount = actionableDocGroups.Sum(g => g.Count);
             var staleDocCount = staleDocGroups.Sum(g => g.Count);
+            var invalidUserFileCount = invalidUserFileGroups.Sum(g => g.Count);
+            var externalTransientCount = externalTransientGroups.Sum(g => g.Count);
             var knownBlockedCount = knownBlockedGroups.Sum(g => g.Count);
             var knownDataIssueCount = knownDataIssueGroups.Sum(g => g.Count);
 
@@ -380,6 +404,8 @@ namespace Odmon.Worker.Workers
                 if (realFailureCount > 0) reasons.Add($"{realFailureCount} sync failure(s)");
                 if (actionableDocCount > 0) reasons.Add($"{actionableDocCount} actionable document ingestion failure(s)");
                 if (staleDocCount > 0) reasons.Add($"{staleDocCount} stale document timeout(s) grouped");
+                if (invalidUserFileCount > 0) reasons.Add($"{invalidUserFileCount} invalid user file issue(s)");
+                if (externalTransientCount > 0) reasons.Add($"{externalTransientCount} external transient document failure(s)");
                 if (knownBlockedCount > 0) reasons.Add($"{knownBlockedCount} known blocked case failure(s)");
                 if (knownDataIssueCount > 0) reasons.Add($"{knownDataIssueCount} known data issue(s) still open");
                 if (voicenterFailed.Count > 0) reasons.Add($"{voicenterFailed.Count} Voicenter write failure(s)");
@@ -434,6 +460,9 @@ namespace Odmon.Worker.Workers
                 sb.AppendLine("</table>");
             }
 
+            AppendFailureGroupSection(sb, "Known Data Issues", knownDataIssueFailures ?? [], Cell, E);
+            AppendFailureGroupSection(sb, "Skipped Expected", skippedExpectedFailures ?? [], Cell, E);
+
             // ---- Warnings / Anomalies (only when something is worth noting) ----
             var anomalies = new List<string>();
             if (voicenterQuotaExceeded)
@@ -472,7 +501,9 @@ namespace Odmon.Worker.Workers
             {
                 sb.AppendLine($"<p>Total: <b>{docFailTotal}</b> &nbsp;|&nbsp; Actionable shown: <b>{actionableDocCount}</b> &nbsp;|&nbsp; Known/stale: <b>{staleDocCount}</b> &nbsp;|&nbsp; Known blocked: <b>{knownBlockedCount}</b> &nbsp;|&nbsp; Known data issues: <b>{knownDataIssueCount}</b></p>");
                 AppendDocumentFailureGroupTable(sb, "Actionable document ingestion failures", actionableDocGroups, Cell, E);
-                AppendDocumentFailureGroupTable(sb, "Known / stale document ingestion failures", staleDocGroups, Cell, E);
+                AppendDocumentFailureGroupTable(sb, "Known/Stale document ingestion failures", staleDocGroups, Cell, E);
+                AppendDocumentFailureGroupTable(sb, "Invalid user file document ingestion failures", invalidUserFileGroups, Cell, E);
+                AppendDocumentFailureGroupTable(sb, "External transient document ingestion failures", externalTransientGroups, Cell, E);
                 AppendDocumentFailureGroupTable(sb, "Known blocked cases", knownBlockedGroups, Cell, E);
                 AppendDocumentFailureGroupTable(sb, "Known data issues", knownDataIssueGroups, Cell, E);
                 if (docIngestionFailures.Count < 0)
@@ -590,7 +621,9 @@ namespace Odmon.Worker.Workers
         private enum DocumentFailureCategory
         {
             Actionable,
-            KnownStaleTimeout,
+            KnownStale,
+            InvalidUserFile,
+            ExternalTransient,
             KnownBlocked,
             KnownDataIssue
         }
@@ -663,7 +696,21 @@ namespace Odmon.Worker.Workers
 
             if (string.Equals(columnId, "file_mm1bvngc", StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(normalizedError, "Timeout: 2h passed since status ready, no file", StringComparison.OrdinalIgnoreCase))
-                return DocumentFailureCategory.KnownStaleTimeout;
+                return DocumentFailureCategory.KnownStale;
+
+            if (normalizedError.Contains("Max retry", StringComparison.OrdinalIgnoreCase) ||
+                normalizedError.Contains("max retries", StringComparison.OrdinalIgnoreCase))
+                return DocumentFailureCategory.KnownStale;
+
+            if (normalizedError.Contains("UNSUPPORTED_EXTENSION", StringComparison.OrdinalIgnoreCase) ||
+                normalizedError.Contains("DENYLIST_EXTENSION", StringComparison.OrdinalIgnoreCase) ||
+                normalizedError.Contains("FILE_TOO_LARGE", StringComparison.OrdinalIgnoreCase) ||
+                normalizedError.Contains("InvalidExtension", StringComparison.OrdinalIgnoreCase))
+                return DocumentFailureCategory.InvalidUserFile;
+
+            if (normalizedError.Contains("HTTP 503", StringComparison.OrdinalIgnoreCase) ||
+                normalizedError.Contains("503", StringComparison.OrdinalIgnoreCase))
+                return DocumentFailureCategory.ExternalTransient;
 
             return DocumentFailureCategory.Actionable;
         }
@@ -712,12 +759,35 @@ namespace Odmon.Worker.Workers
             sb.AppendLine("</table>");
         }
 
+        private static void AppendFailureGroupSection(
+            StringBuilder sb,
+            string title,
+            IReadOnlyCollection<DailySummaryFailureGroup> groups,
+            Func<string?, string> cell,
+            Func<string, string> encode)
+        {
+            if (groups.Count == 0)
+                return;
+
+            sb.AppendLine($"<h3 style='margin:16px 0 8px;'>{encode(title)}</h3>");
+            sb.AppendLine("<table style='border-collapse:collapse;border:1px solid #ddd;' cellpadding='6'>");
+            sb.AppendLine("<tr style='background:#f5f5f5;'><th style='border:1px solid #ddd;'>TikNumber</th><th style='border:1px solid #ddd;'>Operation</th><th style='border:1px solid #ddd;'>Classification</th><th style='border:1px solid #ddd;'>Message</th><th style='border:1px solid #ddd;'>Count</th><th style='border:1px solid #ddd;'>First (UTC)</th><th style='border:1px solid #ddd;'>Last (UTC)</th></tr>");
+            foreach (var g in groups.Take(20))
+            {
+                sb.AppendLine($"<tr><td style='border:1px solid #ddd;'>{cell(g.CaseNumber)}</td><td style='border:1px solid #ddd;'>{cell(g.Operation)}</td><td style='border:1px solid #ddd;'>{cell(g.ExceptionType)}</td><td style='border:1px solid #ddd;'>{cell(Truncate(g.Message, 500))}</td><td style='border:1px solid #ddd;'>{g.Count}</td><td style='border:1px solid #ddd;'>{g.FirstOccurrenceUtc:yyyy-MM-dd HH:mm}</td><td style='border:1px solid #ddd;'>{g.LastOccurrenceUtc:yyyy-MM-dd HH:mm}</td></tr>");
+            }
+            sb.AppendLine("</table>");
+        }
+
         private static string NormalizeErrorMessage(string? message)
         {
             if (string.IsNullOrWhiteSpace(message))
                 return "N/A";
 
-            return string.Join(" ", message.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).Trim();
+            var normalized = string.Join(" ", message.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).Trim();
+            if (normalized.Contains("email is not valid", StringComparison.OrdinalIgnoreCase))
+                return "Monday email is not valid";
+            return normalized;
         }
 
         private static string Truncate(string? value, int maxLength)

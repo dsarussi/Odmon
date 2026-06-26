@@ -93,6 +93,41 @@ namespace Odmon.Worker.Services
                 var mapping = await _mappingReader.FindReadOnlyAsync(c.TikCounter, casesBoardId, ct);
                 if (mapping == null) continue;
 
+                try
+                {
+                    MondayItemMappingIntegrityService.ValidateMappingMatchesCase(
+                        mapping,
+                        c,
+                        casesBoardId,
+                        "HearingApproval.MappingLookup");
+                }
+                catch (MondayItemMappingIntegrityException ex)
+                {
+                    _logger.LogWarning(ex,
+                        "HearingApproval skipped invalid mapping. TikCounter={TikCounter}, TikNumber={TikNumber}, MappingId={MappingId}, MondayItemId={MondayItemId}, Reason=InvalidMapping",
+                        c.TikCounter,
+                        c.TikNumber,
+                        mapping.Id,
+                        mapping.MondayItemId);
+
+                    _integrationDb.SyncFailures.Add(new SyncFailure
+                    {
+                        RunId = $"hearingapproval_{DateTime.UtcNow:yyyyMMddHHmmss}",
+                        TikCounter = c.TikCounter,
+                        TikNumber = c.TikNumber,
+                        BoardId = casesBoardId,
+                        Operation = "hearing_approval_skipped_invalid_mapping",
+                        ErrorType = "InvalidMapping",
+                        ErrorMessage = ex.Message.Length > 2000 ? ex.Message[..2000] : ex.Message,
+                        StackTrace = ex.StackTrace?.Length > 4000 ? ex.StackTrace[..4000] : ex.StackTrace,
+                        OccurredAtUtc = DateTime.UtcNow,
+                        RetryAttempts = 0,
+                        Resolved = false
+                    });
+                    await _integrationDb.SaveChangesAsync(ct);
+                    continue;
+                }
+
                 var itemId = mapping.MondayItemId;
 
                 var currentIndex = await _mondayClient.GetHearingApprovalStatusAsync(itemId, ct);

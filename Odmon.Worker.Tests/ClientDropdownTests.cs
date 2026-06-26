@@ -108,5 +108,20 @@ namespace Odmon.Worker.Tests
 
             Assert.Equal(SyncService.ClientDropdownAction.UseFallbackText, action);
         }
+
+        [Theory]
+        [InlineData("21")]
+        [InlineData("21/7")]
+        [InlineData("21\\123")]
+        public void Client21VisualId_UsesKnownBlockedClientValidationReason(string clientVisualId)
+        {
+            var reason = SyncService.BuildMissingCriticalFieldValidationReason(
+                "DocumentType",
+                clientVisualId,
+                "DocumentType is required.");
+
+            Assert.Contains("KNOWN_BLOCKED_CLIENT", reason);
+            Assert.False(reason.StartsWith("MISSING_VALUE", StringComparison.Ordinal));
+        }
     }
 }
