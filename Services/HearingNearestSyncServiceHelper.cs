@@ -11,7 +11,6 @@ namespace Odmon.Worker.Services
     {
         /// <summary>
         /// Computes planned step names in execution order for a given hearing state and snapshot.
-        /// MeetStatus 0 is intentionally not written back to Monday's status column.
         /// </summary>
         public static (IReadOnlyList<string> PlannedSteps, bool StartDateChanged, bool StatusChanged, bool JudgeOrCityChanged) ComputePlannedSteps(
             OdcanitDiaryEvent hearing,
@@ -43,6 +42,7 @@ namespace Odmon.Worker.Services
             }
             else if (meetStatus == 0)
             {
+                if (statusChanged) plannedSteps.Add("SetStatus_Active");
                 if (judgeOrCityChanged) plannedSteps.Add("UpdateJudgeCity");
                 if (startDateChanged) plannedSteps.Add("UpdateHearingDate");
             }

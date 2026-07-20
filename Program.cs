@@ -180,6 +180,7 @@ hostBuilder.ConfigureServices((context, services) =>
 
     services.AddScoped<SyncService>();
     services.AddHostedService<SyncWorker>();
+    services.AddHostedService<HearingNearestScheduleWorker>();
     services.AddScoped<HearingBackfillService>();
     services.AddHostedService<HearingBackfillWorker>();
     services.AddScoped<HearingApprovalBackfillService>();

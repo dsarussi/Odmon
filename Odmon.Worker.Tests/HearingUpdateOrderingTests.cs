@@ -27,17 +27,36 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public void NewActive_MeetStatus0_PlannedSteps_JudgeCity_ThenDate_WithoutStatusOverwrite()
+        public void NewActive_MeetStatus0_PlannedSteps_StatusThenJudgeCityThenDate()
         {
             HearingNearestSnapshot? snapshot = null;
             var hearing = NewHearing(meetStatus: 0, start: DateTime.UtcNow.AddDays(1), judge: "Judge", city: "City");
 
             var (planned, _, _, _) = HearingNearestSyncServiceHelper.ComputePlannedSteps(hearing, snapshot);
 
-            Assert.Equal(2, planned.Count);
-            Assert.Equal("UpdateJudgeCity", planned[0]);
-            Assert.Equal("UpdateHearingDate", planned[1]);
-            Assert.DoesNotContain(planned, x => x.StartsWith("SetStatus_", StringComparison.Ordinal));
+            Assert.Equal(3, planned.Count);
+            Assert.Equal("SetStatus_Active", planned[0]);
+            Assert.Equal("UpdateJudgeCity", planned[1]);
+            Assert.Equal("UpdateHearingDate", planned[2]);
+        }
+
+        [Fact]
+        public void Active_MeetStatus0_PreviousTransferredStatus_PlansStatusBackToActive()
+        {
+            var start = DateTime.UtcNow.AddDays(1);
+            var snapshot = new HearingNearestSnapshot
+            {
+                NearestStartDateUtc = start,
+                NearestMeetStatus = 2,
+                JudgeName = "Judge",
+                City = "City"
+            };
+            var hearing = NewHearing(meetStatus: 0, start: start, judge: "Judge", city: "City");
+
+            var (planned, _, _, _) = HearingNearestSyncServiceHelper.ComputePlannedSteps(hearing, snapshot);
+
+            Assert.Single(planned);
+            Assert.Equal("SetStatus_Active", planned[0]);
         }
 
         [Fact]

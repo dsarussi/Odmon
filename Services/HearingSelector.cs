@@ -11,7 +11,8 @@ namespace Odmon.Worker.Services
     public static class HearingSelector
     {
         /// <summary>
-        /// Returns one row per TikCounter: the row with the smallest StartDate where StartDate >= nowLocal.
+        /// Returns one row per TikCounter: nearest future active hearing, then nearest
+        /// future cancelled fallback, then nearest future transferred fallback.
         /// </summary>
         /// <param name="rows">All diary event rows (e.g. from GetDiaryEventsByTikCountersAsync).</param>
         /// <param name="nowLocal">Current time in Israel local time (used as lower bound for StartDate).</param>
@@ -26,16 +27,32 @@ namespace Odmon.Worker.Services
             }
 
             var list = rows
-                .Where(d => d.TikCounter.HasValue && d.StartDate.HasValue && d.StartDate.Value >= nowLocal)
+                .Where(d => d.TikCounter.HasValue
+                            && d.StartDate.HasValue
+                            && d.StartDate.Value >= nowLocal
+                            && GetSelectionPriority(d.MeetStatus ?? 0).HasValue)
                 .ToList();
 
             var byTik = list
                 .GroupBy(d => d.TikCounter!.Value)
                 .ToDictionary(
                     g => g.Key,
-                    g => g.OrderBy(d => d.StartDate!.Value).First());
+                    g => g.OrderBy(d => GetSelectionPriority(d.MeetStatus ?? 0)!.Value)
+                        .ThenBy(d => d.StartDate!.Value)
+                        .First());
 
             return byTik;
+        }
+
+        private static int? GetSelectionPriority(int meetStatus)
+        {
+            return meetStatus switch
+            {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                _ => null
+            };
         }
     }
 }
