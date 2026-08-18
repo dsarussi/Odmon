@@ -328,6 +328,21 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public void NotificationParser_DoesNotUseThirdPartyNameAsInsuredDriverFallback()
+        {
+            var fields = CreateParser().Parse(
+                """
+פרטי צד ג'
+רכב פרטי :סוג הרכב 50210802 :קיהמס' רישוי
+מעיין שטדלר :שם הנהג 062895529 : ת"ז 054-6323859 :טלפון
+""",
+                CreateDocument());
+
+            Assert.NotEqual("מעיין שטדלר", fields.DriverName.Value);
+            Assert.Equal(CaseIntakeFieldStatus.Missing, fields.DriverName.Status);
+        }
+
+        [Fact]
         public void DemandFilenames_ClassifyAsTheSameEqualPriorityBusinessType()
         {
             Assert.True(CaseIntakeDocumentClassifier.TryClassify(
@@ -848,6 +863,7 @@ namespace Odmon.Worker.Tests
 ת"זאב ברוך אוזןשם:ז\דרכון 024637357:פתחיהכתובת 21 הברוש
 טל:בבית:נייד 050-6898203:כתובת מייל zaev@example.com
 מס' רישוי 43263601:קיהיצרן:שנת ייצור 2019
+פרטי הנהג:
 זאב ברוך אוזןשם:ת.ז\דרכון 024637357:נייד 050-6898203
 רכב פרטי  :סוג הרכב 50210802  :קיהמס' רישוי
 מעיין שטדלר  :שם הנהג 062895529  : ת"ז 054-6323859  :טלפון
@@ -855,14 +871,14 @@ namespace Odmon.Worker.Tests
 
         private static string Real39434CompanyDemandText => """
 הנדון: דרישה בגין רכב מספר 50210802
-תביעתנו 2162901
+תביעת:נו 2162901
 תאריך אירוע 16/09/2025
 מס' פוליסה 1252050106
 ת.זזאב ברוך אוזןשם בעל הפוליסה:024637357 מספר:רישוי
 43263601
 חשבונית שכ"ט שמאי-מקור
-נזק לרכב עפ"י דו"ח שמאי 19307.0₪
-דמי שמאות 2000.0₪
+לרכבנזק:עפ"י דו"ח שמאי 19307.0₪
+שמאותדמי:2000.0₪
 סה"כ 21307.0₪
 """;
 

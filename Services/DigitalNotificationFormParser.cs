@@ -56,6 +56,7 @@ namespace Odmon.Worker.Services
                 document,
                 TextExtractor.Extract(lines, ExplicitClaimNumberLabels),
                 TextExtractor.Extract(lines, ReportNumberLabels));
+            var insuredDriverName = ExtractInsuredDriverName(lines);
 
             return new NotificationFormFields(
                 ClaimNumber: claimNumber,
@@ -100,12 +101,7 @@ namespace Odmon.Worker.Services
                     document,
                     CaseIntakeFieldValidators.ValidatePhone),
                 DriverName: CaseIntakeFieldFactory.Build(
-                    PreferContext(
-                        ExtractContextValues(
-                            InsuredDriverNameContextRegex(),
-                            searchableText,
-                            "שם:ת.ז\\דרכון ... נייד"),
-                        TextExtractor.Extract(lines, DriverNameLabels)),
+                    insuredDriverName,
                     document,
                     CaseIntakeFieldValidators.ValidateName),
                 DriverId: CaseIntakeFieldFactory.Build(
@@ -144,6 +140,68 @@ namespace Odmon.Worker.Services
                         TextExtractor.Extract(lines, ThirdPartyCarNumberLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateVehicleNumber));
+        }
+
+        private static RawFieldExtraction ExtractInsuredDriverName(
+            IReadOnlyList<string> lines)
+        {
+            var sectionStart = FindLineIndex(lines, 0, "פרטי הנהג");
+            if (sectionStart < 0)
+            {
+                sectionStart = 0;
+            }
+
+            var sectionEnd = FindFirstThirdPartyLine(lines, sectionStart);
+            var sectionLines = lines
+                .Skip(sectionStart)
+                .Take(sectionEnd - sectionStart)
+                .ToArray();
+            var sectionText = string.Join('\n', sectionLines);
+            var contextual = ExtractContextValues(
+                InsuredDriverNameContextRegex(),
+                sectionText,
+                "פרטי הנהג ... שם:ת.ז\\דרכון ... נייד");
+            if (contextual.Status != RawFieldExtractionStatus.Missing)
+            {
+                return contextual;
+            }
+
+            return TextExtractor.Extract(
+                sectionLines,
+                DriverNameLabels);
+        }
+
+        private static int FindFirstThirdPartyLine(
+            IReadOnlyList<string> lines,
+            int searchStart)
+        {
+            for (var index = searchStart; index < lines.Count; index++)
+            {
+                if (lines[index].Contains("סוג הרכב", StringComparison.Ordinal) ||
+                    lines[index].Contains("פרטי צד ג", StringComparison.Ordinal) ||
+                    lines[index].Contains("פרטי הצד השלישי", StringComparison.Ordinal))
+                {
+                    return index;
+                }
+            }
+
+            return lines.Count;
+        }
+
+        private static int FindLineIndex(
+            IReadOnlyList<string> lines,
+            int searchStart,
+            string value)
+        {
+            for (var index = searchStart; index < lines.Count; index++)
+            {
+                if (lines[index].Contains(value, StringComparison.Ordinal))
+                {
+                    return index;
+                }
+            }
+
+            return -1;
         }
 
         private static RawFieldExtraction ExtractContextValues(
@@ -206,7 +264,7 @@ namespace Odmon.Worker.Services
         private static partial Regex PolicyHolderPhoneContextRegex();
 
         [GeneratedRegex(
-            @"(?:^|\n)(?<value>[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*(?:\s+[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*){1,3})שם\s*:(?=ת\.ז\\דרכון[^\r\n]*נייד)",
+            @"(?:^|\n|פרטי\s+הנהג)\s*:?\s*(?<value>[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*(?:\s+[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*){1,3})(?=שם\s*:\s*ת\.ז\s*[\\/]\s*דרכון[^\r\n]*נייד)",
             RegexOptions.CultureInvariant)]
         private static partial Regex InsuredDriverNameContextRegex();
 

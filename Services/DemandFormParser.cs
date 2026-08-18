@@ -8,7 +8,7 @@ namespace Odmon.Worker.Services
         private static readonly string[] ExplicitClaimNumberLabels =
             ["מספר תביעה", "מספר:תביעה", "מס' תביעה", "מס׳ תביעה"];
         private static readonly string[] OurClaimNumberLabels =
-            ["תביעתנו מספר", "תביעתנו מס'", "תביעתנו מס׳", "תביעתנו"];
+            ["תביעתנו מספר", "תביעתנו מס'", "תביעתנו מס׳", "תביעתנו", "תביעת:נו"];
         private static readonly string[] EventDateLabels =
             ["תאריך אירוע", "תאונת דרכים מיום"];
         private static readonly string[] PolicyNumberLabels =
@@ -27,12 +27,12 @@ namespace Odmon.Worker.Services
              "מספר רישוי רכבכם", "רכב צד ג' מס'", "רכב צד ג׳ מס׳", "רכב הפוגע מס'",
              "רכב הפוגע מס׳", "רכבכם מס'", "רכבכם מס׳"];
         private static readonly string[] AppraiserFeeLabels =
-            ["דמי שמאות", "שכר טרחת שמאי", "שכ\"ט שמאי", "שכ״ט שמאי"];
+            ["דמי שמאות", "שמאותדמי", "שכר טרחת שמאי", "שכ\"ט שמאי", "שכ״ט שמאי"];
         private static readonly string[] ExactLossOfValueLabels = ["ירידת ערך הרכב"];
         private static readonly string[] FallbackLossOfValueLabels = ["ירידת ערך"];
         private static readonly string[] VehicleDamageLabels =
             ["נזק לרכב עפ\"י דו\"ח שמאי", "נזק לרכב עפ״י דו״ח שמאי", "נזק לרכב על פי דו\"ח שמאי",
-             "נזק לרכב על פי דו״ח שמאי", "נזק לרכב"];
+             "נזק לרכב על פי דו״ח שמאי", "נזק לרכב", "לרכבנזק"];
         private static readonly string[] TotalDemandLabels =
             ["סה\"כ סכום הדרישה", "סה״כ סכום הדרישה", "סה\"כ דרישה", "סה״כ דרישה",
              "סך הכל דרישה", "סה\"כ לתשלום", "סה״כ לתשלום"];
