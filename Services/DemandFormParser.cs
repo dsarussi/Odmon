@@ -72,6 +72,12 @@ namespace Odmon.Worker.Services
 
             var lines = TextExtractor.NormalizeLines(extractedText);
             var searchableText = string.Join('\n', lines);
+            var ourClaimNumber = PreferContext(
+                ExtractContextValues(
+                    ImmediateDemandClaimNumberRegex(),
+                    searchableText,
+                    "תביעתנו / תביעת:נו"),
+                TextExtractor.Extract(lines, OurClaimNumberLabels));
             var policyHolderNameContext = CombineExtractions(
                 ExtractContextValues(
                     PolicyHolderNameRegex(),
@@ -115,7 +121,7 @@ namespace Odmon.Worker.Services
                 ClaimNumber: CaseIntakeClaimNumberResolver.Resolve(
                     document,
                     TextExtractor.Extract(lines, ExplicitClaimNumberLabels),
-                    TextExtractor.Extract(lines, OurClaimNumberLabels)),
+                    ourClaimNumber),
                 EventDate: CaseIntakeFieldFactory.Build(
                     PreferContext(
                         ExtractAccidentDates(lines),
@@ -349,6 +355,11 @@ namespace Odmon.Worker.Services
                     string.Join(" | ", matches.Select(match => match.Value)),
                     matches)
             };
+
+        [GeneratedRegex(
+            @"(?:תביעת:נו|תביעתנו)\s*:?\s*(?<value>\p{Nd}+(?:[-/._]\p{Nd}+)*)(?![\p{L}\p{Nd}_./-])",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex ImmediateDemandClaimNumberRegex();
 
         [GeneratedRegex(
             @"(?<!\d)(?:\d{1,2}[./-]\d{1,2}[./-]\d{4}|\d{4}-\d{1,2}-\d{1,2})(?!\d)",

@@ -444,6 +444,8 @@ namespace Odmon.Worker.Tests
                     CaseIntakeDocumentClassifier.CompanyDemandLetterName));
 
             Assert.Equal("2162901", fields.ClaimNumber.Value);
+            Assert.Equal(CaseIntakeFieldStatus.Valid, fields.ClaimNumber.Status);
+            Assert.Equal("2162901", fields.ClaimNumber.RawValue);
             Assert.Equal(new DateOnly(2025, 9, 16), fields.EventDate.Value);
             Assert.Equal("1252050106", fields.PolicyNumber.Value);
             Assert.Equal("זאב ברוך אוזן", fields.PolicyHolderName.Value);
@@ -871,10 +873,9 @@ namespace Odmon.Worker.Tests
 
         private static string Real39434CompanyDemandText => """
 הנדון: דרישה בגין רכב מספר 50210802
-תביעת:נו 2162901
 תאריך אירוע 16/09/2025
 מס' פוליסה 1252050106
-ת.זזאב ברוך אוזןשם בעל הפוליסה:024637357 מספר:רישוי
+תביעת:נו 2162901:ת.זזאב ברוך אוזןשם בעל הפוליסה:024637357 מספר:רישוי
 43263601
 חשבונית שכ"ט שמאי-מקור
 לרכבנזק:עפ"י דו"ח שמאי 19307.0₪
