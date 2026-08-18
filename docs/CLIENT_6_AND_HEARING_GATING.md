@@ -212,27 +212,27 @@ if (statusChanged && meetStatus != 0 && !string.IsNullOrWhiteSpace(statusColumnI
 
 **Effective Court City Selection**:
 ```
-[DEBUG] Effective court city determined: TikCounter=39231, City='<null>', CourtName='כפר סבא', EffectiveCourtCity='כפר סבא'
+[DEBUG] Effective court city determined: TikCounter=91013, City='<null>', CourtName='עיר דוגמה', EffectiveCourtCity='עיר דוגמה'
 ```
 
 **Update Gating Decision**:
 ```
-[DEBUG] Hearing update gating: TikCounter=39231, HasJudgeName=True, HasCourtCity=True, CanUpdateDateHour=True
+[DEBUG] Hearing update gating: TikCounter=91013, HasJudgeName=True, HasCourtCity=True, CanUpdateDateHour=True
 ```
 
 **Date/Hour Blocked**:
 ```
-[INFO] Hearing date/hour update blocked (missing judge or court city): TikCounter=42020, TikNumber=7/1235744, MondayItemId=7890123457, HasJudgeName=False, HasCourtCity=True
+[INFO] Hearing date/hour update blocked (missing judge or court city): TikCounter=91012, TikNumber=7/900002, MondayItemId=7890123457, HasJudgeName=False, HasCourtCity=True
 ```
 
 **Status Updated**:
 ```
-[DEBUG] Hearing status updated: TikCounter=39231, MeetStatus=1, Label='מבוטל', ColumnId=color_mkzqbrta
+[DEBUG] Hearing status updated: TikCounter=91013, MeetStatus=1, Label='מבוטל', ColumnId=color_mkzqbrta
 ```
 
 **Completion with Column IDs**:
 ```
-[INFO] Hearing sync completed: TikCounter=39231, TikNumber=9/1858, MondayItemId=7890123456, ExecutedSteps=[SetStatus_מבוטל], UpdatedColumnIds=[color_mkzqbrta]
+[INFO] Hearing sync completed: TikCounter=91013, TikNumber=9/900001, MondayItemId=7890123456, ExecutedSteps=[SetStatus_מבוטל], UpdatedColumnIds=[color_mkzqbrta]
 ```
 
 ## Testing Scenarios
@@ -267,31 +267,31 @@ if (statusChanged && meetStatus != 0 && !string.IsNullOrWhiteSpace(statusColumnI
 ### Scenario 2: Hearing with Full Data (Can Update Date/Hour)
 
 **Input**:
-- `TikCounter = 39231`
+- `TikCounter = 91013`
 - `MeetStatus = 1` (canceled)
 - `StartDate = 2026-03-15 10:00`
-- `JudgeName = "השופט כהן"`
+- `JudgeName = "שופט בדיקה"`
 - `City = null`
-- `CourtName = "כפר סבא"`
-- `EffectiveCourtCity = "כפר סבא"` (from CourtName)
+- `CourtName = "עיר דוגמה"`
+- `EffectiveCourtCity = "עיר דוגמה"` (from CourtName)
 
 **Expected**:
 ```
-[DEBUG] Effective court city determined: TikCounter=39231, City='<null>', CourtName='כפר סבא', EffectiveCourtCity='כפר סבא'
-[DEBUG] Hearing update gating: TikCounter=39231, HasJudgeName=True, HasCourtCity=True, CanUpdateDateHour=True
-[INFO] Hearing sync planned: TikCounter=39231, TikNumber=9/1858, MondayItemId=7890123456, StartDate=2026-03-15 10:00, MeetStatus=1, Steps=[SetStatus_מבוטל, UpdateJudgeCity, UpdateHearingDate], SnapshotOld=[StartDate=<null>, Status=<null>], CanUpdateDateHour=True
-[DEBUG] Hearing status updated: TikCounter=39231, MeetStatus=1, Label='מבוטל', ColumnId=color_mkzqbrta
-[DEBUG] Hearing details updated: TikCounter=39231, JudgeName='השופט כהן', City='כפר סבא'
-[DEBUG] Hearing date/hour updated: TikCounter=39231, StartDate=2026-03-15 10:00
-[INFO] Hearing sync completed: TikCounter=39231, TikNumber=9/1858, MondayItemId=7890123456, ExecutedSteps=[SetStatus_מבוטל, UpdateJudgeCity, UpdateHearingDate], UpdatedColumnIds=[color_mkzqbrta, text_mkwjne8v, text_mkxez28d, date_mkwjwmzq, hour_mkwjbwr]
+[DEBUG] Effective court city determined: TikCounter=91013, City='<null>', CourtName='עיר דוגמה', EffectiveCourtCity='עיר דוגמה'
+[DEBUG] Hearing update gating: TikCounter=91013, HasJudgeName=True, HasCourtCity=True, CanUpdateDateHour=True
+[INFO] Hearing sync planned: TikCounter=91013, TikNumber=9/900001, MondayItemId=7890123456, StartDate=2026-03-15 10:00, MeetStatus=1, Steps=[SetStatus_מבוטל, UpdateJudgeCity, UpdateHearingDate], SnapshotOld=[StartDate=<null>, Status=<null>], CanUpdateDateHour=True
+[DEBUG] Hearing status updated: TikCounter=91013, MeetStatus=1, Label='מבוטל', ColumnId=color_mkzqbrta
+[DEBUG] Hearing details updated: TikCounter=91013, JudgeName='שופט בדיקה', City='עיר דוגמה'
+[DEBUG] Hearing date/hour updated: TikCounter=91013, StartDate=2026-03-15 10:00
+[INFO] Hearing sync completed: TikCounter=91013, TikNumber=9/900001, MondayItemId=7890123456, ExecutedSteps=[SetStatus_מבוטל, UpdateJudgeCity, UpdateHearingDate], UpdatedColumnIds=[color_mkzqbrta, text_mkwjne8v, text_mkxez28d, date_mkwjwmzq, hour_mkwjbwr]
 ```
 
 **Monday Columns Updated**:
 ```json
 {
   "color_mkzqbrta": {"label": "מבוטל"},
-  "text_mkwjne8v": "השופט כהן",
-  "text_mkxez28d": "כפר סבא",
+  "text_mkwjne8v": "שופט בדיקה",
+  "text_mkxez28d": "עיר דוגמה",
   "date_mkwjwmzq": {"date": "2026-03-15"},
   "hour_mkwjbwr": {"hour": "10:00"}
 }
@@ -302,29 +302,29 @@ if (statusChanged && meetStatus != 0 && !string.IsNullOrWhiteSpace(statusColumnI
 ### Scenario 3: Hearing Missing Judge (Date/Hour Blocked)
 
 **Input**:
-- `TikCounter = 42020`
+- `TikCounter = 91012`
 - `MeetStatus = 2` (transferred)
 - `StartDate = 2026-04-20 14:00`
 - `JudgeName = null` (missing)
-- `City = "תל אביב"`
-- `EffectiveCourtCity = "תל אביב"`
+- `City = "עיר דוגמה"`
+- `EffectiveCourtCity = "עיר דוגמה"`
 
 **Expected**:
 ```
-[DEBUG] Effective court city determined: TikCounter=42020, City='תל אביב', CourtName='<null>', EffectiveCourtCity='תל אביב'
-[DEBUG] Hearing update gating: TikCounter=42020, HasJudgeName=False, HasCourtCity=True, CanUpdateDateHour=False
-[INFO] Hearing date/hour update blocked (missing judge or court city): TikCounter=42020, TikNumber=7/1235744, MondayItemId=7890123457, HasJudgeName=False, HasCourtCity=True
-[INFO] Hearing sync planned: TikCounter=42020, TikNumber=7/1235744, MondayItemId=7890123457, StartDate=2026-04-20 14:00, MeetStatus=2, Steps=[SetStatus_הועבר, UpdateJudgeCity], CanUpdateDateHour=False
-[DEBUG] Hearing status updated: TikCounter=42020, MeetStatus=2, Label='הועבר', ColumnId=color_mkzqbrta
-[DEBUG] Hearing details updated: TikCounter=42020, JudgeName='<null>', City='תל אביב'
-[INFO] Hearing sync completed: TikCounter=42020, TikNumber=7/1235744, MondayItemId=7890123457, ExecutedSteps=[SetStatus_הועבר, UpdateJudgeCity], UpdatedColumnIds=[color_mkzqbrta, text_mkxez28d]
+[DEBUG] Effective court city determined: TikCounter=91012, City='עיר דוגמה', CourtName='<null>', EffectiveCourtCity='עיר דוגמה'
+[DEBUG] Hearing update gating: TikCounter=91012, HasJudgeName=False, HasCourtCity=True, CanUpdateDateHour=False
+[INFO] Hearing date/hour update blocked (missing judge or court city): TikCounter=91012, TikNumber=7/900002, MondayItemId=7890123457, HasJudgeName=False, HasCourtCity=True
+[INFO] Hearing sync planned: TikCounter=91012, TikNumber=7/900002, MondayItemId=7890123457, StartDate=2026-04-20 14:00, MeetStatus=2, Steps=[SetStatus_הועבר, UpdateJudgeCity], CanUpdateDateHour=False
+[DEBUG] Hearing status updated: TikCounter=91012, MeetStatus=2, Label='הועבר', ColumnId=color_mkzqbrta
+[DEBUG] Hearing details updated: TikCounter=91012, JudgeName='<null>', City='עיר דוגמה'
+[INFO] Hearing sync completed: TikCounter=91012, TikNumber=7/900002, MondayItemId=7890123457, ExecutedSteps=[SetStatus_הועבר, UpdateJudgeCity], UpdatedColumnIds=[color_mkzqbrta, text_mkxez28d]
 ```
 
 **Monday Columns Updated** (date/hour omitted):
 ```json
 {
   "color_mkzqbrta": {"label": "הועבר"},
-  "text_mkxez28d": "תל אביב"
+  "text_mkxez28d": "עיר דוגמה"
   // date_mkwjwmzq and hour_mkwjbwr NOT INCLUDED (blocked by gating)
 }
 ```
@@ -334,30 +334,30 @@ if (statusChanged && meetStatus != 0 && !string.IsNullOrWhiteSpace(statusColumnI
 ### Scenario 4: Hearing Missing Court City (Date/Hour Blocked)
 
 **Input**:
-- `TikCounter = 39115`
+- `TikCounter = 91011`
 - `MeetStatus = 1` (canceled)
 - `StartDate = 2026-05-10 09:00`
-- `JudgeName = "השופט לוי"`
+- `JudgeName = "שופט בדיקה"`
 - `City = null`
 - `CourtName = null`
 - `EffectiveCourtCity = null`
 
 **Expected**:
 ```
-[DEBUG] Effective court city determined: TikCounter=39115, City='<null>', CourtName='<null>', EffectiveCourtCity='<null>'
-[DEBUG] Hearing update gating: TikCounter=39115, HasJudgeName=True, HasCourtCity=False, CanUpdateDateHour=False
-[INFO] Hearing date/hour update blocked (missing judge or court city): TikCounter=39115, TikNumber=9/1808, MondayItemId=7890123458, HasJudgeName=True, HasCourtCity=False
-[INFO] Hearing sync planned: TikCounter=39115, TikNumber=9/1808, MondayItemId=7890123458, StartDate=2026-05-10 09:00, MeetStatus=1, Steps=[SetStatus_מבוטל, UpdateJudgeCity], CanUpdateDateHour=False
-[DEBUG] Hearing status updated: TikCounter=39115, MeetStatus=1, Label='מבוטל', ColumnId=color_mkzqbrta
-[DEBUG] Hearing details updated: TikCounter=39115, JudgeName='השופט לוי', City='<null>'
-[INFO] Hearing sync completed: TikCounter=39115, TikNumber=9/1808, MondayItemId=7890123458, ExecutedSteps=[SetStatus_מבוטל, UpdateJudgeCity], UpdatedColumnIds=[color_mkzqbrta, text_mkwjne8v]
+[DEBUG] Effective court city determined: TikCounter=91011, City='<null>', CourtName='<null>', EffectiveCourtCity='<null>'
+[DEBUG] Hearing update gating: TikCounter=91011, HasJudgeName=True, HasCourtCity=False, CanUpdateDateHour=False
+[INFO] Hearing date/hour update blocked (missing judge or court city): TikCounter=91011, TikNumber=9/900003, MondayItemId=7890123458, HasJudgeName=True, HasCourtCity=False
+[INFO] Hearing sync planned: TikCounter=91011, TikNumber=9/900003, MondayItemId=7890123458, StartDate=2026-05-10 09:00, MeetStatus=1, Steps=[SetStatus_מבוטל, UpdateJudgeCity], CanUpdateDateHour=False
+[DEBUG] Hearing status updated: TikCounter=91011, MeetStatus=1, Label='מבוטל', ColumnId=color_mkzqbrta
+[DEBUG] Hearing details updated: TikCounter=91011, JudgeName='שופט בדיקה', City='<null>'
+[INFO] Hearing sync completed: TikCounter=91011, TikNumber=9/900003, MondayItemId=7890123458, ExecutedSteps=[SetStatus_מבוטל, UpdateJudgeCity], UpdatedColumnIds=[text_mkwjne8v]
 ```
 
 **Monday Columns Updated** (date/hour omitted):
 ```json
 {
   "color_mkzqbrta": {"label": "מבוטל"},
-  "text_mkwjne8v": "השופט לוי"
+  "text_mkwjne8v": "שופט בדיקה"
   // text_mkxez28d NOT INCLUDED (no city)
   // date_mkwjwmzq and hour_mkwjbwr NOT INCLUDED (blocked by gating)
 }
@@ -371,16 +371,16 @@ if (statusChanged && meetStatus != 0 && !string.IsNullOrWhiteSpace(statusColumnI
 - `TikCounter = 35000`
 - `MeetStatus = 0` (active)
 - `StartDate = 2026-06-01 11:00`
-- `JudgeName = "השופט דוד"`
-- `City = "ירושלים"`
-- `EffectiveCourtCity = "ירושלים"`
+- `JudgeName = "שופט בדיקה"`
+- `City = "עיר דוגמה"`
+- `EffectiveCourtCity = "עיר דוגמה"`
 
 **Expected**:
 ```
-[DEBUG] Effective court city determined: TikCounter=35000, City='ירושלים', CourtName='<null>', EffectiveCourtCity='ירושלים'
+[DEBUG] Effective court city determined: TikCounter=35000, City='עיר דוגמה', CourtName='<null>', EffectiveCourtCity='עיר דוגמה'
 [DEBUG] Hearing update gating: TikCounter=35000, HasJudgeName=True, HasCourtCity=True, CanUpdateDateHour=True
 [INFO] Hearing sync planned: TikCounter=35000, TikNumber=3/2020, MondayItemId=7890123459, StartDate=2026-06-01 11:00, MeetStatus=0, Steps=[UpdateJudgeCity, UpdateHearingDate], CanUpdateDateHour=True
-[DEBUG] Hearing details updated: TikCounter=35000, JudgeName='השופט דוד', City='ירושלים'
+[DEBUG] Hearing details updated: TikCounter=35000, JudgeName='שופט בדיקה', City='עיר דוגמה'
 [DEBUG] Hearing date/hour updated: TikCounter=35000, StartDate=2026-06-01 11:00
 [INFO] Hearing sync completed: TikCounter=35000, TikNumber=3/2020, MondayItemId=7890123459, ExecutedSteps=[UpdateJudgeCity, UpdateHearingDate], UpdatedColumnIds=[text_mkwjne8v, text_mkxez28d, date_mkwjwmzq, hour_mkwjbwr]
 ```
@@ -388,8 +388,8 @@ if (statusChanged && meetStatus != 0 && !string.IsNullOrWhiteSpace(statusColumnI
 **Monday Columns Updated** (status omitted):
 ```json
 {
-  "text_mkwjne8v": "השופט דוד",
-  "text_mkxez28d": "ירושלים",
+  "text_mkwjne8v": "שופט בדיקה",
+  "text_mkxez28d": "עיר דוגמה",
   "date_mkwjwmzq": {"date": "2026-06-01"},
   "hour_mkwjbwr": {"hour": "11:00"}
   // color_mkzqbrta NOT INCLUDED (MeetStatus=0, active)

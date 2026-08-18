@@ -174,17 +174,17 @@ namespace Odmon.Worker.Tests
             await service.RunAsync(CancellationToken.None);
 
             var message = Assert.Single(email.DirectMessages);
-            Assert.Equal(new[] { "odmon@ezer-law.com" }, message.Recipients);
-            Assert.DoesNotContain("amir@ezer-law.com", message.Recipients);
-            Assert.DoesNotContain("yonatan@ezer-law.com", message.Recipients);
+            Assert.Equal(new[] { EmailAutomationService.AllowedTestRecipient }, message.Recipients);
+            Assert.DoesNotContain(EmailAutomationService.AmirEmail, message.Recipients);
+            Assert.DoesNotContain(EmailAutomationService.YonatanEmail, message.Recipients);
             Assert.Empty(message.BccRecipients);
-            Assert.Equal("החלטה חדשה בתיק 9/1984", message.Subject);
-            Assert.Contains("שלום יונתן", message.Body);
-            Assert.Contains("מצב בדיקה - המייל המקורי היה מיועד אל: yonatan@ezer-law.com", message.Body);
+            Assert.Equal("החלטה חדשה בתיק 99/91005", message.Subject);
+            Assert.StartsWith("שלום ", message.Body);
+            Assert.Contains($"מצב בדיקה - המייל המקורי היה מיועד אל: {EmailAutomationService.YonatanEmail}", message.Body);
 
             var tracked = await db.NetCourtDecisionAlerts.SingleAsync();
-            Assert.Equal("yonatan@ezer-law.com", tracked.IntendedRecipientEmail);
-            Assert.Equal("odmon@ezer-law.com", tracked.ActualRecipientEmail);
+            Assert.Equal(EmailAutomationService.YonatanEmail, tracked.IntendedRecipientEmail);
+            Assert.Equal(EmailAutomationService.AllowedTestRecipient, tracked.ActualRecipientEmail);
             Assert.Equal(NetCourtDecisionAlertStatuses.TestEmailQueued, tracked.Status);
         }
 
@@ -202,10 +202,10 @@ namespace Odmon.Worker.Tests
             await service.RunAsync(CancellationToken.None);
 
             var message = Assert.Single(email.DirectMessages);
-            Assert.Equal(new[] { "amir@ezer-law.com" }, message.Recipients);
+            Assert.Equal(new[] { EmailAutomationService.AmirEmail }, message.Recipients);
             Assert.Empty(message.BccRecipients);
-            Assert.Equal("שלום אמיר" + Environment.NewLine + Environment.NewLine +
-                         "התקבלה החלטה חדשה בתיק - 5/2000", message.Body);
+            Assert.StartsWith("שלום ", message.Body);
+            Assert.Contains("התקבלה החלטה חדשה בתיק - 98/91006", message.Body);
             Assert.DoesNotContain("מצב בדיקה", message.Body);
             Assert.Equal(
                 NetCourtDecisionAlertStatuses.LiveEmailQueued,
@@ -213,7 +213,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task Client101_InLiveMode_RoutesToAmir()
+        public async Task Client101_InLiveMode_RoutesToPrimaryEmployee()
         {
             await using var db = CreateDb();
             var service = CreateService(
@@ -228,8 +228,8 @@ namespace Odmon.Worker.Tests
                 out var actualRecipients);
 
             Assert.True(resolved);
-            Assert.Equal("amir@ezer-law.com", intendedRecipient);
-            Assert.Equal(new[] { "amir@ezer-law.com" }, actualRecipients);
+            Assert.Equal(EmailAutomationService.AmirEmail, intendedRecipient);
+            Assert.Equal(new[] { EmailAutomationService.AmirEmail }, actualRecipients);
         }
 
         [Fact]
@@ -259,7 +259,7 @@ namespace Odmon.Worker.Tests
                 email,
                 "Live",
                 resolver,
-                bccRecipients: new[] { "odmon@ezer-law.com" });
+                bccRecipients: new[] { EmailAutomationService.AllowedTestRecipient });
 
             var result = await service.RunAsync(CancellationToken.None);
 
@@ -311,7 +311,7 @@ namespace Odmon.Worker.Tests
             await using var db = CreateDb();
             var reader = new FakeDocumentReader
             {
-                Documents = { Decision(counter: 31, courtDocumentId: 131, odDocId: 2259074) }
+                Documents = { Decision(counter: 31, courtDocumentId: 131, odDocId: 9103001) }
             };
             var email = new FakeEmailNotifier();
             var fileResolver = new FakeDocumentFileResolver
@@ -343,7 +343,7 @@ namespace Odmon.Worker.Tests
             await using var db = CreateDb();
             var reader = new FakeDocumentReader
             {
-                Documents = { Decision(counter: 32, courtDocumentId: 132, odDocId: 2259074) }
+                Documents = { Decision(counter: 32, courtDocumentId: 132, odDocId: 9103001) }
             };
             var email = new FakeEmailNotifier();
             var fileResolver = new FakeDocumentFileResolver
@@ -371,7 +371,7 @@ namespace Odmon.Worker.Tests
             await using var db = CreateDb();
             var reader = new FakeDocumentReader
             {
-                Documents = { Decision(counter: 33, courtDocumentId: 133, odDocId: 2259074) }
+                Documents = { Decision(counter: 33, courtDocumentId: 133, odDocId: 9103001) }
             };
             var email = new FakeEmailNotifier();
             var fileResolver = AvailableFileResolver();
@@ -386,9 +386,9 @@ namespace Odmon.Worker.Tests
             await service.RunAsync(CancellationToken.None);
 
             var message = Assert.Single(email.DirectMessages);
-            Assert.Equal(new[] { "odmon@ezer-law.com" }, message.Recipients);
-            Assert.DoesNotContain("amir@ezer-law.com", message.Recipients);
-            Assert.DoesNotContain("yonatan@ezer-law.com", message.Recipients);
+            Assert.Equal(new[] { EmailAutomationService.AllowedTestRecipient }, message.Recipients);
+            Assert.DoesNotContain(EmailAutomationService.AmirEmail, message.Recipients);
+            Assert.DoesNotContain(EmailAutomationService.YonatanEmail, message.Recipients);
             var attachment = Assert.Single(message.Attachments);
             Assert.Equal("decision.pdf", attachment.FileName);
             Assert.Equal("application/pdf", attachment.ContentType);
@@ -400,7 +400,7 @@ namespace Odmon.Worker.Tests
             await using var db = CreateDb();
             var reader = new FakeDocumentReader
             {
-                Documents = { Decision(counter: 34, courtDocumentId: 134, tikCounter: 88, odDocId: 2259074) }
+                Documents = { Decision(counter: 34, courtDocumentId: 134, tikCounter: 88, odDocId: 9103001) }
             };
             var email = new FakeEmailNotifier();
             var service = CreateService(
@@ -414,7 +414,7 @@ namespace Odmon.Worker.Tests
             await service.RunAsync(CancellationToken.None);
 
             var message = Assert.Single(email.DirectMessages);
-            Assert.Equal(new[] { "amir@ezer-law.com" }, message.Recipients);
+            Assert.Equal(new[] { EmailAutomationService.AmirEmail }, message.Recipients);
             Assert.Single(message.Attachments);
         }
 
@@ -424,7 +424,7 @@ namespace Odmon.Worker.Tests
             await using var db = CreateDb();
             var reader = new FakeDocumentReader
             {
-                Documents = { Decision(counter: 35, courtDocumentId: 135, odDocId: 2259074) }
+                Documents = { Decision(counter: 35, courtDocumentId: 135, odDocId: 9103001) }
             };
             var email = new FakeEmailNotifier();
             var fileResolver = new FakeDocumentFileResolver
@@ -509,7 +509,7 @@ namespace Odmon.Worker.Tests
                 {
                     ["Email:Enabled"] = "true",
                     ["Email:MaxEmailsPerHour"] = "10",
-                    ["Email:Recipients:0"] = "global@example.com"
+                    ["Email:Recipients:0"] = "global@odmon.example"
                 })
                 .Build();
             using var notifier = new EmailNotifier(
@@ -520,19 +520,19 @@ namespace Odmon.Worker.Tests
             Assert.True(notifier.QueueEmail(
                 "direct",
                 "body",
-                new[] { "employee@example.com" }));
+                new[] { "employee@odmon.example" }));
 
             var critical = await notifier.Reader.ReadAsync();
             var direct = await notifier.Reader.ReadAsync();
 
             Assert.Null(critical.Recipients);
             Assert.Null(critical.BccRecipients);
-            Assert.Equal(new[] { "employee@example.com" }, direct.Recipients);
+            Assert.Equal(new[] { "employee@odmon.example" }, direct.Recipients);
         }
 
         [Theory]
-        [InlineData("Live", "amir@ezer-law.com")]
-        [InlineData("Test", "odmon@ezer-law.com")]
+        [InlineData("Live", EmailAutomationService.AmirEmail)]
+        [InlineData("Test", EmailAutomationService.AllowedTestRecipient)]
         public async Task NetCourtEmail_ConfiguredBccDoesNotReplacePrimaryRecipient(
             string emailMode,
             string expectedRecipient)
@@ -548,13 +548,13 @@ namespace Odmon.Worker.Tests
                 reader,
                 email,
                 emailMode,
-                bccRecipients: new[] { "odmon@ezer-law.com" });
+                bccRecipients: new[] { EmailAutomationService.AllowedTestRecipient });
 
             await service.RunAsync(CancellationToken.None);
 
             var message = Assert.Single(email.DirectMessages);
             Assert.Equal(new[] { expectedRecipient }, message.Recipients);
-            Assert.Equal(new[] { "odmon@ezer-law.com" }, message.BccRecipients);
+            Assert.Equal(new[] { EmailAutomationService.AllowedTestRecipient }, message.BccRecipients);
         }
 
         [Fact]
@@ -591,13 +591,13 @@ namespace Odmon.Worker.Tests
                     new OdcanitCase
                     {
                         TikCounter = 77,
-                        TikNumber = "9/1984",
+                        TikNumber = "99/91005",
                         ClientVisualID = "2\\123"
                     },
                     new OdcanitCase
                     {
                         TikCounter = 88,
-                        TikNumber = "5/2000",
+                        TikNumber = "98/91006",
                         ClientVisualID = "5\\456"
                     }
                 }
@@ -610,25 +610,25 @@ namespace Odmon.Worker.Tests
                 MaxBatchSize = maxBatchSize,
                 AttachDecisionPdf = attachDecisionPdf,
                 EmailMode = emailMode,
-                TestRecipient = "odmon@ezer-law.com",
+                TestRecipient = EmailAutomationService.AllowedTestRecipient,
                 BccRecipients = bccRecipients ?? Array.Empty<string>(),
                 FallbackRecipientEnabled = false,
                 ClientNumberToRecipientEmail = new Dictionary<int, string>
                 {
-                    [2] = "yonatan@ezer-law.com",
-                    [15] = "yonatan@ezer-law.com",
-                    [5] = "amir@ezer-law.com",
-                    [8] = "amir@ezer-law.com",
-                    [3] = "amir@ezer-law.com",
-                    [23] = "amir@ezer-law.com",
-                    [253] = "amir@ezer-law.com",
-                    [101] = "amir@ezer-law.com"
+                    [2] = EmailAutomationService.YonatanEmail,
+                    [15] = EmailAutomationService.YonatanEmail,
+                    [5] = EmailAutomationService.AmirEmail,
+                    [8] = EmailAutomationService.AmirEmail,
+                    [3] = EmailAutomationService.AmirEmail,
+                    [23] = EmailAutomationService.AmirEmail,
+                    [253] = EmailAutomationService.AmirEmail,
+                    [101] = EmailAutomationService.AmirEmail
                 }
             };
             var configuration = new ConfigurationBuilder()
                 .AddInMemoryCollection(new Dictionary<string, string?>
                 {
-                    ["Email:Recipients:0"] = "global@example.com"
+                    ["Email:Recipients:0"] = "global@odmon.example"
                 })
                 .Build();
             fileResolver ??= new FakeDocumentFileResolver();

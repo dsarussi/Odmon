@@ -35,9 +35,9 @@ namespace Odmon.Worker.Tests
         {
             var log1 = new NispahWriteLog
             {
-                TikCounter = 39283,
+                TikCounter = 91001,
                 NispahType = "סיפור תאונה",
-                SourceItemId = 2732400533,
+                SourceItemId = 9000000002,
                 InfoHash = "abc123def456",
                 SourceKind = DocumentIngestionService.NispahSourceKindAccidentStory,
                 CreatedAtUtc = DateTime.UtcNow,
@@ -45,9 +45,9 @@ namespace Odmon.Worker.Tests
             };
             var log2 = new NispahWriteLog
             {
-                TikCounter = 39283,
+                TikCounter = 91001,
                 NispahType = "סיפור תאונה",
-                SourceItemId = 2732400533,
+                SourceItemId = 9000000002,
                 InfoHash = "abc123def456",
                 SourceKind = DocumentIngestionService.NispahSourceKindAccidentStory,
                 CreatedAtUtc = DateTime.UtcNow.AddSeconds(1),
@@ -64,9 +64,9 @@ namespace Odmon.Worker.Tests
         {
             var log1 = new NispahWriteLog
             {
-                TikCounter = 39283,
+                TikCounter = 91001,
                 NispahType = "סיפור תאונה",
-                SourceItemId = 2732400533,
+                SourceItemId = 9000000002,
                 InfoHash = "hash1",
                 SourceKind = DocumentIngestionService.NispahSourceKindAccidentStory,
                 CreatedAtUtc = DateTime.UtcNow,
@@ -74,9 +74,9 @@ namespace Odmon.Worker.Tests
             };
             var log2 = new NispahWriteLog
             {
-                TikCounter = 39283,
+                TikCounter = 91001,
                 NispahType = "סיפור תאונה",
-                SourceItemId = 2732400533,
+                SourceItemId = 9000000002,
                 InfoHash = "hash2",
                 SourceKind = DocumentIngestionService.NispahSourceKindAccidentStory,
                 CreatedAtUtc = DateTime.UtcNow,

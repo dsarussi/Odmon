@@ -356,8 +356,8 @@ Or remove/fix the `KeyVault:VaultUrl` configuration.
 | `MaxAttachmentBytes` | `26214400` | Maximum PDF attachment size (25 MB by default). |
 | `AttachmentAllowedRoots` | Odlight document roots | Allowed local/UNC roots for procedure-resolved attachment paths. |
 | `EmailMode` | `Live` | `Test` sends only to `TestRecipient`; `Live` sends to the routed employee. |
-| `TestRecipient` | `odmon@ezer-law.com` | Actual recipient used in Test mode. |
-| `BccRecipients` | `["odmon@ezer-law.com"]` | NetCourt-only monitoring BCC recipients. These never replace the primary `To` recipient. |
+| `TestRecipient` | `monitor@odmon.example` | Placeholder for the actual recipient used in Test mode. |
+| `BccRecipients` | `["monitor@odmon.example"]` | Placeholder NetCourt-only monitoring BCC recipients. These never replace the primary `To` recipient. |
 | `ClientNumberToRecipientEmail` | configured map | Client-number-to-employee routing. |
 | `FallbackRecipientEnabled` | `false` | Allows global `Email:Recipients` only when explicitly enabled. |
 
@@ -369,8 +369,8 @@ Live routing:
 
 | Client numbers | Primary recipient |
 |---|---|
-| `2`, `15` | `yonatan@ezer-law.com` |
-| `5`, `8`, `3`, `23`, `253` | `amir@ezer-law.com` |
+| `2`, `15` | `employee-b@odmon.example` |
+| `5`, `8`, `3`, `23`, `253` | `employee-a@odmon.example` |
 
 When routing is missing and `FallbackRecipientEnabled=false`, the row is recorded as `MissingRouting` and no email is sent, including no BCC-only email. Worker/database failures continue through `QueueCriticalAlert` and global `Email:Recipients`; NetCourt BCC settings do not apply to operational alerts, daily summaries, or other ODMON email types.
 
@@ -378,7 +378,7 @@ Deployment checklist:
 
 1. Confirm the Integration DB migrations are current and SMTP credentials are available.
 2. Verify `StartFromDocDate` is the intended business start date.
-3. Start with `EmailMode=Test`, `Enabled=true`, and `TestRecipient=odmon@ezer-law.com`.
+3. Start with `EmailMode=Test`, `Enabled=true`, and an approved test mailbox (shown here as `monitor@odmon.example`).
 4. Confirm decision detection, routing logs, BCC count, and PDF attachment behavior without contacting employees.
 5. Confirm the service account can read both configured Odlight roots.
 6. Change only `EmailMode` to `Live` after the test evidence is reviewed.

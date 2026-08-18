@@ -38,13 +38,13 @@ The **Odcanit Allowlist** feature allows you to load ONLY specific cases from Od
 
 #### `OdcanitLoad:TikCounters` (int[])
 - List of TikCounter values (internal integer IDs) to load
-- Example: `[39115, 42020]`
+- Example: `[91011, 91012]`
 - **Default**: `[]` (empty)
 
 #### `OdcanitLoad:TikNumbers` (string[])
-- List of TikNumber values (case numbers like "9/1808") to load
+- List of TikNumber values (case numbers like "9/900003") to load
 - These will be resolved to TikCounters via Odcanit DB lookup
-- Example: `["9/1808", "5/1810"]`
+- Example: `["9/900003", "7/900002"]`
 - **Default**: `[]` (empty)
 
 #### `Testing:Enable` (bool)
@@ -64,13 +64,13 @@ The **Odcanit Allowlist** feature allows you to load ONLY specific cases from Od
 {
   "OdcanitLoad": {
     "EnableAllowList": true,
-    "TikCounters": [39115, 42020],
+    "TikCounters": [91011, 91012],
     "TikNumbers": []
   }
 }
 ```
 
-**Result**: Loads cases with `TikCounter=39115` and `TikCounter=42020` from Odcanit DB.
+**Result**: Loads the synthetic cases with `TikCounter=91011` and `TikCounter=91012` from Odcanit DB.
 
 ### Example 2: Load Cases by TikNumber
 
@@ -79,14 +79,14 @@ The **Odcanit Allowlist** feature allows you to load ONLY specific cases from Od
   "OdcanitLoad": {
     "EnableAllowList": true,
     "TikCounters": [],
-    "TikNumbers": ["9/1808", "5/1810"]
+    "TikNumbers": ["9/900003", "7/900002"]
   }
 }
 ```
 
 **Result**:
-1. Queries Odcanit DB to resolve `"9/1808"` → TikCounter (e.g., 39115)
-2. Queries Odcanit DB to resolve `"5/1810"` → TikCounter (e.g., 42020)
+1. Queries Odcanit DB to resolve `"9/900003"` → TikCounter (e.g., 91011)
+2. Queries Odcanit DB to resolve `"7/900002"` → TikCounter (e.g., 91012)
 3. Loads cases with those TikCounters
 
 ### Example 3: Mixed - TikCounters + TikNumbers
@@ -95,13 +95,13 @@ The **Odcanit Allowlist** feature allows you to load ONLY specific cases from Od
 {
   "OdcanitLoad": {
     "EnableAllowList": true,
-    "TikCounters": [39115],
-    "TikNumbers": ["5/1810"]
+    "TikCounters": [91011],
+    "TikNumbers": ["7/900002"]
   }
 }
 ```
 
-**Result**: Loads case `TikCounter=39115` directly, PLUS resolves `"5/1810"` to its TikCounter and loads it.
+**Result**: Loads the synthetic case `TikCounter=91011` directly, PLUS resolves `"7/900002"` to its TikCounter and loads it.
 
 ### Example 4: Production Mode (No Allowlist)
 
@@ -113,7 +113,7 @@ The **Odcanit Allowlist** feature allows you to load ONLY specific cases from Od
     "TikNumbers": []
   },
   "Sync": {
-    "TikCounters": [39115, 42020, 43000]
+    "TikCounters": [91011, 91012, 91014]
   }
 }
 ```
@@ -153,10 +153,10 @@ The **Odcanit Allowlist** feature allows you to load ONLY specific cases from Od
 ```
 [INFO] OdcanitLoad allowlist ENABLED
 [INFO] Resolving 2 TikNumber(s) to TikCounters
-[DEBUG] Resolved TikNumber '9/1808' -> TikCounter 39115
-[DEBUG] Resolved TikNumber '5/1810' -> TikCounter 42020
+[DEBUG] Resolved TikNumber '9/900003' -> TikCounter 91011
+[DEBUG] Resolved TikNumber '7/900002' -> TikCounter 91012
 [INFO] Resolved 2 of 2 TikNumbers
-[INFO] OdcanitLoad allowlist resolved to 2 TikCounter(s): [39115, 42020]
+[INFO] OdcanitLoad allowlist resolved to 2 TikCounter(s): [91011, 91012]
 [INFO] Loaded 2 cases from Odcanit by TikCounter
 ```
 
@@ -229,14 +229,14 @@ private async Task<int[]> DetermineTikCountersToLoadAsync(CancellationToken ct)
 {
   "OdcanitLoad": {
     "EnableAllowList": true,
-    "TikCounters": [39115],
+    "TikCounters": [91011],
     "TikNumbers": []
   }
 }
 ```
 
 **Expected**:
-- Loads 1 case from Odcanit (TikCounter=39115)
+- Loads 1 synthetic case from Odcanit (TikCounter=91011)
 - No test data from IntegrationDb
 - Full enrichment applied
 
@@ -247,7 +247,7 @@ dotnet run
 
 Look for logs:
 ```
-[INFO] OdcanitLoad allowlist resolved to 1 TikCounter(s): [39115]
+[INFO] OdcanitLoad allowlist resolved to 1 TikCounter(s): [91011]
 [INFO] Loaded 1 cases from Odcanit by TikCounter
 ```
 
@@ -259,13 +259,13 @@ Look for logs:
   "OdcanitLoad": {
     "EnableAllowList": true,
     "TikCounters": [],
-    "TikNumbers": ["9/1808"]
+    "TikNumbers": ["9/900003"]
   }
 }
 ```
 
 **Expected**:
-- Resolves "9/1808" to TikCounter (e.g., 39115)
+- Resolves "9/900003" to TikCounter (e.g., 91011)
 - Loads that case from Odcanit
 - No test data from IntegrationDb
 
@@ -277,8 +277,8 @@ dotnet run
 Look for logs:
 ```
 [INFO] Resolving 1 TikNumber(s) to TikCounters
-[DEBUG] Resolved TikNumber '9/1808' -> TikCounter 39115
-[INFO] OdcanitLoad allowlist resolved to 1 TikCounter(s): [39115]
+[DEBUG] Resolved TikNumber '9/900003' -> TikCounter 91011
+[INFO] OdcanitLoad allowlist resolved to 1 TikCounter(s): [91011]
 ```
 
 ### Test Case 3: Empty Allowlist (Fail-Fast)
@@ -317,14 +317,14 @@ Look for logs:
   "OdcanitLoad": {
     "EnableAllowList": true,
     "TikCounters": [],
-    "TikNumbers": ["999/9999", "9/1808"]
+    "TikNumbers": ["999/9999", "9/900003"]
   }
 }
 ```
 
 **Expected**:
 - Warning for "999/9999" (doesn't exist)
-- Success for "9/1808"
+- Success for "9/900003"
 - Loads the one valid case
 
 **Verification**:
@@ -351,7 +351,7 @@ Look for logs:
 {
   "OdcanitLoad": {
     "EnableAllowList": true,
-    "TikCounters": [39115, 42020],
+    "TikCounters": [91011, 91012],
     "TikNumbers": []
   },
   "Testing": {
@@ -381,8 +381,8 @@ Look for logs:
 **Cause**: TikNumber doesn't exist in Odcanit `Cases` table.
 
 **Solutions**:
-1. Verify the TikNumber format (e.g., "9/1808", not "9-1808")
-2. Query Odcanit DB directly: `SELECT * FROM Cases WHERE TikNumber = '9/1808'`
+1. Verify the TikNumber format (e.g., "9/900003", not "9-900003")
+2. Query Odcanit DB directly with an approved case number; the synthetic documentation example is `SELECT * FROM Cases WHERE TikNumber = '9/900003'`.
 3. Use TikCounter directly instead of TikNumber
 
 ### Issue: Still loading test data from IntegrationDb

@@ -12,8 +12,8 @@
 
 Examples:
 - `"102\5334"` → ClientNumber = `102`
-- `"9/1858"` → ClientNumber = `9`
-- `"7/1235744"` → ClientNumber = `7`
+- `"9/900001"` → ClientNumber = `9`
+- `"7/900002"` → ClientNumber = `7`
 
 **Extraction**: Take substring before the first `\` or `/` separator, then parse as integer.
 
@@ -48,7 +48,7 @@ Examples:
 /// Determines DocumentType from ClientVisualID based on strict business rules.
 /// DocumentType does NOT exist in Odcanit DB and must be derived deterministically.
 /// </summary>
-/// <param name="clientVisualID">ClientVisualID in format "ClientNumber\OtherData", e.g. "102\5334" or "9/1858"</param>
+/// <param name="clientVisualID">ClientVisualID in format "ClientNumber\OtherData", e.g. "102\5334" or "9/900001"</param>
 /// <returns>DocumentType status label</returns>
 /// <exception cref="InvalidOperationException">Thrown if ClientVisualID is invalid or cannot be parsed (critical field)</exception>
 private static string DetermineDocumentTypeFromClientVisualId(string? clientVisualID)
@@ -96,10 +96,10 @@ After DocumentType is derived and set on `c.DocumentType`, the existing critical
 
 ## Examples
 
-### Example 1: TikNumber = 9/1858
+### Example 1: TikNumber = 9/900001
 
 **Input**:
-- `ClientVisualID = "9/1858"`
+- `ClientVisualID = "9/900001"`
 
 **Processing**:
 1. Extract ClientNumber: `"9"` (substring before `/`)
@@ -112,13 +112,13 @@ After DocumentType is derived and set on `c.DocumentType`, the existing critical
 
 **Log**:
 ```
-[DEBUG] DocumentType for TikCounter=39231 derived from ClientVisualID '9/1858': 'כתב תביעה'
+[DEBUG] DocumentType for TikCounter=91013 derived from ClientVisualID '9/900001': 'כתב תביעה'
 ```
 
-### Example 2: TikNumber = 7/1235744
+### Example 2: TikNumber = 7/900002
 
 **Input**:
-- `ClientVisualID = "7/1235744"`
+- `ClientVisualID = "7/900002"`
 
 **Processing**:
 1. Extract ClientNumber: `"7"` (substring before `/`)
@@ -236,19 +236,19 @@ Exception: InvalidOperationException: Cannot determine DocumentType: ClientNumbe
 {
   "OdcanitLoad": {
     "EnableAllowList": true,
-    "TikNumbers": ["9/1858"]
+    "TikNumbers": ["9/900001"]
   }
 }
 ```
 
 **Expected**:
 ```
-[INFO] Resolving 1 TikNumber(s) to TikCounters: [9/1858]
-[DEBUG] Resolved TikNumber '9/1858' -> TikCounter 39231
+[INFO] Resolving 1 TikNumber(s) to TikCounters: [9/900001]
+[DEBUG] Resolved TikNumber '9/900001' -> TikCounter 91013
 [INFO] Loaded 1 cases from Odcanit by TikCounter
-[DEBUG] DocumentType for TikCounter=39231 derived from ClientVisualID '9/1858': 'כתב תביעה'
-[DEBUG] Critical field validated OK: TikCounter=39231, Field=DocumentType, ColumnType=status, Value='כתב תביעה'
-[INFO] Successfully created Monday item: TikNumber=9/1858, TikCounter=39231
+[DEBUG] DocumentType for TikCounter=91013 derived from ClientVisualID '9/900001': 'כתב תביעה'
+[DEBUG] Critical field validated OK: TikCounter=91013, Field=DocumentType, ColumnType=status, Value='כתב תביעה'
+[INFO] Successfully created Monday item: TikNumber=9/900001, TikCounter=91013
 ```
 
 **Result**: ✅ Item created with DocumentType = "כתב תביעה"
@@ -260,14 +260,14 @@ Exception: InvalidOperationException: Cannot determine DocumentType: ClientNumbe
 {
   "OdcanitLoad": {
     "EnableAllowList": true,
-    "TikNumbers": ["9/1858", "7/1235744"]
+    "TikNumbers": ["9/900001", "7/900002"]
   }
 }
 ```
 
 **Expected**:
-- Case 1 (9/1858): DocumentType = "כתב תביעה"
-- Case 2 (7/1235744): DocumentType = "כתב תביעה"
+- Case 1 (9/900001): DocumentType = "כתב תביעה"
+- Case 2 (7/900002): DocumentType = "כתב תביעה"
 
 **Result**: ✅ Both items created successfully
 
@@ -343,5 +343,5 @@ Exception: InvalidOperationException: Cannot determine DocumentType: ClientNumbe
 
 ### ✅ Deterministic and Auditable
 - Same ClientVisualID → Same DocumentType (always)
-- Clear logs show derivation: `"derived from ClientVisualID '9/1858': 'כתב תביעה'"`
+- Clear logs show derivation: `"derived from ClientVisualID '9/900001': 'כתב תביעה'"`
 - Exceptions include full context (ClientVisualID, ClientNumber, reason)

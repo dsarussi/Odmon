@@ -792,7 +792,7 @@ namespace Odmon.Worker.Services
         // ───────── Step 1: Download ─────────
         // Pre-signed URLs (e.g. S3 with X-Amz-Signature) are invalidated by any change. Use the exact URL
         // from Monday; do not add query params (e.g. response-content-disposition) or parse/rebuild the URL.
-        // Manual test: Re-run worker for AssetId=198847023, ItemId=2728213714; expect HTTP 200 and file saved.
+        // Manual test: Re-run worker for synthetic AssetId=900000001, ItemId=9000000003; expect HTTP 200 and file saved.
         // If 403: check UrlWasModified=false and UrlHashPrefix change between attempts (fresh URL per retry).
 
         private async Task DownloadAssetToInboxAsync(

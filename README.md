@@ -104,7 +104,7 @@ Download URLs from Monday may be S3 pre-signed (with `X-Amz-Signature`). Any cha
 
 To verify after a 403 fix:
 
-1. Re-run the Document Ingestion worker for the same item/asset (e.g. AssetId=198847023, ItemId=2728213714).
+1. Re-run the Document Ingestion worker for the same synthetic item/asset (e.g. AssetId=900000001, ItemId=9000000003).
 2. **Expected:** HTTP 200 for the GET to the Monday/S3 URL and file saved locally; downstream ingestion proceeds.
 3. **If still 403:** Check logs for `UrlWasModified=false` and that `UrlHashPrefix` changes between retry attempts (fresh URL per attempt). If so, the cause is likely permission scope or expired pre-signed URL; otherwise check for URL tampering. Never log the full URL or query string.
 
@@ -172,5 +172,5 @@ dotnet run
 
 ### Known risk (no behavior change)
 
-- **SyncService** (around line 398–400): hardcoded `TikCounter == 31490` is treated as an explicit test case for sync. Recommendation: move to config (e.g. `Safety:ExplicitTestTikCounters`) or remove for production if no longer needed.
+- **SyncService** (around line 398–400): a hardcoded production-derived `TikCounter` selector is treated as an explicit test case for sync. Its value is intentionally omitted here. Recommendation: move it to config (e.g. `Safety:ExplicitTestTikCounters`) or remove it from production if no longer needed.
 

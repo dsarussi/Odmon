@@ -17,7 +17,7 @@ namespace Odmon.Worker.Tests
                 HearingBackfillService.CreateValidatedMapping(
                     boardId: 5035534500,
                     mondayItemId: 123456,
-                    tikNumber: "10821-03-26",
+                    tikNumber: "99999-01-99",
                     tikCounter: -1,
                     createdAtUtc: DateTime.UtcNow));
 
@@ -30,12 +30,12 @@ namespace Odmon.Worker.Tests
             var mapping = HearingBackfillService.CreateValidatedMapping(
                 boardId: 5035534500,
                 mondayItemId: 123456,
-                tikNumber: "10821-03-26",
-                tikCounter: 39283,
+                tikNumber: "99999-01-99",
+                tikCounter: 91001,
                 createdAtUtc: DateTime.UtcNow);
 
-            Assert.Equal(39283, mapping.TikCounter);
-            Assert.Equal("10821-03-26", mapping.TikNumber);
+            Assert.Equal(91001, mapping.TikCounter);
+            Assert.Equal("99999-01-99", mapping.TikNumber);
         }
 
         [Fact]
@@ -47,7 +47,7 @@ namespace Odmon.Worker.Tests
                 Id = 1,
                 BoardId = 5035534500,
                 MondayItemId = 555,
-                TikNumber = "10821-03-26",
+                TikNumber = "99999-01-99",
                 TikCounter = -7,
                 CreatedAtUtc = DateTime.UtcNow
             });
@@ -55,7 +55,7 @@ namespace Odmon.Worker.Tests
 
             var reader = new FakeOdcanitReader
             {
-                ResolvedTikNumbers = { ["10821-03-26"] = 39283 }
+                ResolvedTikNumbers = { ["99999-01-99"] = 91001 }
             };
             var service = new MondayItemMappingIntegrityService(
                 db,
@@ -65,7 +65,7 @@ namespace Odmon.Worker.Tests
             var issues = await service.FindIntegrityIssuesAsync(CancellationToken.None);
 
             Assert.Contains(issues, i => i.Reason.Contains("real positive Odcanit counter", StringComparison.Ordinal));
-            Assert.Contains(issues, i => i.Reason.Contains("Expected real TikCounter=39283", StringComparison.Ordinal));
+            Assert.Contains(issues, i => i.Reason.Contains("Expected real TikCounter=91001", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -77,7 +77,7 @@ namespace Odmon.Worker.Tests
                 Id = 2,
                 BoardId = 5035534500,
                 MondayItemId = 777,
-                TikNumber = "10821-03-26",
+                TikNumber = "99999-01-99",
                 TikCounter = 11111,
                 CreatedAtUtc = DateTime.UtcNow
             });
@@ -85,7 +85,7 @@ namespace Odmon.Worker.Tests
 
             var reader = new FakeOdcanitReader
             {
-                ResolvedTikNumbers = { ["10821-03-26"] = 39283 }
+                ResolvedTikNumbers = { ["99999-01-99"] = 91001 }
             };
             var service = new MondayItemMappingIntegrityService(
                 db,
@@ -95,7 +95,7 @@ namespace Odmon.Worker.Tests
             var issues = await service.FindIntegrityIssuesAsync(CancellationToken.None);
 
             var issue = Assert.Single(issues);
-            Assert.Contains("Expected real TikCounter=39283", issue.Reason);
+            Assert.Contains("Expected real TikCounter=91001", issue.Reason);
         }
 
         [Fact]
@@ -108,7 +108,7 @@ namespace Odmon.Worker.Tests
                 BoardId = 5035534500,
                 MondayItemId = 888,
                 TikNumber = "101/15",
-                TikCounter = 39283,
+                TikCounter = 91001,
                 CreatedAtUtc = DateTime.UtcNow
             });
             await db.SaveChangesAsync();
@@ -131,12 +131,12 @@ namespace Odmon.Worker.Tests
                 BoardId = 5035534500,
                 MondayItemId = 777,
                 TikNumber = "5/100",
-                TikCounter = 39283,
+                TikCounter = 91001,
                 CreatedAtUtc = DateTime.UtcNow
             };
             var odcanitCase = new OdcanitCase
             {
-                TikCounter = 39283,
+                TikCounter = 91001,
                 TikNumber = "5/200"
             };
 
@@ -157,11 +157,11 @@ namespace Odmon.Worker.Tests
                 boardId: 5035534500,
                 mondayItemId: 123456,
                 tikNumber: "5/100",
-                tikCounter: 39283,
+                tikCounter: 91001,
                 createdAtUtc: DateTime.UtcNow);
             var odcanitCase = new OdcanitCase
             {
-                TikCounter = 39283,
+                TikCounter = 91001,
                 TikNumber = "5/100"
             };
             MondayItemMappingIntegrityService.ValidateMappingMatchesCase(
@@ -180,7 +180,7 @@ namespace Odmon.Worker.Tests
             };
             var hearing = new OdcanitDiaryEvent
             {
-                TikCounter = 39283,
+                TikCounter = 91001,
                 StartDate = start,
                 JudgeName = "Judge",
                 City = "City",
@@ -207,7 +207,7 @@ namespace Odmon.Worker.Tests
             };
             var hearing = new OdcanitDiaryEvent
             {
-                TikCounter = 39283,
+                TikCounter = 91001,
                 StartDate = start.AddDays(1),
                 JudgeName = "NewJudge",
                 City = "NewCity",

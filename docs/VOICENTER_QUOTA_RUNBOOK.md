@@ -13,7 +13,7 @@ This runbook covers Voicenter weekly-quota tracking, the warning flow, and the s
   - `CdrList` — `POST https://api.voicenter.com/hub/cdr/`
   - `CallHistoryDetail` — `GET https://api-manager.voicenter.co/api-manager-v1/Call/History/{CallID}`
   - `Other` — reserved for future endpoints
-- The Voicenter weekly limit (currently **400 / week** for User 203570) is treated as applying **only** to `CallHistoryDetail` requests. `CdrList` is tracked separately for visibility.
+- The Voicenter weekly limit (currently **400 / week** for the configured account) is treated as applying **only** to `CallHistoryDetail` requests. `CdrList` is tracked separately for visibility.
 - A **warning email** is sent once per ISO week when `CallHistoryDetail` usage reaches `WeeklyUsageWarningThreshold` (default 350).
 - A typed `VoicenterQuotaExceededException` short-circuits the cycle the moment Voicenter returns HTTP 401 / a usage-limit body, and remaining CDR rows in the cycle are counted as `SkippedDueToQuotaExceeded`.
 - A new local cache (`dbo.VoicenterCallProcessingStates`) stops the worker from re-fetching call details for CallIDs already known to be `Written`, `NoAI`, `NoMatch`, `Duplicate`, or `QuotaExceeded`.

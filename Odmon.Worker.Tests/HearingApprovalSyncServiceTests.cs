@@ -20,10 +20,10 @@ namespace Odmon.Worker.Tests
             const long boardId = 5035534500;
             db.MondayItemMappings.Add(new MondayItemMapping
             {
-                TikCounter = 43358,
-                TikNumber = "1/12162",
+                TikCounter = 91003,
+                TikNumber = "98/91003",
                 BoardId = boardId,
-                MondayItemId = 3000345568,
+                MondayItemId = 9000000004,
                 CreatedAtUtc = DateTime.UtcNow
             });
             await db.SaveChangesAsync();
@@ -53,8 +53,8 @@ namespace Odmon.Worker.Tests
                 {
                     new OdcanitCase
                     {
-                        TikCounter = 43358,
-                        TikNumber = "23/159"
+                        TikCounter = 91003,
+                        TikNumber = "99/91003"
                     }
                 },
                 CancellationToken.None);

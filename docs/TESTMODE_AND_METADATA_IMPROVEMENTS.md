@@ -55,7 +55,7 @@ _logger.LogInformation(
 
 ```
 [INFO] Data source: Odcanit, testMode=False
-[INFO] OdcanitLoad allowlist resolved to 2 TikCounter(s): [39115, 42020]
+[INFO] OdcanitLoad allowlist resolved to 2 TikCounter(s): [91011, 91012]
 ```
 
 or
@@ -143,15 +143,15 @@ else if (actualColumnType == "dropdown")
 
 **Non-critical field metadata failure** (sync continues):
 ```
-[WARN] Failed to fetch/validate metadata for non-critical dropdown column dropdown_mkxjrssr on board 5035534500. ClientNumber 'ClientA' for TikCounter 39115, TikNumber 9/1808 will be omitted from this sync. Exception: Failed to fetch allowed labels for column dropdown_mkxjrssr on board 5035534500. This is likely an infrastructure issue (auth/network/config). Exception: Unauthorized
-[INFO] Successfully created Monday item: TikNumber=9/1808, TikCounter=39115, MondayItemId=7890123456 (without ClientNumber column)
+[WARN] Failed to fetch/validate metadata for non-critical dropdown column dropdown_mkxjrssr on board 5035534500. ClientNumber 'SyntheticClient' for TikCounter 91011, TikNumber 9/900003 will be omitted from this sync. Exception: Failed to fetch allowed labels for column dropdown_mkxjrssr on board 5035534500. This is likely an infrastructure issue (auth/network/config). Exception: Unauthorized
+[INFO] Successfully created Monday item: TikNumber=9/900003, TikCounter=91011, MondayItemId=7890123456 (without ClientNumber column)
 ```
 
 **Critical field metadata failure** (sync stops for that record):
 ```
 [ERROR] Failed to fetch allowed STATUS labels for column color_mkxhq546 on board 5035534500...
 Exception: InvalidOperationException: Failed to fetch allowed STATUS labels for column color_mkxhq546 on board 5035534500. This is likely an infrastructure issue (auth/network/config). Exception: Unauthorized
-[ERROR] CRITICAL VALIDATION FAILED - Item NOT created: TikNumber=9/1808, TikCounter=39115...
+[ERROR] CRITICAL VALIDATION FAILED - Item NOT created: TikNumber=9/900003, TikCounter=91011...
 ```
 
 ## Build Status
@@ -209,7 +209,7 @@ Build succeeded.
   "OdmonTestCases": { "Enable": false },
   "OdcanitLoad": {
     "EnableAllowList": true,
-    "TikCounters": [39115]
+    "TikCounters": [91011]
   }
 }
 ```
@@ -217,7 +217,7 @@ Build succeeded.
 **Expected Log**:
 ```
 [INFO] Data source: Odcanit, testMode=False
-[INFO] OdcanitLoad allowlist resolved to 1 TikCounter(s): [39115]
+[INFO] OdcanitLoad allowlist resolved to 1 TikCounter(s): [91011]
 ```
 
 **Result**: ✅ testMode=False, uses production board/group
@@ -269,8 +269,8 @@ Build succeeded.
 
 **Expected**:
 ```
-[WARN] Failed to fetch/validate metadata for non-critical dropdown column dropdown_mkxjrssr on board 5035534500. ClientNumber 'ClientA' for TikCounter 39115, TikNumber 9/1808 will be omitted from this sync. Exception: Unauthorized
-[INFO] Successfully created Monday item: TikNumber=9/1808, TikCounter=39115, MondayItemId=7890123456
+[WARN] Failed to fetch/validate metadata for non-critical dropdown column dropdown_mkxjrssr on board 5035534500. ClientNumber 'SyntheticClient' for TikCounter 91011, TikNumber 9/900003 will be omitted from this sync. Exception: Unauthorized
+[INFO] Successfully created Monday item: TikNumber=9/900003, TikCounter=91011, MondayItemId=7890123456
 ```
 
 **Result**: ✅ Item created without ClientNumber field, sync continues

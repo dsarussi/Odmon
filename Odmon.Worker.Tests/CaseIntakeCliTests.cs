@@ -14,12 +14,12 @@ namespace Odmon.Worker.Tests
         [Fact]
         public void TryParse_ExactForwardedServerArguments_DetectsReadOnlyCommand()
         {
-            var arguments = new[] { "--case-intake-tik-counter", "40514" };
+            var arguments = new[] { "--case-intake-tik-counter", "91002" };
 
             var detected = CaseIntakeCli.TryParse(arguments, out var request);
 
             Assert.True(detected);
-            Assert.Equal(40514, request.TikCounter);
+            Assert.Equal(91002, request.TikCounter);
             Assert.False(request.DumpPdfText);
             Assert.False(request.DumpNormalizedPdfText);
         }
@@ -29,14 +29,14 @@ namespace Odmon.Worker.Tests
         {
             var arguments = new[]
             {
-                "--case-intake-tik-counter", "40514",
+                "--case-intake-tik-counter", "91002",
                 "--dump-pdf-text"
             };
 
             var detected = CaseIntakeCli.TryParse(arguments, out var request);
 
             Assert.True(detected);
-            Assert.Equal(40514, request.TikCounter);
+            Assert.Equal(91002, request.TikCounter);
             Assert.True(request.DumpPdfText);
             Assert.False(request.DumpNormalizedPdfText);
         }
@@ -46,14 +46,14 @@ namespace Odmon.Worker.Tests
         {
             var arguments = new[]
             {
-                "--case-intake-tik-counter", "40514",
+                "--case-intake-tik-counter", "91002",
                 "--dump-normalized-pdf-text"
             };
 
             var detected = CaseIntakeCli.TryParse(arguments, out var request);
 
             Assert.True(detected);
-            Assert.Equal(40514, request.TikCounter);
+            Assert.Equal(91002, request.TikCounter);
             Assert.False(request.DumpPdfText);
             Assert.True(request.DumpNormalizedPdfText);
         }
@@ -62,11 +62,11 @@ namespace Odmon.Worker.Tests
         public void TryParse_EqualsSyntax_DetectsReadOnlyCommand()
         {
             var detected = CaseIntakeCli.TryParse(
-                ["--case-intake-tik-counter=40514"],
+                ["--case-intake-tik-counter=91002"],
                 out var request);
 
             Assert.True(detected);
-            Assert.Equal(40514, request.TikCounter);
+            Assert.Equal(91002, request.TikCounter);
         }
 
         [Fact]
@@ -84,12 +84,12 @@ namespace Odmon.Worker.Tests
             new[] { "--case-intake-tik-counter", "-1" },
             new[] { "--case-intake-tik-counter", "not-a-number" },
             new[] { "--dump-pdf-text" },
-            new[] { "--case-intake-tik-counter", "40514", "--dump-pdf-text=true" },
+            new[] { "--case-intake-tik-counter", "91002", "--dump-pdf-text=true" },
             new[] { "--dump-normalized-pdf-text" },
-            new[] { "--case-intake-tik-counter", "40514", "--dump-normalized-pdf-text=true" },
+            new[] { "--case-intake-tik-counter", "91002", "--dump-normalized-pdf-text=true" },
             new[]
             {
-                "--case-intake-tik-counter", "40514",
+                "--case-intake-tik-counter", "91002",
                 "--dump-pdf-text",
                 "--dump-normalized-pdf-text"
             }
@@ -107,8 +107,8 @@ namespace Odmon.Worker.Tests
         {
             var arguments = new[]
             {
-                "--case-intake-tik-counter", "40514",
-                "--case-intake-tik-counter=40514"
+                "--case-intake-tik-counter", "91002",
+                "--case-intake-tik-counter=91002"
             };
 
             Assert.Throws<ArgumentException>(() => CaseIntakeCli.TryParse(arguments, out _));
@@ -119,7 +119,7 @@ namespace Odmon.Worker.Tests
         {
             using var host = CaseIntakeCli.BuildReadOnlyHost(
                 [
-                    "--case-intake-tik-counter", "40514",
+                    "--case-intake-tik-counter", "91002",
                     "--dump-normalized-pdf-text",
                     "--ConnectionStrings:OdcanitDb", "Server=localhost;Database=Odcanit;Integrated Security=true"
                 ]);
@@ -140,8 +140,8 @@ namespace Odmon.Worker.Tests
                 7001,
                 CaseIntakeDocumentClassifier.PrivatePartyDemandLetterName,
                 @"\\server\docs\demand.pdf",
-                40514,
-                "40514/1",
+                91002,
+                "91002/1",
                 "1",
                 "PDF",
                 new DateTime(2026, 8, 18));
@@ -158,7 +158,7 @@ namespace Odmon.Worker.Tests
             await CaseIntakeCli.DumpPdfTextAsync(
                 reader,
                 extractor,
-                40514,
+                91002,
                 output,
                 CancellationToken.None);
 
@@ -177,37 +177,37 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task DumpNormalizedPdfText_PrintsProductionNormalizedTextWithDelimiters()
+        public async Task DumpNormalizedPdfText_PrintsSyntheticNormalizedTextWithDelimiters()
         {
             var approved = new OdcanitCaseDocument(
-                2214486,
+                9102001,
                 CaseIntakeDocumentClassifier.PrivatePartyDemandLetterName,
                 @"\\server\docs\demand.pdf",
-                40514,
-                "40514/1",
+                91002,
+                "91002/1",
                 "1",
                 "PDF",
                 new DateTime(2026, 8, 18));
             var reader = new FakeDocumentReader([approved]);
-            var extractor = new FakePdfTextExtractor("תואמש ימד464.0₪");
+            var extractor = new FakePdfTextExtractor("תואמש ימד500.0₪");
             using var output = new StringWriter();
 
             await CaseIntakeCli.DumpNormalizedPdfTextAsync(
                 reader,
                 extractor,
                 new HebrewPdfTextNormalizer(),
-                40514,
+                91002,
                 output,
                 CancellationToken.None);
 
             var printed = output.ToString();
-            Assert.Contains("Document ID: 2214486", printed, StringComparison.Ordinal);
+            Assert.Contains("Document ID: 9102001", printed, StringComparison.Ordinal);
             Assert.Contains(
                 $"Document name: {CaseIntakeDocumentClassifier.PrivatePartyDemandLetterName}",
                 printed,
                 StringComparison.Ordinal);
             Assert.Contains(
-                "BEGIN NORMALIZED TEXT\r\nדמי שמאות 464.0₪\r\nEND NORMALIZED TEXT",
+                "BEGIN NORMALIZED TEXT\r\nדמי שמאות 500.0₪\r\nEND NORMALIZED TEXT",
                 printed,
                 StringComparison.Ordinal);
             Assert.DoesNotContain("תואמש ימד", printed, StringComparison.Ordinal);

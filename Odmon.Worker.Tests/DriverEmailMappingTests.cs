@@ -19,11 +19,11 @@ namespace Odmon.Worker.Tests
             {
                 PageName = "פרטי תיק נזיקין מליגל",
                 FieldName = "אימייל נהג",
-                strData = " driver@example.com "
+                strData = " driver@odmon.example "
             };
 
             Assert.True(SqlOdcanitReader.ApplyUserDataField(odcanitCase, row));
-            Assert.Equal("driver@example.com", odcanitCase.DriverEmail);
+            Assert.Equal("driver@odmon.example", odcanitCase.DriverEmail);
         }
 
         [Fact]
@@ -34,11 +34,11 @@ namespace Odmon.Worker.Tests
             Assert.True(SyncService.TryAddValidatedEmailColumn(
                 columns,
                 DriverEmailColumnId,
-                "driver@example.com"));
+                "driver@odmon.example"));
 
             var json = JsonSerializer.Serialize(columns[DriverEmailColumnId]);
-            Assert.Contains("\"email\":\"driver@example.com\"", json);
-            Assert.Contains("\"text\":\"driver@example.com\"", json);
+            Assert.Contains("\"email\":\"driver@odmon.example\"", json);
+            Assert.Contains("\"text\":\"driver@odmon.example\"", json);
         }
 
         [Theory]
@@ -84,8 +84,8 @@ namespace Odmon.Worker.Tests
         {
             var odcanitCase = new OdcanitCase
             {
-                ClientEmail = "client@example.com",
-                PolicyHolderEmail = "policy@example.com",
+                ClientEmail = "client@odmon.example",
+                PolicyHolderEmail = "policy@odmon.example",
                 DriverEmail = null
             };
             var columns = new Dictionary<string, object>();
@@ -103,20 +103,20 @@ namespace Odmon.Worker.Tests
             var original = new OdcanitCase
             {
                 TikNumber = "1",
-                ClientEmail = "old-client@example.com",
-                DriverEmail = "driver@example.com"
+                ClientEmail = "old-client@odmon.example",
+                DriverEmail = "driver@odmon.example"
             };
             var clientChanged = new OdcanitCase
             {
                 TikNumber = "1",
-                ClientEmail = "new-client@example.com",
-                DriverEmail = "driver@example.com"
+                ClientEmail = "new-client@odmon.example",
+                DriverEmail = "driver@odmon.example"
             };
             var driverChanged = new OdcanitCase
             {
                 TikNumber = "1",
-                ClientEmail = "old-client@example.com",
-                DriverEmail = "new-driver@example.com"
+                ClientEmail = "old-client@odmon.example",
+                DriverEmail = "new-driver@odmon.example"
             };
 
             Assert.Equal(

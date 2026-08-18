@@ -8,7 +8,7 @@ namespace Odmon.Worker.OdcanitAccess
         Task<List<OdcanitCase>> GetCasesByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct);
         /// <summary>Fetches all vwExportToOuterSystems_YomanData rows for the given TikCounters (no date/status filter).</summary>
         Task<List<OdcanitDiaryEvent>> GetDiaryEventsByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct);
-        /// <summary>Resolves TikNumber strings (e.g., "9/1808") to TikCounter integers. Returns dictionary of resolved mappings.</summary>
+        /// <summary>Resolves TikNumber strings (e.g., "9/900003") to TikCounter integers. Returns dictionary of resolved mappings.</summary>
         Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(IEnumerable<string> tikNumbers, CancellationToken ct);
         /// <summary>
         /// Returns all TikCounters from vwExportToOuterSystems_Files where tsCreateDate >= cutoffDate.

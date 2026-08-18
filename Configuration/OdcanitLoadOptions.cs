@@ -21,7 +21,7 @@ namespace Odmon.Worker.Configuration
         public List<int> TikCounters { get; set; } = new();
 
         /// <summary>
-        /// List of TikNumber values to load (e.g., "9/1808").
+        /// List of TikNumber values to load (e.g., "9/900003").
         /// These will be resolved to TikCounters via Odcanit DB lookup.
         /// Only used when EnableAllowList=true.
         /// </summary>

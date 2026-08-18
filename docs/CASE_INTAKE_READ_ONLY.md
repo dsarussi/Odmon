@@ -23,10 +23,10 @@ explicit `FinancialCandidates`; they are not mapped to Odcanit fields.
 From a secured terminal with the existing Odcanit read connection configured, run:
 
 ```powershell
-dotnet run --project Odmon.Worker.csproj -- --case-intake-tik-counter 40514
+dotnet run --project Odmon.Worker.csproj -- --case-intake-tik-counter 91002
 ```
 
-Replace `40514` with another specific positive `TikCounter` when needed. This one-shot mode resolves
+Replace the synthetic `91002` example with a specifically approved positive `TikCounter` when needed. This one-shot mode resolves
 only the scoped read service, prints an indented structured JSON result, and exits
 before the production host builder is created. Its isolated service container has no
 `IHostedService`, Integration DB, Monday client, or Odcanit writer registrations. The

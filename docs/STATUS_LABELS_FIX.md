@@ -166,7 +166,7 @@ Exception: InvalidOperationException: Failed to fetch allowed STATUS labels for 
 ```
 [INFO] Data source: Odcanit (allowlist), testMode=False, Safety:TestMode=False
 [INFO] Loaded 1 cases from Odcanit by TikCounter
-[INFO] Case 39115 (9/1808) action=created testMode=False
+[INFO] Synthetic case 91011 (9/900003) action=created testMode=False
 ```
 
 ### Valid Status Values Now Accepted
@@ -185,7 +185,7 @@ Exception: InvalidOperationException: Failed to fetch allowed STATUS labels for 
 [DEBUG] Found STATUS label for column color_mkxhq546 (key=0): 'כתב תביעה'
 [DEBUG] Found STATUS label for column color_mkxhq546 (key=1): 'כתב הגנה'
 [INFO] Resolved 4 allowed STATUS label(s) for column color_mkxhq546 on board 5035534500: [כתב תביעה, כתב הגנה, תצהיר עד ראשי, תצהיר מומחה]
-[DEBUG] Critical field validated OK: TikCounter=39115, Field=DocumentType, ColumnType=status, Value='כתב הגנה'
+[DEBUG] Critical field validated OK: TikCounter=91011, Field=DocumentType, ColumnType=status, Value='כתב הגנה'
 ```
 
 ## Configuration Changes
@@ -215,8 +215,8 @@ Exception: InvalidOperationException: Failed to fetch allowed STATUS labels for 
 {
   "OdcanitLoad": {
     "EnableAllowList": true,
-    "TikCounters": [39115, 42020],
-    "TikNumbers": ["9/1808"]
+    "TikCounters": [91011, 91012],
+    "TikNumbers": ["9/900003"]
   },
   "Testing": {
     "Enable": false  // MUST be false
@@ -250,13 +250,13 @@ System.InvalidOperationException: Status column color_mkxhq546 not found on boar
 
 **Invalid Label Value**:
 ```
-[ERROR] CRITICAL FIELD VALIDATION FAILED: TikCounter=39115, TikNumber=9/1808, Field=DocumentType, ColumnId=color_mkxhq546, ColumnType=status, Value='מסמך לא ידוע', Reason=INVALID_LABEL, AllowedLabels=[כתב תביעה, כתב הגנה, תצהיר עד ראשי, תצהיר מומחה]
+[ERROR] CRITICAL FIELD VALIDATION FAILED: TikCounter=91011, TikNumber=9/900003, Field=DocumentType, ColumnId=color_mkxhq546, ColumnType=status, Value='מסמך לא ידוע', Reason=INVALID_LABEL, AllowedLabels=[כתב תביעה, כתב הגנה, תצהיר עד ראשי, תצהיר מומחה]
 ```
 **Action**: Fix data in Odcanit DB or add label to Monday column.
 
 **Missing Value**:
 ```
-[ERROR] CRITICAL FIELD VALIDATION FAILED: TikCounter=39115, TikNumber=9/1808, Field=DocumentType, ColumnId=color_mkxhq546, Value=<null/empty>, Reason=MISSING_VALUE
+[ERROR] CRITICAL FIELD VALIDATION FAILED: TikCounter=91011, TikNumber=9/900003, Field=DocumentType, ColumnId=color_mkxhq546, Value=<null/empty>, Reason=MISSING_VALUE
 ```
 **Action**: Fix data in Odcanit DB (DocumentType is required).
 
@@ -266,19 +266,19 @@ System.InvalidOperationException: Status column color_mkxhq546 not found on boar
 
 **Setup**:
 - `OdcanitLoad:EnableAllowList=true`
-- `TikCounters=[39115]`
+- `TikCounters=[91011]`
 - DB has `DocumentType="כתב הגנה"`
 - Monday has label "כתב הגנה"
 
 **Expected Logs**:
 ```
 [INFO] Data source: Odcanit (allowlist), testMode=False, Safety:TestMode=False
-[INFO] OdcanitLoad allowlist resolved to 1 TikCounter(s): [39115]
+[INFO] OdcanitLoad allowlist resolved to 1 TikCounter(s): [91011]
 [INFO] Loaded 1 cases from Odcanit by TikCounter
 [DEBUG] Detected column type for critical field DocumentType (ColumnId=color_mkxhq546): status
 [INFO] Resolved 4 allowed STATUS label(s) for column color_mkxhq546 on board 5035534500: [כתב תביעה, כתב הגנה, תצהיר עד ראשי, תצהיר מומחה]
-[DEBUG] Critical field validated OK: TikCounter=39115, Field=DocumentType, ColumnType=status, Value='כתב הגנה'
-[INFO] Successfully created Monday item: TikNumber=9/1808, TikCounter=39115, MondayItemId=...
+[DEBUG] Critical field validated OK: TikCounter=91011, Field=DocumentType, ColumnType=status, Value='כתב הגנה'
+[INFO] Successfully created Monday item: TikNumber=9/900003, TikCounter=91011, MondayItemId=...
 ```
 
 **Result**: ✅ Item created with correct DocumentType.
@@ -306,7 +306,7 @@ Exception: InvalidOperationException: Failed to fetch allowed STATUS labels for 
 **Expected**:
 ```
 [INFO] Resolved 4 allowed STATUS label(s) for column color_mkxhq546 on board 5035534500: [כתב תביעה, כתב הגנה, תצהיר עד ראשי, תצהיר מומחה]
-[ERROR] CRITICAL FIELD VALIDATION FAILED: TikCounter=39115, TikNumber=9/1808, Field=DocumentType, ColumnId=color_mkxhq546, ColumnType=status, Value='מסמך לא ידוע', Reason=INVALID_LABEL, AllowedLabels=[כתב תביעה, כתב הגנה, תצהיר עד ראשי, תצהיר מומחה]
+[ERROR] CRITICAL FIELD VALIDATION FAILED: TikCounter=91011, TikNumber=9/900003, Field=DocumentType, ColumnId=color_mkxhq546, ColumnType=status, Value='מסמך לא ידוע', Reason=INVALID_LABEL, AllowedLabels=[כתב תביעה, כתב הגנה, תצהיר עד ראשי, תצהיר מומחה]
 [ERROR] CRITICAL VALIDATION FAILED - Item NOT created...
 ```
 
@@ -350,7 +350,7 @@ Exception: InvalidOperationException: Failed to fetch allowed STATUS labels for 
 ### ✅ Test Mode Properly Disabled
 - `testMode=False` when using Odcanit allowlist
 - No synthetic TikCounters (900xxx)
-- Real TikCounters from Odcanit (39115, 42020, etc.)
+- Approved TikCounters from Odcanit (synthetic documentation examples: 91011, 91012)
 - Data source logged: "Odcanit (allowlist)"
 
 ### ✅ Critical Field Validation Works

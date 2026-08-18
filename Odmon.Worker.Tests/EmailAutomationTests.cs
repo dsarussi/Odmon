@@ -31,15 +31,15 @@ namespace Odmon.Worker.Tests
         }
 
         [Theory]
-        [InlineData(5, "amir@ezer-law.com")]
-        [InlineData(8, "amir@ezer-law.com")]
-        [InlineData(23, "amir@ezer-law.com")]
-        [InlineData(253, "amir@ezer-law.com")]
-        [InlineData(101, "amir@ezer-law.com")]
-        [InlineData(3, "amir@ezer-law.com")]
-        [InlineData(2, "yonatan@ezer-law.com")]
-        [InlineData(15, "yonatan@ezer-law.com")]
-        [InlineData(999, "eden@ezer-law.com")]
+        [InlineData(5, EmailAutomationService.AmirEmail)]
+        [InlineData(8, EmailAutomationService.AmirEmail)]
+        [InlineData(23, EmailAutomationService.AmirEmail)]
+        [InlineData(253, EmailAutomationService.AmirEmail)]
+        [InlineData(101, EmailAutomationService.AmirEmail)]
+        [InlineData(3, EmailAutomationService.AmirEmail)]
+        [InlineData(2, EmailAutomationService.YonatanEmail)]
+        [InlineData(15, EmailAutomationService.YonatanEmail)]
+        [InlineData(999, EmailAutomationService.EdenEmail)]
         public void ClientRoutingResolvesExpectedEmployee(
             int clientNumber,
             string expectedEmail)
@@ -79,7 +79,7 @@ namespace Odmon.Worker.Tests
                 Enabled = true,
                 SubjectRegex = @"\b\d{1,6}-\d{2}-\d{2}\b",
                 TestForwardEnabled = true,
-                TestForwardTo = "employee@ezer-law.com"
+                TestForwardTo = "employee@odmon.example"
             });
             var service = CreateService(db, graph, settings);
 
@@ -103,17 +103,17 @@ namespace Odmon.Worker.Tests
         public async Task IdempotencyPreventsDuplicateForward()
         {
             await using var db = CreateDb();
-            var graph = new FakeGraphClient(Message("graph-1", "<same@test>"));
+            var graph = new FakeGraphClient(Message("graph-1", "<same@odmon.example>"));
             var service = CreateService(db, graph, dryRun: false, testForwardEnabled: true);
             await service.RunAsync(CancellationToken.None);
             var auditCount = db.EmailAutomationLogs.Count();
 
-            graph.Enqueue(Message("graph-2", "<same@test>"), "delta-2");
+            graph.Enqueue(Message("graph-2", "<same@odmon.example>"), "delta-2");
             await service.RunAsync(CancellationToken.None);
 
             Assert.Single(graph.Forwards);
             Assert.Equal(auditCount, db.EmailAutomationLogs.Count());
-            Assert.DoesNotContain(db.EmailAutomationLogs, x => x.GraphMessageId.Contains("same@test"));
+            Assert.DoesNotContain(db.EmailAutomationLogs, x => x.GraphMessageId.Contains("same@odmon.example"));
         }
 
         [Fact]
@@ -209,7 +209,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task Client5_ResolvesToAmir_ButActuallyForwardsOnlyToOdmon()
+        public async Task Client5_ResolvesToPrimaryEmployee_ButActuallyForwardsOnlyToTestMailbox()
         {
             await using var db = CreateDb();
             var graph = new FakeGraphClient(Message("graph-1", "<mail-1@test>"));
@@ -225,17 +225,17 @@ namespace Odmon.Worker.Tests
             var audit = Assert.Single(
                 db.EmailAutomationLogs.Where(
                     x => x.Action == EmailAutomationActions.ForwardedToTestMailbox));
-            Assert.Equal("amir@ezer-law.com", audit.ResolvedTargetEmail);
+            Assert.Equal(EmailAutomationService.AmirEmail, audit.ResolvedTargetEmail);
             Assert.Equal(456, audit.ResolvedTikCounter);
             AssertPrivacyMinimizedAudit(audit);
-            Assert.Equal("odmon@ezer-law.com", Assert.Single(graph.Forwards).Target);
+            Assert.Equal(EmailAutomationService.AllowedTestRecipient, Assert.Single(graph.Forwards).Target);
             Assert.Equal("ODMON email automation test forward", Assert.Single(graph.ForwardComments));
         }
 
         [Theory]
         [InlineData("2\\123")]
         [InlineData("15\\123")]
-        public async Task Client2Or15_ResolvesToYonatan(string clientVisualId)
+        public async Task Client2Or15_ResolvesToSecondaryEmployee(string clientVisualId)
         {
             await using var db = CreateDb();
             var graph = new FakeGraphClient(Message("graph-1", "<mail-1@test>"));
@@ -250,12 +250,12 @@ namespace Odmon.Worker.Tests
             Assert.Contains(
                 db.EmailAutomationLogs,
                 x => x.Action == EmailAutomationActions.DryRunWouldForward &&
-                     x.ResolvedTargetEmail == "yonatan@ezer-law.com");
+                     x.ResolvedTargetEmail == EmailAutomationService.YonatanEmail);
             Assert.Empty(graph.Forwards);
         }
 
         [Fact]
-        public async Task OtherClient_ResolvesToEden()
+        public async Task OtherClient_ResolvesToFallbackEmployee()
         {
             await using var db = CreateDb();
             var graph = new FakeGraphClient(Message("graph-1", "<mail-1@test>"));
@@ -270,7 +270,7 @@ namespace Odmon.Worker.Tests
             Assert.Contains(
                 db.EmailAutomationLogs,
                 x => x.Action == EmailAutomationActions.DryRunWouldForward &&
-                     x.ResolvedTargetEmail == "eden@ezer-law.com");
+                     x.ResolvedTargetEmail == EmailAutomationService.EdenEmail);
             Assert.Empty(graph.Forwards);
         }
 
@@ -295,9 +295,9 @@ namespace Odmon.Worker.Tests
         public async Task UnmatchedMessageDoesNotPersistOrLogIdentifiers()
         {
             const string graphId = "sensitive-graph-id";
-            const string internetId = "<sensitive-internet-id@example.test>";
+            const string internetId = "<synthetic-message-id@odmon.example>";
             const string subject = "Private court update 987-65-43";
-            const string sender = "private.sender@example.test";
+            const string sender = "synthetic.sender@odmon.example";
             var message = Message(graphId, internetId) with
             {
                 Subject = subject,
@@ -346,7 +346,7 @@ namespace Odmon.Worker.Tests
         public async Task ForwardFailureStoresAndLogsOnlySanitizedCategory()
         {
             const string sensitiveError =
-                "subject=Private 123-45-67 sender=secret@example.test graph=sensitive-id";
+                "subject=Synthetic 123-45-67 sender=synthetic.sender@odmon.example graph=synthetic-id";
             await using var db = CreateDb();
             var graph = new FakeGraphClient(Message("sensitive-id", "<mail@test>"))
             {
@@ -448,7 +448,7 @@ namespace Odmon.Worker.Tests
             Assert.Contains(
                 db.EmailAutomationLogs,
                 x => x.Action == EmailAutomationActions.DryRunWouldForward &&
-                     x.ResolvedTargetEmail == "amir@ezer-law.com");
+                     x.ResolvedTargetEmail == EmailAutomationService.AmirEmail);
         }
 
         [Fact]
@@ -463,11 +463,11 @@ namespace Odmon.Worker.Tests
 
             await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
 
-            Assert.Equal("odmon@ezer-law.com", Assert.Single(graph.Forwards).Target);
+            Assert.Equal(EmailAutomationService.AllowedTestRecipient, Assert.Single(graph.Forwards).Target);
             Assert.Contains(
                 db.EmailAutomationLogs,
                 x => x.Action == EmailAutomationActions.SkippedRealForwardBecauseTestModeEnabled &&
-                     x.ResolvedTargetEmail == "amir@ezer-law.com" &&
+                     x.ResolvedTargetEmail == EmailAutomationService.AmirEmail &&
                      x.ActualForwardTo == null);
             Assert.DoesNotContain(
                 db.EmailAutomationLogs,
@@ -481,9 +481,9 @@ namespace Odmon.Worker.Tests
             var graph = new FakeGraphClient(
                 RealForwardMessage(
                     subject: "RE: Court update 123-45-67",
-                    sender: "amir@ezer-law.com",
-                    toRecipients: ["amir@ezer-law.com"],
-                    ccRecipients: ["amir@ezer-law.com"]));
+                    sender: EmailAutomationService.AmirEmail,
+                    toRecipients: [EmailAutomationService.AmirEmail],
+                    ccRecipients: [EmailAutomationService.AmirEmail]));
             var settings = CreateSettings(
                 dryRun: false,
                 testForwardEnabled: true,
@@ -491,7 +491,7 @@ namespace Odmon.Worker.Tests
 
             await CreateService(db, graph, settings).RunAsync(CancellationToken.None);
 
-            Assert.Equal("odmon@ezer-law.com", Assert.Single(graph.Forwards).Target);
+            Assert.Equal(EmailAutomationService.AllowedTestRecipient, Assert.Single(graph.Forwards).Target);
             Assert.Contains(
                 db.EmailAutomationLogs,
                 x => x.Action == EmailAutomationActions.ForwardedToTestMailbox);
@@ -503,8 +503,8 @@ namespace Odmon.Worker.Tests
         }
 
         [Theory]
-        [InlineData("2\\123", "yonatan@ezer-law.com")]
-        [InlineData("999\\1", "eden@ezer-law.com")]
+        [InlineData("2\\123", EmailAutomationService.YonatanEmail)]
+        [InlineData("999\\1", EmailAutomationService.EdenEmail)]
         public async Task NonOwnerTarget_RealForwardEnabled_ForwardsToResolvedMailbox(
             string clientVisualId,
             string expectedTarget)
@@ -548,14 +548,14 @@ namespace Odmon.Worker.Tests
             var audit = Assert.Single(
                 db.EmailAutomationLogs.Where(
                     x => x.Action == EmailAutomationActions.SkippedTargetIsMailboxOwner));
-            Assert.Equal("amir@ezer-law.com", audit.ResolvedTargetEmail);
+            Assert.Equal(EmailAutomationService.AmirEmail, audit.ResolvedTargetEmail);
             Assert.Null(audit.ActualForwardTo);
             Assert.Null(audit.ErrorMessage);
         }
 
         [Theory]
-        [InlineData("2\\123", "yonatan@ezer-law.com")]
-        [InlineData("999\\1", "eden@ezer-law.com")]
+        [InlineData("2\\123", EmailAutomationService.YonatanEmail)]
+        [InlineData("999\\1", EmailAutomationService.EdenEmail)]
         public async Task NonOwnerTargetAlreadyInTo_SkipsRealForward(
             string clientVisualId,
             string targetEmail)
@@ -568,8 +568,8 @@ namespace Odmon.Worker.Tests
         }
 
         [Theory]
-        [InlineData("2\\123", "yonatan@ezer-law.com")]
-        [InlineData("999\\1", "eden@ezer-law.com")]
+        [InlineData("2\\123", EmailAutomationService.YonatanEmail)]
+        [InlineData("999\\1", EmailAutomationService.EdenEmail)]
         public async Task NonOwnerTargetAlreadyInCc_SkipsRealForward(
             string clientVisualId,
             string targetEmail)
@@ -594,27 +594,27 @@ namespace Odmon.Worker.Tests
                 RealForwardMessage(subject: subject),
                 EmailAutomationActions.SkippedForwardOrReplyThread,
                 "2\\123",
-                "yonatan@ezer-law.com");
+                EmailAutomationService.YonatanEmail);
         }
 
         [Fact]
         public async Task SenderIsResolvedTarget_SkipsRealForward()
         {
             await AssertRealForwardSkipAsync(
-                RealForwardMessage(sender: "yonatan@ezer-law.com"),
+                RealForwardMessage(sender: EmailAutomationService.YonatanEmail),
                 EmailAutomationActions.SkippedSenderIsResolvedTarget,
                 "2\\123",
-                "yonatan@ezer-law.com");
+                EmailAutomationService.YonatanEmail);
         }
 
         [Fact]
         public async Task AutomationSender_SkipsRealForward()
         {
             await AssertRealForwardSkipAsync(
-                RealForwardMessage(sender: "odmon@ezer-law.com"),
+                RealForwardMessage(sender: EmailAutomationService.AllowedTestRecipient),
                 EmailAutomationActions.SkippedAutomationGeneratedMessage,
                 "2\\123",
-                "yonatan@ezer-law.com");
+                EmailAutomationService.YonatanEmail);
         }
 
         [Fact]
@@ -712,15 +712,15 @@ namespace Odmon.Worker.Tests
         }
 
         private static EmailAutomationCaseMatch CaseMatch(string? clientVisualId)
-            => new(456, "5/2000", clientVisualId);
+            => new(456, "98/91006", clientVisualId);
 
         private static EmailAutomationMessage Message(string graphId, string internetMessageId)
             => new(
                 graphId,
                 internetMessageId,
                 "Court update 123-45-67",
-                "court@example.test",
-                ["amir@ezer-law.com"],
+                "court@odmon.example",
+                [EmailAutomationService.AmirEmail],
                 [],
                 BaselineUtc.AddMinutes(1));
 
@@ -728,7 +728,7 @@ namespace Odmon.Worker.Tests
             string graphId = "graph-real",
             string internetMessageId = "<real@test>",
             string subject = "Court update 123-45-67",
-            string sender = "court@example.test",
+            string sender = "court@odmon.example",
             IReadOnlyList<string>? toRecipients = null,
             IReadOnlyList<string>? ccRecipients = null)
             => new(
@@ -736,7 +736,7 @@ namespace Odmon.Worker.Tests
                 internetMessageId,
                 subject,
                 sender,
-                toRecipients ?? ["intake@example.test"],
+                toRecipients ?? ["intake@odmon.example"],
                 ccRecipients ?? [],
                 BaselineUtc.AddMinutes(1));
 
@@ -811,7 +811,7 @@ namespace Odmon.Worker.Tests
                 [
                     new EmailAutomationMailboxSettings
                     {
-                        Address = "amir@ezer-law.com",
+                        Address = EmailAutomationService.AmirEmail,
                         InboxFolder = "Inbox",
                         Rules =
                         [
@@ -821,7 +821,7 @@ namespace Odmon.Worker.Tests
                                 Enabled = true,
                                 SubjectRegex = @"\b\d{1,6}-\d{2}-\d{2}\b",
                                 TestForwardEnabled = testForwardEnabled,
-                                TestForwardTo = "odmon@ezer-law.com"
+                                TestForwardTo = EmailAutomationService.AllowedTestRecipient
                             }
                         ]
                     }

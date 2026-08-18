@@ -25,7 +25,7 @@ namespace Odmon.Worker.Tests
             Assert.True(notifier.QueueEmail(
                 "subject",
                 "body",
-                new[] { "employee@example.com" },
+                new[] { "employee@odmon.example" },
                 attachments: new[] { descriptor }));
 
             var message = await notifier.Reader.ReadAsync();
@@ -41,20 +41,20 @@ namespace Odmon.Worker.Tests
             Assert.True(notifier.QueueEmail(
                 "subject",
                 "body",
-                new[] { "employee@example.com" },
-                bccRecipients: new[] { "monitor@example.com" }));
+                new[] { "employee@odmon.example" },
+                bccRecipients: new[] { "monitor@odmon.example" }));
 
             var message = await notifier.Reader.ReadAsync();
-            Assert.Equal(new[] { "employee@example.com" }, message.Recipients);
-            Assert.Equal(new[] { "monitor@example.com" }, message.BccRecipients);
+            Assert.Equal(new[] { "employee@odmon.example" }, message.Recipients);
+            Assert.Equal(new[] { "monitor@odmon.example" }, message.BccRecipients);
 
             using var mail = EmailNotifier.CreateMailMessage(
                 message,
-                "odmon@example.com",
+                "mailbox@odmon.example",
                 message.Recipients!,
                 includeAttachments: true);
-            Assert.Equal("employee@example.com", Assert.Single(mail.To).Address);
-            Assert.Equal("monitor@example.com", Assert.Single(mail.Bcc).Address);
+            Assert.Equal("employee@odmon.example", Assert.Single(mail.To).Address);
+            Assert.Equal("monitor@odmon.example", Assert.Single(mail.Bcc).Address);
         }
 
         [Fact]
@@ -68,8 +68,8 @@ namespace Odmon.Worker.Tests
                 Subject = "subject",
                 Body = "body",
                 Type = EmailMessageType.Direct,
-                Recipients = new[] { "employee@example.com" },
-                BccRecipients = new[] { "monitor@example.com" },
+                Recipients = new[] { "employee@odmon.example" },
+                BccRecipients = new[] { "monitor@odmon.example" },
                 Attachments = new[]
                 {
                     new EmailAttachmentDescriptor(path, "decision.pdf", "application/pdf")
@@ -78,12 +78,12 @@ namespace Odmon.Worker.Tests
 
             using (var mail = EmailNotifier.CreateMailMessage(
                        message,
-                       "odmon@example.com",
+                       "mailbox@odmon.example",
                        message.Recipients,
                        includeAttachments: true))
             {
                 Assert.Single(mail.Attachments);
-                Assert.Equal("monitor@example.com", Assert.Single(mail.Bcc).Address);
+                Assert.Equal("monitor@odmon.example", Assert.Single(mail.Bcc).Address);
                 Assert.Equal("decision.pdf", mail.Attachments[0].Name);
                 Assert.Equal("application/pdf", mail.Attachments[0].ContentType.MediaType);
             }
@@ -129,8 +129,8 @@ namespace Odmon.Worker.Tests
                 {
                     ["Email:Enabled"] = "true",
                     ["Email:MaxEmailsPerHour"] = "100",
-                    ["Email:Recipients:0"] = "global@example.com",
-                    ["NetCourtDecisionAlerts:BccRecipients:0"] = "monitor@example.com"
+                    ["Email:Recipients:0"] = "global@odmon.example",
+                    ["NetCourtDecisionAlerts:BccRecipients:0"] = "monitor@odmon.example"
                 })
                 .Build();
 

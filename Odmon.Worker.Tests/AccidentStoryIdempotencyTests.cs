@@ -27,10 +27,10 @@ namespace Odmon.Worker.Tests
             await using var db = CreateInMemoryContext();
             var repo = new CaseAnnexWriteStateRepository(db, NullLogger<CaseAnnexWriteStateRepository>.Instance);
 
-            var state = await repo.GetOrCreateStateAsync(39283, default);
+            var state = await repo.GetOrCreateStateAsync(91001, default);
 
             Assert.NotNull(state);
-            Assert.Equal(39283, state.TikCounter);
+            Assert.Equal(91001, state.TikCounter);
             Assert.False(state.AccidentStoryAnnexWritten);
             Assert.Null(state.AccidentStoryAnnexWrittenAtUtc);
         }
@@ -41,10 +41,10 @@ namespace Odmon.Worker.Tests
             await using var db = CreateInMemoryContext();
             var repo = new CaseAnnexWriteStateRepository(db, NullLogger<CaseAnnexWriteStateRepository>.Instance);
 
-            await repo.GetOrCreateStateAsync(39283, default);
-            await repo.MarkAccidentStoryWrittenAsync(39283, "run-abc", default);
+            await repo.GetOrCreateStateAsync(91001, default);
+            await repo.MarkAccidentStoryWrittenAsync(91001, "run-abc", default);
 
-            var state = await repo.GetOrCreateStateAsync(39283, default);
+            var state = await repo.GetOrCreateStateAsync(91001, default);
             Assert.True(state.AccidentStoryAnnexWritten);
             Assert.NotNull(state.AccidentStoryAnnexWrittenAtUtc);
             Assert.Equal("run-abc", state.AccidentStoryAnnexWrittenRunId);
@@ -72,12 +72,12 @@ namespace Odmon.Worker.Tests
         {
             await using var db = CreateInMemoryContext();
             var repo = new CaseAnnexWriteStateRepository(db, NullLogger<CaseAnnexWriteStateRepository>.Instance);
-            await repo.GetOrCreateStateAsync(39283, default);
+            await repo.GetOrCreateStateAsync(91001, default);
 
             // Simulate what DocumentIngestionService does on dedup hit (2601/2627): mark written so next run skips.
-            await repo.MarkAccidentStoryWrittenAsync(39283, "run-dedup-hit", default);
+            await repo.MarkAccidentStoryWrittenAsync(91001, "run-dedup-hit", default);
 
-            var state = await repo.GetOrCreateStateAsync(39283, default);
+            var state = await repo.GetOrCreateStateAsync(91001, default);
             Assert.True(state.AccidentStoryAnnexWritten);
             Assert.NotNull(state.AccidentStoryAnnexWrittenAtUtc);
             Assert.Equal("run-dedup-hit", state.AccidentStoryAnnexWrittenRunId);
@@ -91,7 +91,7 @@ namespace Odmon.Worker.Tests
         public async Task IsAccidentStoryAlreadyWrittenAsync_WhenStateWritten_ReturnsTrue()
         {
             var fakeRepo = new FakeStateRepoWrittenTrue();
-            var result = await DocumentIngestionService.IsAccidentStoryAlreadyWrittenAsync(fakeRepo, 39283, default);
+            var result = await DocumentIngestionService.IsAccidentStoryAlreadyWrittenAsync(fakeRepo, 91001, default);
             Assert.True(result);
         }
 
@@ -103,11 +103,11 @@ namespace Odmon.Worker.Tests
         {
             await using var db = CreateInMemoryContext();
             var repo = new CaseAnnexWriteStateRepository(db, NullLogger<CaseAnnexWriteStateRepository>.Instance);
-            await repo.GetOrCreateStateAsync(39283, default);
+            await repo.GetOrCreateStateAsync(91001, default);
 
-            await repo.MarkAccidentStoryWrittenAsync(39283, "run-success", default);
+            await repo.MarkAccidentStoryWrittenAsync(91001, "run-success", default);
 
-            var state = await repo.GetOrCreateStateAsync(39283, default);
+            var state = await repo.GetOrCreateStateAsync(91001, default);
             Assert.True(state.AccidentStoryAnnexWritten);
             Assert.NotNull(state.AccidentStoryAnnexWrittenAtUtc);
             Assert.Equal("run-success", state.AccidentStoryAnnexWrittenRunId);

@@ -16,14 +16,14 @@ namespace Odmon.Worker.Tests
             {
                 "id": "board_relation_mkzenscq",
                 "value": null,
-                "linked_item_ids": ["2732400533", "9999"]
+                "linked_item_ids": ["9000000002", "9999"]
             }
             """;
             using var doc = JsonDocument.Parse(json);
             var result = DocumentIngestionMondayService.ParseLinkedItemIds(doc.RootElement);
 
             Assert.Equal(2, result.Count);
-            Assert.Equal(2732400533L, result[0]);
+            Assert.Equal(9000000002L, result[0]);
             Assert.Equal(9999L, result[1]);
         }
 
@@ -81,14 +81,14 @@ namespace Odmon.Worker.Tests
             var json = """
             {
                 "id": "board_relation_mkzenscq",
-                "linked_item_ids": [2732400533]
+                "linked_item_ids": [9000000002]
             }
             """;
             using var doc = JsonDocument.Parse(json);
             var result = DocumentIngestionMondayService.ParseLinkedItemIds(doc.RootElement);
 
             Assert.Single(result);
-            Assert.Equal(2732400533L, result[0]);
+            Assert.Equal(9000000002L, result[0]);
         }
 
         // ── ResolveFileExtension (legacy compat) ─────────────────────────
@@ -213,8 +213,8 @@ namespace Odmon.Worker.Tests
         [Fact]
         public void GenerateSafeFileName_StandardInput_ProducesExpectedFormat()
         {
-            var name = DocumentIngestionService.GenerateSafeFileName("1/11958", 198847023, "file_mm0qwtat", "pdf");
-            Assert.Equal("1_11958_198847023_file_mm0qwtat.pdf", name);
+            var name = DocumentIngestionService.GenerateSafeFileName("99/91001", 900000001, "file_mm0qwtat", "pdf");
+            Assert.Equal("99_91001_900000001_file_mm0qwtat.pdf", name);
         }
 
         [Fact]
@@ -236,7 +236,7 @@ namespace Odmon.Worker.Tests
         [Fact]
         public void SanitizeTikVisualID_ForwardSlash_Replaced()
         {
-            Assert.Equal("1_11958", DocumentIngestionService.SanitizeTikVisualID("1/11958"));
+            Assert.Equal("99_91001", DocumentIngestionService.SanitizeTikVisualID("99/91001"));
         }
 
         [Fact]
@@ -272,14 +272,14 @@ namespace Odmon.Worker.Tests
         [Fact]
         public void DeriveSafeFilename_Suspicious_ReturnsAttachmentPattern()
         {
-            var name = DocumentIngestionService.DeriveSafeFilename("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRwczovL2FwcC5tb25kYXkuY29tIiwic3ViIjoiMTIzNDU2Nzg5MCJ9.Ypg2yDCq7dXkv6kV.pdf", "1/11958", 39283, 198847023, "pdf");
-            Assert.Equal("Attachment_1_11958_198847023.pdf", name);
+            var name = DocumentIngestionService.DeriveSafeFilename("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMtYXNzZXQifQ.synthetic.pdf", "99/91001", 91001, 900000001, "pdf");
+            Assert.Equal("Attachment_99_91001_900000001.pdf", name);
         }
 
         [Fact]
         public void DeriveSafeFilename_NormalName_ReturnsSanitizedWithExtension()
         {
-            var name = DocumentIngestionService.DeriveSafeFilename("My Report.pdf", "1/11958", 39283, 123, "pdf");
+            var name = DocumentIngestionService.DeriveSafeFilename("My Report.pdf", "99/91001", 91001, 123, "pdf");
             Assert.Equal("My Report.pdf", name);
         }
 
@@ -464,15 +464,15 @@ namespace Odmon.Worker.Tests
             Assert.Equal(DocumentIngestionService.SourceContentType, fromContentType.DetectionSource);
             Assert.Equal("application/pdf", fromContentType.MimeType);
 
-            var safeFileName = DocumentIngestionService.AssetSafeFileName(198847023, "pdf");
-            Assert.Equal("asset_198847023.pdf", safeFileName);
+            var safeFileName = DocumentIngestionService.AssetSafeFileName(900000001, "pdf");
+            Assert.Equal("asset_900000001.pdf", safeFileName);
         }
 
         [Fact]
-        public void AssetSafeFileName_AssetId198847023_ProducesAsset_Pdf()
+        public void AssetSafeFileName_SyntheticAssetId_ProducesAsset_Pdf()
         {
-            var name = DocumentIngestionService.AssetSafeFileName(198847023, "pdf");
-            Assert.Equal("asset_198847023.pdf", name);
+            var name = DocumentIngestionService.AssetSafeFileName(900000001, "pdf");
+            Assert.Equal("asset_900000001.pdf", name);
         }
 
         [Fact]
@@ -603,15 +603,15 @@ namespace Odmon.Worker.Tests
         [Fact]
         public void SafeFileName_StandardInput_ProducesExpectedFormat()
         {
-            var name = DocumentIngestionService.SafeFileName("file_mm0qwtat", "1/11958", 198847023, "pdf");
-            Assert.Equal("file_mm0qwtat_1-11958_198847023.pdf", name);
+            var name = DocumentIngestionService.SafeFileName("file_mm0qwtat", "99/91001", 900000001, "pdf");
+            Assert.Equal("file_mm0qwtat_99-91001_900000001.pdf", name);
         }
 
         [Fact]
         public void SafeFileName_ColumnWithSpaces_Slugified()
         {
-            var name = DocumentIngestionService.SafeFileName("file column", "1/11958", 123, "jpg");
-            Assert.Equal("file_column_1-11958_123.jpg", name);
+            var name = DocumentIngestionService.SafeFileName("file column", "99/91001", 123, "jpg");
+            Assert.Equal("file_column_99-91001_123.jpg", name);
         }
 
         // ── IsSmtpAuthFailure ────────────────────────────────────────────

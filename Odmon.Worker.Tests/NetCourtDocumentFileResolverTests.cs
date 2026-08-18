@@ -18,7 +18,7 @@ namespace Odmon.Worker.Tests
             Directory.CreateDirectory(_testRoot);
             var resolver = CreateResolver();
 
-            var result = await resolver.ResolveAsync(null, "2/2508", CancellationToken.None);
+            var result = await resolver.ResolveAsync(null, "99/91005", CancellationToken.None);
 
             Assert.False(result.IsAvailable);
             Assert.Contains("null", result.ErrorMessage!, StringComparison.OrdinalIgnoreCase);
@@ -32,8 +32,8 @@ namespace Odmon.Worker.Tests
 
             var result = await resolver.ValidateResolvedPathAsync(
                 string.Empty,
-                2259074,
-                "2/2508",
+                9103001,
+                "99/91005",
                 CancellationToken.None);
 
             Assert.False(result.IsAvailable);
@@ -52,8 +52,8 @@ namespace Odmon.Worker.Tests
 
             var result = await resolver.ValidateResolvedPathAsync(
                 outside,
-                2259074,
-                "2/2508",
+                9103001,
+                "99/91005",
                 CancellationToken.None);
 
             Assert.False(result.IsAvailable);
@@ -69,8 +69,8 @@ namespace Odmon.Worker.Tests
 
             var result = await resolver.ValidateResolvedPathAsync(
                 path,
-                2259074,
-                "2/2508",
+                9103001,
+                "99/91005",
                 CancellationToken.None);
 
             Assert.False(result.IsAvailable);
@@ -87,8 +87,8 @@ namespace Odmon.Worker.Tests
 
             var result = await resolver.ValidateResolvedPathAsync(
                 path,
-                2259074,
-                "2/2508",
+                9103001,
+                "99/91005",
                 CancellationToken.None);
 
             Assert.False(result.IsAvailable);
@@ -106,8 +106,8 @@ namespace Odmon.Worker.Tests
 
             var result = await resolver.ValidateResolvedPathAsync(
                 path,
-                2259074,
-                "2/2508",
+                9103001,
+                "99/91005",
                 CancellationToken.None);
 
             Assert.False(result.IsAvailable);
@@ -129,8 +129,8 @@ namespace Odmon.Worker.Tests
                 FileShare.None);
             var result = await resolver.ValidateResolvedPathAsync(
                 path,
-                2259074,
-                "2/2508",
+                9103001,
+                "99/91005",
                 CancellationToken.None);
 
             Assert.False(result.IsAvailable);
@@ -147,8 +147,8 @@ namespace Odmon.Worker.Tests
 
             var result = await resolver.ValidateResolvedPathAsync(
                 path,
-                2259074,
-                "2/2508",
+                9103001,
+                "99/91005",
                 CancellationToken.None);
 
             Assert.True(result.IsAvailable);

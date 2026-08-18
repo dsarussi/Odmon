@@ -253,14 +253,14 @@ Task UpdateHearingStatusAsync(long boardId, long itemId, string statusLabel, str
 ### Test 1: Canceled Hearing
 
 **Data**:
-- `TikCounter = 39231`
+- `TikCounter = 91013`
 - `MeetStatus = 1`
 - `MeetStatusName = "מבוטל"`
 
 **Expected**:
 ```
-[INFO] Hearing sync planned: TikCounter=39231, TikNumber=9/1858, MondayItemId=7890123456, StartDate=2026-03-15 10:00, MeetStatus=1, Steps=[SetStatus_מבוטל], ...
-[INFO] Hearing sync completed: TikCounter=39231, MondayItemId=7890123456, ExecutedSteps=[SetStatus_מבוטל]
+[INFO] Hearing sync planned: TikCounter=91013, TikNumber=9/900001, MondayItemId=7890123456, StartDate=2026-03-15 10:00, MeetStatus=1, Steps=[SetStatus_מבוטל], ...
+[INFO] Hearing sync completed: TikCounter=91013, MondayItemId=7890123456, ExecutedSteps=[SetStatus_מבוטל]
 ```
 
 **Monday Column**:
@@ -275,15 +275,15 @@ Task UpdateHearingStatusAsync(long boardId, long itemId, string statusLabel, str
 ### Test 2: Transferred Hearing
 
 **Data**:
-- `TikCounter = 42020`
+- `TikCounter = 91012`
 - `MeetStatus = 2`
 - `MeetStatusName = "העברה"`
 - `StartDate` changed
 
 **Expected**:
 ```
-[INFO] Hearing sync planned: TikCounter=42020, TikNumber=7/1235744, MondayItemId=7890123457, StartDate=2026-04-20 14:00, MeetStatus=2, Steps=[SetStatus_הועבר, UpdateJudgeCity, UpdateHearingDate], ...
-[INFO] Hearing sync completed: TikCounter=42020, MondayItemId=7890123457, ExecutedSteps=[SetStatus_הועבר, UpdateJudgeCity, UpdateHearingDate]
+[INFO] Hearing sync planned: TikCounter=91012, TikNumber=7/900002, MondayItemId=7890123457, StartDate=2026-04-20 14:00, MeetStatus=2, Steps=[SetStatus_הועבר, UpdateJudgeCity, UpdateHearingDate], ...
+[INFO] Hearing sync completed: TikCounter=91012, MondayItemId=7890123457, ExecutedSteps=[SetStatus_הועבר, UpdateJudgeCity, UpdateHearingDate]
 ```
 
 **Monday Columns**:
@@ -298,30 +298,30 @@ Task UpdateHearingStatusAsync(long boardId, long itemId, string statusLabel, str
   "hour_mkwjbwr": {
     "hour": "14:00"
   },
-  "text_mkwjne8v": "השופט כהן",
-  "text_mkxez28d": "תל אביב"
+  "text_mkwjne8v": "שופט בדיקה",
+  "text_mkxez28d": "עיר דוגמה"
 }
 ```
 
 ### Test 3: Active Hearing (Status Column Omitted)
 
 **Data**:
-- `TikCounter = 39115`
+- `TikCounter = 91011`
 - `MeetStatus = 0`
 - `MeetStatusName = "פעיל"`
 - `JudgeName` changed
 
 **Expected**:
 ```
-[INFO] Hearing sync planned: TikCounter=39115, TikNumber=9/1808, MondayItemId=7890123458, StartDate=2026-05-10 09:00, MeetStatus=0, Steps=[UpdateJudgeCity], ...
-[INFO] Hearing sync completed: TikCounter=39115, MondayItemId=7890123458, ExecutedSteps=[UpdateJudgeCity]
+[INFO] Hearing sync planned: TikCounter=91011, TikNumber=9/900003, MondayItemId=7890123458, StartDate=2026-05-10 09:00, MeetStatus=0, Steps=[UpdateJudgeCity], ...
+[INFO] Hearing sync completed: TikCounter=91011, MondayItemId=7890123458, ExecutedSteps=[UpdateJudgeCity]
 ```
 
 **Monday Columns** (status column NOT included):
 ```json
 {
-  "text_mkwjne8v": "השופט לוי",
-  "text_mkxez28d": "ירושלים"
+  "text_mkwjne8v": "שופט בדיקה",
+  "text_mkxez28d": "עיר דוגמה"
 }
 ```
 

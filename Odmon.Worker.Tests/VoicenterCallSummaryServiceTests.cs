@@ -22,8 +22,8 @@ namespace Odmon.Worker.Tests
             var writer = new FakeOdcanitWriter();
             var resolver = new FakePhoneResolver(new CasePhoneMatch
             {
-                TikCounter = 91539,
-                TikNumber = "9/1539",
+                TikCounter = 91015,
+                TikNumber = "99/91015",
                 MatchedField = "PolicyHolderPhone",
             });
             var service = CreateService(db, writer, resolver, FakeHttpClientFactory.WithCalls(("call-1", "0541234567")));
@@ -33,8 +33,8 @@ namespace Odmon.Worker.Tests
             Assert.Equal(1, result.Written);
             Assert.Empty(db.MondayItemMappings);
             var write = Assert.Single(writer.Writes);
-            Assert.Equal(91539, write.TikCounter);
-            Assert.Equal("9/1539", write.TikNumber);
+            Assert.Equal(91015, write.TikCounter);
+            Assert.Equal("99/91015", write.TikNumber);
         }
 
         [Fact]
@@ -44,8 +44,8 @@ namespace Odmon.Worker.Tests
             var writer = new FakeOdcanitWriter();
             var resolver = new FakePhoneResolver(new CasePhoneMatch
             {
-                TikCounter = 43358,
-                TikNumber = "23/159",
+                TikCounter = 91003,
+                TikNumber = "99/91003",
                 MatchedField = "ThirdPartyPhone",
             });
             var service = CreateService(db, writer, resolver, FakeHttpClientFactory.WithCalls(("call-2", "0547654321")));
@@ -54,7 +54,7 @@ namespace Odmon.Worker.Tests
 
             Assert.Equal(1, result.Written);
             Assert.Single(writer.Writes);
-            Assert.Equal("23/159", writer.Writes[0].TikNumber);
+            Assert.Equal("99/91003", writer.Writes[0].TikNumber);
         }
 
         [Fact]

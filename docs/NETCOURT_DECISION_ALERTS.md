@@ -17,10 +17,10 @@
 
 `EmailMode=Test` reads real eligible rows and resolves the intended employee, but sends the primary email only to `TestRecipient`. `EmailMode=Live` sends the primary email to the configured employee.
 
-| Client numbers | Live recipient | Display name |
+| Client numbers | Live recipient placeholder | Display name placeholder |
 |---|---|---|
-| `2`, `15` | `yonatan@ezer-law.com` | `יונתן` |
-| `5`, `8`, `3`, `23`, `253` | `amir@ezer-law.com` | `אמיר` |
+| `2`, `15` | `employee-b@odmon.example` | `Employee B` |
+| `5`, `8`, `3`, `23`, `253` | `employee-a@odmon.example` | `Employee A` |
 
 `BccRecipients` applies only to NetCourt decision emails. In Live mode, `To` remains the routed employee and the configured monitoring recipients are BCC. In Test mode, `To` remains `TestRecipient` and configured monitoring recipients are BCC. Empty or missing BCC configuration has no effect.
 
@@ -72,26 +72,26 @@ Unexpected worker failures, SQL failures, and other operational exceptions use t
     "D:\\Odlight\\Docs\\"
   ],
   "EmailMode": "Live",
-  "TestRecipient": "odmon@ezer-law.com",
+  "TestRecipient": "monitor@odmon.example",
   "BccRecipients": [
-    "odmon@ezer-law.com"
+    "monitor@odmon.example"
   ],
   "FallbackRecipientEnabled": false,
   "ClientNumberToRecipientEmail": {
-    "2": "yonatan@ezer-law.com",
-    "15": "yonatan@ezer-law.com",
-    "5": "amir@ezer-law.com",
-    "8": "amir@ezer-law.com",
-    "3": "amir@ezer-law.com",
-    "23": "amir@ezer-law.com",
-    "253": "amir@ezer-law.com"
+    "2": "employee-b@odmon.example",
+    "15": "employee-b@odmon.example",
+    "5": "employee-a@odmon.example",
+    "8": "employee-a@odmon.example",
+    "3": "employee-a@odmon.example",
+    "23": "employee-a@odmon.example",
+    "253": "employee-a@odmon.example"
   }
 }
 ```
 
 ## Safe Test Procedure
 
-1. Set `Enabled=true`, `EmailMode=Test`, and `TestRecipient=odmon@ezer-law.com`.
+1. Set `Enabled=true`, `EmailMode=Test`, and an approved test mailbox (shown here as `monitor@odmon.example`).
 2. Keep production routing configured so intended recipients and Hebrew display names are exercised.
 3. Confirm all primary messages arrive only at the test recipient; BCC monitoring may also contain the same mailbox.
 4. Confirm logs report attachment present or absent, without requiring an attachment for success.
