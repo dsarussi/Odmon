@@ -72,6 +72,45 @@ namespace Odmon.Worker.Services
 
             var lines = TextExtractor.NormalizeLines(extractedText);
             var searchableText = string.Join('\n', lines);
+            var policyHolderNameContext = CombineExtractions(
+                ExtractContextValues(
+                    PolicyHolderNameRegex(),
+                    searchableText,
+                    "לפקודת מבוטחנו"),
+                ExtractContextValues(
+                    PolicyHolderNameBeforeAnchorRegex(),
+                    searchableText,
+                    "לפקודת מבוטחנו"),
+                ExtractContextValues(
+                    CompanyPolicyHolderNameRegex(),
+                    searchableText,
+                    "ת.ז ... שם בעל הפוליסה"));
+            var companyPolicyHolderId = ExtractContextValues(
+                CompanyPolicyHolderIdRegex(),
+                searchableText,
+                "שם בעל הפוליסה ... מספר:רישוי");
+            var mainVehicleContext = CombineExtractions(
+                ExtractVehicleAfterAnchor(
+                    searchableText,
+                    "הרכב המבוטח בחברתנו",
+                    "הרכב שבבעלותך",
+                    "הרכב המבוטח בחברתנו"),
+                ExtractContextValues(
+                    CompanyInsuredVehicleRegex(),
+                    searchableText,
+                    "שם בעל הפוליסה ... מספר:רישוי"));
+            var thirdPartyVehicleContext = CombineExtractions(
+                ExtractVehicleAfterAnchor(
+                    searchableText,
+                    "הרכב שבבעלותך",
+                    null,
+                    "הרכב שבבעלותך"),
+                document.Name == CaseIntakeDocumentClassifier.CompanyDemandLetterName
+                    ? ExtractContextValues(
+                        CompanyHeadingVehicleRegex(),
+                        searchableText,
+                        "הנדון")
+                    : CreateExtraction(Array.Empty<RawFieldMatch>()));
             return new DemandFormFields(
                 ClaimNumber: CaseIntakeClaimNumberResolver.Resolve(
                     document,
@@ -88,44 +127,31 @@ namespace Odmon.Worker.Services
                     document,
                     raw => CaseIntakeFieldValidators.ValidateNumber(raw, "Policy number")),
                 PolicyHolderName: CaseIntakeFieldFactory.Build(
-                    CombineExtractions(
-                        TextExtractor.Extract(lines, PolicyHolderNameLabels),
-                        ExtractContextValues(
-                            PolicyHolderNameRegex(),
-                            searchableText,
-                            "לפקודת מבוטחנו"),
-                        ExtractContextValues(
-                            PolicyHolderNameBeforeAnchorRegex(),
-                            searchableText,
-                            "לפקודת מבוטחנו")),
+                    PreferContext(
+                        policyHolderNameContext,
+                        TextExtractor.Extract(lines, PolicyHolderNameLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateName),
                 PolicyHolderId: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, PolicyHolderIdLabels),
+                    PreferContext(
+                        companyPolicyHolderId,
+                        TextExtractor.Extract(lines, PolicyHolderIdLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateIdentifierNumber),
                 MainCarNumber: CaseIntakeFieldFactory.Build(
-                    CombineExtractions(
-                        TextExtractor.Extract(lines, MainCarNumberLabels),
-                        ExtractVehicleAfterAnchor(
-                            searchableText,
-                            "הרכב המבוטח בחברתנו",
-                            "הרכב שבבעלותך",
-                            "הרכב המבוטח בחברתנו")),
+                    PreferContext(
+                        mainVehicleContext,
+                        TextExtractor.Extract(lines, MainCarNumberLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateVehicleNumber),
                 ThirdPartyCarNumber: CaseIntakeFieldFactory.Build(
-                    CombineExtractions(
-                        TextExtractor.Extract(lines, ThirdPartyCarNumberLabels),
-                        ExtractVehicleAfterAnchor(
-                            searchableText,
-                            "הרכב שבבעלותך",
-                            null,
-                            "הרכב שבבעלותך")),
+                    PreferContext(
+                        thirdPartyVehicleContext,
+                        TextExtractor.Extract(lines, ThirdPartyCarNumberLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateVehicleNumber),
                 AppraiserFeeAmount: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, AppraiserFeeLabels),
+                    ExtractValidatedMonetaryField(lines, AppraiserFeeLabels),
                     document,
                     CaseIntakeFieldValidators.ValidateAmount),
                 LossOfValueAmount: CaseIntakeFieldFactory.Build(
@@ -133,6 +159,26 @@ namespace Odmon.Worker.Services
                     document,
                     CaseIntakeFieldValidators.ValidateAmount),
                 FinancialCandidates: ExtractFinancialCandidates(lines, document));
+        }
+
+        private static RawFieldExtraction ExtractValidatedMonetaryField(
+            IReadOnlyList<string> lines,
+            IReadOnlyList<string> labels)
+        {
+            var matches = TextExtractor.ExtractAll(lines, labels)
+                .Select(match => new
+                {
+                    Match = match,
+                    Validation = CaseIntakeFieldValidators.ValidateAmount(match.Value)
+                })
+                .Where(item =>
+                    item.Validation.Status == CaseIntakeFieldStatus.Valid &&
+                    item.Validation.Value.HasValue)
+                .GroupBy(item => item.Validation.Value!.Value)
+                .Select(group => group.First().Match)
+                .ToArray();
+
+            return CreateExtraction(matches);
         }
 
         private static RawFieldExtraction ExtractLossOfValue(
@@ -318,6 +364,26 @@ namespace Odmon.Worker.Services
             @"(?:^|[:.])\s*(?<value>[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*(?:\s+[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*){1,3}?)יש\s+להעביר(?=[^\r\n]{0,200}לפקודת\s+מבוטחנו)",
             RegexOptions.CultureInvariant | RegexOptions.Singleline)]
         private static partial Regex PolicyHolderNameBeforeAnchorRegex();
+
+        [GeneratedRegex(
+            @"ת\.ז(?<value>[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*(?:\s+[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*){1,3})שם\s+בעל\s+הפוליסה\s*:",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex CompanyPolicyHolderNameRegex();
+
+        [GeneratedRegex(
+            @"שם\s+בעל\s+הפוליסה\s*:\s*(?<value>\p{Nd}{5,9})\s+מספר\s*:\s*רישוי",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex CompanyPolicyHolderIdRegex();
+
+        [GeneratedRegex(
+            @"שם\s+בעל\s+הפוליסה\s*:\s*\p{Nd}{5,9}\s+מספר\s*:\s*רישוי\s*(?:\r?\n)+\s*(?<value>\p{Nd}(?:[ .-]?\p{Nd}){6,7})(?!\p{Nd})",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex CompanyInsuredVehicleRegex();
+
+        [GeneratedRegex(
+            @"(?:^|\n)[^\r\n]*הנדון[^\r\n]{0,200}?(?<value>\p{Nd}(?:[ .-]?\p{Nd}){6,7})(?!\p{Nd})",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex CompanyHeadingVehicleRegex();
 
         [GeneratedRegex(
             @"(?<!\p{Nd})\p{Nd}(?:[ .-]?\p{Nd}){6,7}(?!\p{Nd})",

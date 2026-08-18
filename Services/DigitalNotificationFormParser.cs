@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Odmon.Worker.Models;
 
 namespace Odmon.Worker.Services
@@ -50,6 +51,7 @@ namespace Odmon.Worker.Services
             ArgumentNullException.ThrowIfNull(document);
 
             var lines = TextExtractor.NormalizeLines(extractedText);
+            var searchableText = string.Join('\n', lines);
             var claimNumber = CaseIntakeClaimNumberResolver.Resolve(
                 document,
                 TextExtractor.Extract(lines, ExplicitClaimNumberLabels),
@@ -58,7 +60,12 @@ namespace Odmon.Worker.Services
             return new NotificationFormFields(
                 ClaimNumber: claimNumber,
                 EventDate: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, EventDateLabels),
+                    PreferContext(
+                        ExtractContextValues(
+                            EventDateContextRegex(),
+                            searchableText,
+                            "תאריך האירוע"),
+                        TextExtractor.Extract(lines, EventDateLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateDate),
                 PolicyNumber: CaseIntakeFieldFactory.Build(
@@ -66,37 +73,161 @@ namespace Odmon.Worker.Services
                     document,
                     raw => CaseIntakeFieldValidators.ValidateNumber(raw, "Policy number")),
                 PolicyHolderName: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, PolicyHolderNameLabels),
+                    PreferContext(
+                        ExtractContextValues(
+                            PolicyHolderNameContextRegex(),
+                            searchableText,
+                            "שם ... ז\\דרכון ... כתובת"),
+                        TextExtractor.Extract(lines, PolicyHolderNameLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateName),
                 PolicyHolderId: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, PolicyHolderIdLabels),
+                    PreferContext(
+                        ExtractContextValues(
+                            PolicyHolderIdContextRegex(),
+                            searchableText,
+                            "שם ... ז\\דרכון ... כתובת"),
+                        TextExtractor.Extract(lines, PolicyHolderIdLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateIdentifierNumber),
                 PolicyHolderPhone: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, PolicyHolderPhoneLabels),
+                    PreferContext(
+                        ExtractContextValues(
+                            PolicyHolderPhoneContextRegex(),
+                            searchableText,
+                            "טל:בבית:נייד ... כתובת מייל"),
+                        TextExtractor.Extract(lines, PolicyHolderPhoneLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidatePhone),
                 DriverName: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, DriverNameLabels),
+                    PreferContext(
+                        ExtractContextValues(
+                            InsuredDriverNameContextRegex(),
+                            searchableText,
+                            "שם:ת.ז\\דרכון ... נייד"),
+                        TextExtractor.Extract(lines, DriverNameLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateName),
                 DriverId: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, DriverIdLabels),
+                    PreferContext(
+                        ExtractContextValues(
+                            InsuredDriverIdContextRegex(),
+                            searchableText,
+                            "שם:ת.ז\\דרכון ... נייד"),
+                        TextExtractor.Extract(lines, DriverIdLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateIdentifierNumber),
                 DriverPhone: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, DriverPhoneLabels),
+                    PreferContext(
+                        ExtractContextValues(
+                            InsuredDriverPhoneContextRegex(),
+                            searchableText,
+                            "שם:ת.ז\\דרכון ... נייד"),
+                        TextExtractor.Extract(lines, DriverPhoneLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidatePhone),
                 MainCarNumber: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, MainCarNumberLabels),
+                    PreferContext(
+                        ExtractContextValues(
+                            InsuredVehicleContextRegex(),
+                            searchableText,
+                            "מס' רישוי ... יצרן ... שנת ייצור"),
+                        TextExtractor.Extract(lines, MainCarNumberLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateVehicleNumber),
                 ThirdPartyCarNumber: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, ThirdPartyCarNumberLabels),
+                    PreferContext(
+                        ExtractContextValues(
+                            ThirdPartyVehicleContextRegex(),
+                            searchableText,
+                            "סוג הרכב ... מס' רישוי"),
+                        TextExtractor.Extract(lines, ThirdPartyCarNumberLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateVehicleNumber));
         }
+
+        private static RawFieldExtraction ExtractContextValues(
+            Regex regex,
+            string text,
+            string sourceLabel)
+        {
+            var matches = regex.Matches(text)
+                .Select(match => match.Groups["value"].Value.Trim())
+                .Where(value => value.Length > 0)
+                .Distinct(StringComparer.Ordinal)
+                .Select(value => new RawFieldMatch(sourceLabel, value))
+                .ToArray();
+
+            return matches.Length switch
+            {
+                0 => new(
+                    RawFieldExtractionStatus.Missing,
+                    null,
+                    null,
+                    Array.Empty<RawFieldMatch>()),
+                1 => new(
+                    RawFieldExtractionStatus.Found,
+                    matches[0].Label,
+                    matches[0].Value,
+                    matches),
+                _ => new(
+                    RawFieldExtractionStatus.Ambiguous,
+                    sourceLabel,
+                    string.Join(" | ", matches.Select(match => match.Value)),
+                    matches)
+            };
+        }
+
+        private static RawFieldExtraction PreferContext(
+            RawFieldExtraction contextual,
+            RawFieldExtraction fallback)
+            => contextual.Status == RawFieldExtractionStatus.Missing
+                ? fallback
+                : contextual;
+
+        [GeneratedRegex(
+            @"תאריך\s+האירוע\s+(?<value>\d{1,2}[./-]\d{1,2}[./-]\d{4})(?=\s*:שעת\s+האירוע)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex EventDateContextRegex();
+
+        [GeneratedRegex(
+            @"ת""(?<value>[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*(?:\s+[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*){1,3})שם\s*:(?=ז\\דרכון[^\r\n]*כתובת)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex PolicyHolderNameContextRegex();
+
+        [GeneratedRegex(
+            @"שם\s*:ז\\דרכון\s+(?<value>\p{Nd}{5,9})(?=:[^\r\n]*כתובת)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex PolicyHolderIdContextRegex();
+
+        [GeneratedRegex(
+            @"טל\s*:בבית\s*:נייד\s+(?<value>\+?\p{Nd}[\p{Nd} .()\-]{7,})(?=:כתובת\s+מייל)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex PolicyHolderPhoneContextRegex();
+
+        [GeneratedRegex(
+            @"(?:^|\n)(?<value>[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*(?:\s+[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*){1,3})שם\s*:(?=ת\.ז\\דרכון[^\r\n]*נייד)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex InsuredDriverNameContextRegex();
+
+        [GeneratedRegex(
+            @"שם\s*:ת\.ז\\דרכון\s+(?<value>\p{Nd}{5,9})(?=:[^\r\n]*נייד)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex InsuredDriverIdContextRegex();
+
+        [GeneratedRegex(
+            @"שם\s*:ת\.ז\\דרכון\s+\p{Nd}{5,9}\s*:נייד\s+(?<value>\+?\p{Nd}[\p{Nd} .()\-]{7,})(?=$|\r|\n)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex InsuredDriverPhoneContextRegex();
+
+        [GeneratedRegex(
+            @"מס(?:'|׳)\s+רישוי\s+(?<value>\p{Nd}(?:[ .-]?\p{Nd}){6,7})(?=\s*:[^\r\n]*(?:יצרן|שנת\s+ייצור))",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex InsuredVehicleContextRegex();
+
+        [GeneratedRegex(
+            @"סוג\s+הרכב\s+(?<value>\p{Nd}(?:[ .-]?\p{Nd}){6,7})\s*:[^\r\n]*מס(?:'|׳)\s+רישוי",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex ThirdPartyVehicleContextRegex();
     }
 }

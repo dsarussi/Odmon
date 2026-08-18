@@ -12,6 +12,10 @@ namespace Odmon.Worker.Services
 
     internal static partial class CaseIntakeFieldValidators
     {
+        private static readonly HashSet<string> PersonNameFieldLabelTokens = new(
+            ["שם", "טלפון", "נייד", "דרכון", "כתובת", "רישוי", "פוליסה", "תעודת", "זהות"],
+            StringComparer.Ordinal);
+
         private static readonly string[] AcceptedDateFormats =
         [
             "dd/MM/yyyy",
@@ -27,6 +31,11 @@ namespace Odmon.Worker.Services
             @"(?<![\d.,])[-+]?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)[-+]?(?![\d.,])",
             RegexOptions.CultureInvariant)]
         private static partial Regex AmountTokenRegex();
+
+        [GeneratedRegex(
+            @"^[\u0590-\u05FF]{2,}(?:['׳״""-][\u0590-\u05FF]+)*(?:\s+[\u0590-\u05FF]{2,}(?:['׳״""-][\u0590-\u05FF]+)*){1,3}$",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex HebrewPersonNameRegex();
 
         internal static FieldValidationResult<string?> ValidateIdentifierNumber(string raw)
         {
@@ -176,14 +185,20 @@ namespace Odmon.Worker.Services
         internal static FieldValidationResult<string?> ValidateName(string raw)
         {
             var normalized = WhitespaceRegex().Replace(raw.Trim(), " ");
-            if (normalized.Length == 0 || !normalized.Any(char.IsLetter))
+            if (normalized.Length == 0)
             {
-                return InvalidString("Name must contain at least one letter.");
+                return InvalidString("Name is empty.");
             }
 
-            if (normalized.Any(char.IsControl))
+            if (!HebrewPersonNameRegex().IsMatch(normalized))
             {
-                return InvalidString("Name contains unsupported control characters.");
+                return InvalidString(
+                    "Name must contain two to four Hebrew name words without digits or field labels.");
+            }
+
+            if (normalized.Split(' ').Any(PersonNameFieldLabelTokens.Contains))
+            {
+                return InvalidString("Name contains a field label instead of person-name content.");
             }
 
             return ValidString(normalized);

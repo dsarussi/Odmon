@@ -293,6 +293,41 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public void NotificationParser_ParsesReal39434SectionsWithoutMixingDrivers()
+        {
+            var fields = CreateParser().Parse(
+                Real39434NotificationText,
+                CreateDocument(3943401));
+
+            Assert.Equal("2162901", fields.ClaimNumber.Value);
+            Assert.Equal(new DateOnly(2025, 9, 16), fields.EventDate.Value);
+            Assert.Equal("1252050106", fields.PolicyNumber.Value);
+            Assert.Equal("זאב ברוך אוזן", fields.PolicyHolderName.Value);
+            Assert.Equal("024637357", fields.PolicyHolderId.Value);
+            Assert.Equal("0506898203", fields.PolicyHolderPhone.Value);
+            Assert.Equal("זאב ברוך אוזן", fields.DriverName.Value);
+            Assert.Equal("024637357", fields.DriverId.Value);
+            Assert.Equal("0506898203", fields.DriverPhone.Value);
+            Assert.Equal("43263601", fields.MainCarNumber.Value);
+            Assert.Equal("50210802", fields.ThirdPartyCarNumber.Value);
+            Assert.DoesNotContain("062895529", fields.DriverName.RawValue, StringComparison.Ordinal);
+            Assert.DoesNotContain("054-6323859", fields.DriverName.RawValue, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void NameValidation_RejectsNumericPhoneAndFieldLabelGarbage()
+        {
+            var numericResult = CaseIntakeFieldValidators.ValidateName(
+                "062895529 : ת\"ז 054-6323859 :טלפון");
+            var labelResult = CaseIntakeFieldValidators.ValidateName("שם הנהג");
+
+            Assert.Equal(CaseIntakeFieldStatus.Invalid, numericResult.Status);
+            Assert.Null(numericResult.Value);
+            Assert.Equal(CaseIntakeFieldStatus.Invalid, labelResult.Status);
+            Assert.Null(labelResult.Value);
+        }
+
+        [Fact]
         public void DemandFilenames_ClassifyAsTheSameEqualPriorityBusinessType()
         {
             Assert.True(CaseIntakeDocumentClassifier.TryClassify(
@@ -382,6 +417,68 @@ namespace Odmon.Worker.Tests
             Assert.Equal(1234.50m, fields.AppraiserFeeAmount.Value);
             Assert.Equal(CaseIntakeFieldStatus.Valid, fields.LossOfValueAmount.Status);
             Assert.Equal(2500m, fields.LossOfValueAmount.Value);
+        }
+
+        [Fact]
+        public void CompanyDemandParser_ParsesReal39434MonetaryAndPartyContexts()
+        {
+            var fields = CreateDemandParser().Parse(
+                Real39434CompanyDemandText,
+                CreateDemandDocument(
+                    3943499,
+                    CaseIntakeDocumentClassifier.CompanyDemandLetterName));
+
+            Assert.Equal("2162901", fields.ClaimNumber.Value);
+            Assert.Equal(new DateOnly(2025, 9, 16), fields.EventDate.Value);
+            Assert.Equal("1252050106", fields.PolicyNumber.Value);
+            Assert.Equal("זאב ברוך אוזן", fields.PolicyHolderName.Value);
+            Assert.Equal("024637357", fields.PolicyHolderId.Value);
+            Assert.Equal("43263601", fields.MainCarNumber.Value);
+            Assert.Equal("50210802", fields.ThirdPartyCarNumber.Value);
+            Assert.Equal(CaseIntakeFieldStatus.Valid, fields.AppraiserFeeAmount.Status);
+            Assert.Equal(2000.0m, fields.AppraiserFeeAmount.Value);
+            Assert.DoesNotContain("מקור", fields.AppraiserFeeAmount.RawValue, StringComparison.Ordinal);
+            Assert.Contains(
+                fields.FinancialCandidates,
+                candidate =>
+                    candidate.CandidateType == DemandFinancialCandidateType.VehicleDamageAmount &&
+                    candidate.Amount.Value == 19307.0m);
+            Assert.Contains(
+                fields.FinancialCandidates,
+                candidate =>
+                    candidate.CandidateType == DemandFinancialCandidateType.UnclassifiedTotalAmount &&
+                    candidate.Amount.Value == 21307.0m);
+        }
+
+        [Fact]
+        public void Real39434Merge_ReinforcesTwoNotificationsAndCrossValidatesDemand()
+        {
+            var firstNotification = CreateNotificationResult(
+                Real39434NotificationText,
+                3943401);
+            var secondNotification = CreateNotificationResult(
+                Real39434NotificationText,
+                3943402);
+            var demand = CreateDemandResult(
+                Real39434CompanyDemandText,
+                3943499,
+                CaseIntakeDocumentClassifier.CompanyDemandLetterName);
+
+            var merged = CreateMerger().Merge(
+                [firstNotification, secondNotification],
+                [demand]);
+
+            AssertMergedCrossValidation(merged.ClaimNumber, "2162901", 3);
+            AssertMergedCrossValidation(
+                merged.EventDate,
+                new DateOnly(2025, 9, 16),
+                3);
+            AssertMergedCrossValidation(merged.PolicyNumber, "1252050106", 3);
+            AssertMergedCrossValidation(merged.PolicyHolderName, "זאב ברוך אוזן", 3);
+            AssertMergedCrossValidation(merged.PolicyHolderId, "024637357", 3);
+            AssertMergedCrossValidation(merged.MainCarNumber, "43263601", 3);
+            AssertMergedCrossValidation(merged.ThirdPartyCarNumber, "50210802", 3);
+            AssertMergedCrossValidation(merged.DriverName, "זאב ברוך אוזן", 2);
         }
 
         [Fact]
@@ -730,6 +827,44 @@ namespace Odmon.Worker.Tests
         private static DemandFormParser CreateDemandParser() => new();
 
         private static CaseIntakeResultMerger CreateMerger() => new();
+
+        private static void AssertMergedCrossValidation<TValue>(
+            MergedCaseIntakeField<TValue> field,
+            TValue expectedValue,
+            int expectedSourceCount)
+        {
+            Assert.Equal(expectedValue, field.SelectedValue);
+            Assert.Equal(CaseIntakeFieldStatus.Valid, field.ValidationStatus);
+            Assert.True(field.CrossValidationSucceeded);
+            Assert.False(field.HasConflict);
+            var candidate = Assert.Single(field.ValidCandidates);
+            Assert.Equal(expectedSourceCount, candidate.Sources.Count);
+        }
+
+        private static string Real39434NotificationText => """
+מס' דיווח 2162901
+מס' פוליסה 1252050106
+תאריך האירוע 16/09/2025:שעת האירוע 07:40
+ת"זאב ברוך אוזןשם:ז\דרכון 024637357:פתחיהכתובת 21 הברוש
+טל:בבית:נייד 050-6898203:כתובת מייל zaev@example.com
+מס' רישוי 43263601:קיהיצרן:שנת ייצור 2019
+זאב ברוך אוזןשם:ת.ז\דרכון 024637357:נייד 050-6898203
+רכב פרטי  :סוג הרכב 50210802  :קיהמס' רישוי
+מעיין שטדלר  :שם הנהג 062895529  : ת"ז 054-6323859  :טלפון
+""";
+
+        private static string Real39434CompanyDemandText => """
+הנדון: דרישה בגין רכב מספר 50210802
+תביעתנו 2162901
+תאריך אירוע 16/09/2025
+מס' פוליסה 1252050106
+ת.זזאב ברוך אוזןשם בעל הפוליסה:024637357 מספר:רישוי
+43263601
+חשבונית שכ"ט שמאי-מקור
+נזק לרכב עפ"י דו"ח שמאי 19307.0₪
+דמי שמאות 2000.0₪
+סה"כ 21307.0₪
+""";
 
         private static NotificationFormReadResult CreateNotificationResult(string text, long documentId)
         {
