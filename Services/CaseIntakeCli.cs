@@ -18,12 +18,14 @@ namespace Odmon.Worker.Services
 {
     internal readonly record struct CaseIntakeCliRequest(
         int TikCounter,
-        bool DumpPdfText);
+        bool DumpPdfText,
+        bool DumpNormalizedPdfText);
 
     internal static class CaseIntakeCli
     {
         internal const string TikCounterOption = "--case-intake-tik-counter";
         internal const string DumpPdfTextOption = "--dump-pdf-text";
+        internal const string DumpNormalizedPdfTextOption = "--dump-normalized-pdf-text";
 
         public static bool TryParse(
             IReadOnlyList<string> arguments,
@@ -32,6 +34,7 @@ namespace Odmon.Worker.Services
             string? rawValue = null;
             var occurrences = 0;
             var dumpPdfTextOccurrences = 0;
+            var dumpNormalizedPdfTextOccurrences = 0;
 
             for (var index = 0; index < arguments.Count; index++)
             {
@@ -67,13 +70,27 @@ namespace Odmon.Worker.Services
                 {
                     throw InvalidDumpPdfTextOption();
                 }
+                else if (string.Equals(
+                             argument,
+                             DumpNormalizedPdfTextOption,
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    dumpNormalizedPdfTextOccurrences++;
+                }
+                else if (argument.StartsWith(
+                             DumpNormalizedPdfTextOption + "=",
+                             StringComparison.OrdinalIgnoreCase))
+                {
+                    throw InvalidDumpNormalizedPdfTextOption();
+                }
             }
 
             if (occurrences == 0)
             {
-                if (dumpPdfTextOccurrences > 0)
+                if (dumpPdfTextOccurrences > 0 ||
+                    dumpNormalizedPdfTextOccurrences > 0)
                 {
-                    throw InvalidDumpPdfTextOption();
+                    throw InvalidDiagnosticOption();
                 }
 
                 request = default;
@@ -91,14 +108,17 @@ namespace Odmon.Worker.Services
                 throw InvalidOption();
             }
 
-            if (dumpPdfTextOccurrences > 1)
+            if (dumpPdfTextOccurrences > 1 ||
+                dumpNormalizedPdfTextOccurrences > 1 ||
+                dumpPdfTextOccurrences + dumpNormalizedPdfTextOccurrences > 1)
             {
-                throw InvalidDumpPdfTextOption();
+                throw InvalidDiagnosticOption();
             }
 
             request = new CaseIntakeCliRequest(
                 tikCounter,
-                DumpPdfText: dumpPdfTextOccurrences == 1);
+                DumpPdfText: dumpPdfTextOccurrences == 1,
+                DumpNormalizedPdfText: dumpNormalizedPdfTextOccurrences == 1);
             return true;
         }
 
@@ -122,6 +142,18 @@ namespace Odmon.Worker.Services
                 return;
             }
 
+            if (request.DumpNormalizedPdfText)
+            {
+                await DumpNormalizedPdfTextAsync(
+                    scope.ServiceProvider.GetRequiredService<ICaseIntakeDocumentReader>(),
+                    scope.ServiceProvider.GetRequiredService<IPdfTextExtractor>(),
+                    scope.ServiceProvider.GetRequiredService<HebrewPdfTextNormalizer>(),
+                    request.TikCounter,
+                    Console.Out,
+                    ct);
+                return;
+            }
+
             var intakeReader = scope.ServiceProvider.GetRequiredService<CaseIntakeReadService>();
             var result = await intakeReader.ReadAsync(request.TikCounter, ct);
             var options = new JsonSerializerOptions
@@ -135,6 +167,39 @@ namespace Odmon.Worker.Services
         internal static async Task DumpPdfTextAsync(
             ICaseIntakeDocumentReader documentReader,
             IPdfTextExtractor pdfTextExtractor,
+            int tikCounter,
+            TextWriter output,
+            CancellationToken ct)
+            => await DumpPdfTextAsync(
+                documentReader,
+                pdfTextExtractor,
+                static text => text,
+                "EXTRACTED",
+                tikCounter,
+                output,
+                ct);
+
+        internal static async Task DumpNormalizedPdfTextAsync(
+            ICaseIntakeDocumentReader documentReader,
+            IPdfTextExtractor pdfTextExtractor,
+            HebrewPdfTextNormalizer textNormalizer,
+            int tikCounter,
+            TextWriter output,
+            CancellationToken ct)
+            => await DumpPdfTextAsync(
+                documentReader,
+                pdfTextExtractor,
+                textNormalizer.Normalize,
+                "NORMALIZED",
+                tikCounter,
+                output,
+                ct);
+
+        private static async Task DumpPdfTextAsync(
+            ICaseIntakeDocumentReader documentReader,
+            IPdfTextExtractor pdfTextExtractor,
+            Func<string, string> transformText,
+            string delimiterName,
             int tikCounter,
             TextWriter output,
             CancellationToken ct)
@@ -153,9 +218,10 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
-                var text = await pdfTextExtractor.ExtractTextAsync(
+                var rawText = await pdfTextExtractor.ExtractTextAsync(
                     document.Path ?? string.Empty,
                     ct);
+                var text = transformText(rawText);
 
                 if (!isFirstDocument)
                 {
@@ -164,14 +230,14 @@ namespace Odmon.Worker.Services
 
                 await output.WriteLineAsync($"Document ID: {document.Id}");
                 await output.WriteLineAsync($"Document name: {document.Name}");
-                await output.WriteLineAsync("BEGIN EXTRACTED TEXT");
+                await output.WriteLineAsync($"BEGIN {delimiterName} TEXT");
                 await output.WriteAsync(text);
                 if (text.Length == 0 || (text[^1] != '\r' && text[^1] != '\n'))
                 {
                     await output.WriteLineAsync();
                 }
 
-                await output.WriteLineAsync("END EXTRACTED TEXT");
+                await output.WriteLineAsync($"END {delimiterName} TEXT");
                 isFirstDocument = false;
             }
         }
@@ -231,6 +297,10 @@ namespace Odmon.Worker.Services
                     string.Equals(
                         argument,
                         DumpPdfTextOption,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(
+                        argument,
+                        DumpNormalizedPdfTextOption,
                         StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
@@ -323,5 +393,13 @@ namespace Odmon.Worker.Services
         private static ArgumentException InvalidDumpPdfTextOption()
             => new(
                 $"{DumpPdfTextOption} may be specified once and requires {TikCounterOption}.");
+
+        private static ArgumentException InvalidDumpNormalizedPdfTextOption()
+            => new(
+                $"{DumpNormalizedPdfTextOption} may be specified once and requires {TikCounterOption}.");
+
+        private static ArgumentException InvalidDiagnosticOption()
+            => new(
+                $"Specify at most one diagnostic text option once, together with {TikCounterOption}.");
     }
 }

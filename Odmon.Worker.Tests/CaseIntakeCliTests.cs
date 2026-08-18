@@ -21,6 +21,7 @@ namespace Odmon.Worker.Tests
             Assert.True(detected);
             Assert.Equal(40514, request.TikCounter);
             Assert.False(request.DumpPdfText);
+            Assert.False(request.DumpNormalizedPdfText);
         }
 
         [Fact]
@@ -37,6 +38,24 @@ namespace Odmon.Worker.Tests
             Assert.True(detected);
             Assert.Equal(40514, request.TikCounter);
             Assert.True(request.DumpPdfText);
+            Assert.False(request.DumpNormalizedPdfText);
+        }
+
+        [Fact]
+        public void TryParse_DumpNormalizedPdfTextFlag_EnablesNormalizedDiagnosticMode()
+        {
+            var arguments = new[]
+            {
+                "--case-intake-tik-counter", "40514",
+                "--dump-normalized-pdf-text"
+            };
+
+            var detected = CaseIntakeCli.TryParse(arguments, out var request);
+
+            Assert.True(detected);
+            Assert.Equal(40514, request.TikCounter);
+            Assert.False(request.DumpPdfText);
+            Assert.True(request.DumpNormalizedPdfText);
         }
 
         [Fact]
@@ -65,7 +84,15 @@ namespace Odmon.Worker.Tests
             new[] { "--case-intake-tik-counter", "-1" },
             new[] { "--case-intake-tik-counter", "not-a-number" },
             new[] { "--dump-pdf-text" },
-            new[] { "--case-intake-tik-counter", "40514", "--dump-pdf-text=true" }
+            new[] { "--case-intake-tik-counter", "40514", "--dump-pdf-text=true" },
+            new[] { "--dump-normalized-pdf-text" },
+            new[] { "--case-intake-tik-counter", "40514", "--dump-normalized-pdf-text=true" },
+            new[]
+            {
+                "--case-intake-tik-counter", "40514",
+                "--dump-pdf-text",
+                "--dump-normalized-pdf-text"
+            }
         };
 
         [Theory]
@@ -93,7 +120,7 @@ namespace Odmon.Worker.Tests
             using var host = CaseIntakeCli.BuildReadOnlyHost(
                 [
                     "--case-intake-tik-counter", "40514",
-                    "--dump-pdf-text",
+                    "--dump-normalized-pdf-text",
                     "--ConnectionStrings:OdcanitDb", "Server=localhost;Database=Odcanit;Integrated Security=true"
                 ]);
 
@@ -146,6 +173,44 @@ namespace Odmon.Worker.Tests
                 printed,
                 StringComparison.Ordinal);
             Assert.DoesNotContain("unrelated_document", printed, StringComparison.Ordinal);
+            Assert.Equal([approved.Path], extractor.OpenedPaths);
+        }
+
+        [Fact]
+        public async Task DumpNormalizedPdfText_PrintsProductionNormalizedTextWithDelimiters()
+        {
+            var approved = new OdcanitCaseDocument(
+                2214486,
+                CaseIntakeDocumentClassifier.PrivatePartyDemandLetterName,
+                @"\\server\docs\demand.pdf",
+                40514,
+                "40514/1",
+                "1",
+                "PDF",
+                new DateTime(2026, 8, 18));
+            var reader = new FakeDocumentReader([approved]);
+            var extractor = new FakePdfTextExtractor("תואמש ימד464.0₪");
+            using var output = new StringWriter();
+
+            await CaseIntakeCli.DumpNormalizedPdfTextAsync(
+                reader,
+                extractor,
+                new HebrewPdfTextNormalizer(),
+                40514,
+                output,
+                CancellationToken.None);
+
+            var printed = output.ToString();
+            Assert.Contains("Document ID: 2214486", printed, StringComparison.Ordinal);
+            Assert.Contains(
+                $"Document name: {CaseIntakeDocumentClassifier.PrivatePartyDemandLetterName}",
+                printed,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "BEGIN NORMALIZED TEXT\r\nדמי שמאות 464.0₪\r\nEND NORMALIZED TEXT",
+                printed,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("תואמש ימד", printed, StringComparison.Ordinal);
             Assert.Equal([approved.Path], extractor.OpenedPaths);
         }
 
