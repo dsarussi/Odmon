@@ -24,7 +24,7 @@ namespace Odmon.Worker.Services
         private static partial Regex WhitespaceRegex();
 
         [GeneratedRegex(
-            @"(?<![\d.,])[-+]?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?![\d.,])",
+            @"(?<![\d.,])[-+]?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)[-+]?(?![\d.,])",
             RegexOptions.CultureInvariant)]
         private static partial Regex AmountTokenRegex();
 
@@ -250,6 +250,17 @@ namespace Odmon.Worker.Services
             {
                 sign = token[..1];
                 token = token[1..];
+            }
+
+            if (token.EndsWith('+') || token.EndsWith('-'))
+            {
+                if (sign.Length > 0)
+                {
+                    return false;
+                }
+
+                sign = token[^1..];
+                token = token[..^1];
             }
 
             var commaIndex = token.LastIndexOf(',');

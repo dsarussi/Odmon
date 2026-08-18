@@ -156,7 +156,17 @@ namespace Odmon.Worker.Services
         }
 
         private static string TrimValue(string value)
-            => value.Trim().TrimStart(':', '-', '–', '—', '|').Trim();
+        {
+            var trimmed = value.Trim().TrimStart(':', '|').Trim();
+            if (trimmed.Length > 1 &&
+                trimmed[0] is '-' or '–' or '—' &&
+                char.IsWhiteSpace(trimmed[1]))
+            {
+                return trimmed[1..].Trim();
+            }
+
+            return trimmed;
+        }
 
         private bool ContainsKnownLabel(string line)
             => _allLabels.Any(label =>

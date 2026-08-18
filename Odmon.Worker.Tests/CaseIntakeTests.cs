@@ -385,6 +385,76 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public void DemandParser_UsesRealDocumentSemanticContexts()
+        {
+            var text = """
+14/09/2025
+הנדון: תאונת דרכים מיום 21/07/2025
+מספר:תביעה 2144533
+מס' פוליסה 1541786303
+התאונה אירעה בין הרכב המבוטח בחברתנו מספר רישוי 1763339 ובין הרכב שבבעלותך מספר רישוי 4193779.
+נא להעביר המחאה על הסך הנ"ל לפקודת מבוטחנו דנה בויאנג'ו.
+נזק לרכב עפ"י דו"ח שמאי 11797.0₪
+דמי שמאות 464.0₪
+ירידת ערך הרכב 938.0₪
+השתתפות עצמית בגין ירידת ערך 704.0-₪
+""";
+
+            var fields = CreateDemandParser().Parse(
+                text,
+                CreateDemandDocument(
+                    2214486,
+                    CaseIntakeDocumentClassifier.PrivatePartyDemandLetterName));
+
+            Assert.Equal("2144533", fields.ClaimNumber.Value);
+            Assert.Equal(new DateOnly(2025, 7, 21), fields.EventDate.Value);
+            Assert.NotEqual(new DateOnly(2025, 9, 14), fields.EventDate.Value);
+            Assert.Equal("1541786303", fields.PolicyNumber.Value);
+            Assert.Equal("דנה בויאנג'ו", fields.PolicyHolderName.Value);
+            Assert.Equal("1763339", fields.MainCarNumber.Value);
+            Assert.Equal("4193779", fields.ThirdPartyCarNumber.Value);
+            Assert.Equal(464.0m, fields.AppraiserFeeAmount.Value);
+            Assert.Equal(938.0m, fields.LossOfValueAmount.Value);
+            Assert.NotEqual(704.0m, fields.LossOfValueAmount.Value);
+            Assert.Contains(
+                fields.FinancialCandidates,
+                candidate =>
+                    candidate.CandidateType == DemandFinancialCandidateType.VehicleDamageAmount &&
+                    candidate.Amount.Value == 11797.0m);
+        }
+
+        [Fact]
+        public void DemandParser_DoesNotAssignGenericVehicleNumberWithoutRoleContext()
+        {
+            var fields = CreateDemandParser().Parse(
+                "מספר רישוי: 4193779",
+                CreateDemandDocument());
+
+            Assert.Equal(CaseIntakeFieldStatus.Missing, fields.MainCarNumber.Status);
+            Assert.Equal(CaseIntakeFieldStatus.Missing, fields.ThirdPartyCarNumber.Status);
+        }
+
+        [Fact]
+        public void DemandParser_PreservesTrailingNegativeSignOnFinancialCandidate()
+        {
+            var fields = CreateDemandParser().Parse(
+                "ניכוי השתתפות עצמית: 1650.0-₪",
+                CreateDemandDocument());
+
+            var candidates = fields.FinancialCandidates
+                .Where(value =>
+                    value.CandidateType == DemandFinancialCandidateType.DeductibleRelatedAmount)
+                .ToArray();
+            Assert.NotEmpty(candidates);
+            Assert.All(candidates, candidate =>
+            {
+                Assert.Equal(CaseIntakeFieldStatus.Valid, candidate.Amount.Status);
+                Assert.Equal(-1650.0m, candidate.Amount.Value);
+                Assert.Contains("-", candidate.Amount.RawValue, StringComparison.Ordinal);
+            });
+        }
+
+        [Fact]
         public void DemandParser_ReturnsUnmappedFinancialCandidatesWithExplicitKinds()
         {
             var text = """

@@ -1,8 +1,9 @@
+using System.Text.RegularExpressions;
 using Odmon.Worker.Models;
 
 namespace Odmon.Worker.Services
 {
-    public sealed class DemandFormParser
+    public sealed partial class DemandFormParser
     {
         private static readonly string[] ExplicitClaimNumberLabels =
             ["מספר תביעה", "מספר:תביעה", "מס' תביעה", "מס׳ תביעה"];
@@ -20,14 +21,15 @@ namespace Odmon.Worker.Services
         private static readonly string[] MainCarNumberLabels =
             ["מספר רישוי רכב המבוטח", "מספר רישוי רכב מבוטח", "מספר רישוי המבוטח",
              "רכב המבוטח מס'", "רכב המבוטח מס׳", "רכב מרשתנו מס'", "רכב מרשתנו מס׳",
-             "רכבנו מס'", "רכבנו מס׳", "מספר רישוי"];
+             "רכבנו מס'", "רכבנו מס׳"];
         private static readonly string[] ThirdPartyCarNumberLabels =
             ["מספר רישוי רכב צד ג'", "מספר רישוי רכב צד ג׳", "מספר רישוי רכב הפוגע",
              "מספר רישוי רכבכם", "רכב צד ג' מס'", "רכב צד ג׳ מס׳", "רכב הפוגע מס'",
              "רכב הפוגע מס׳", "רכבכם מס'", "רכבכם מס׳"];
         private static readonly string[] AppraiserFeeLabels =
             ["דמי שמאות", "שכר טרחת שמאי", "שכ\"ט שמאי", "שכ״ט שמאי"];
-        private static readonly string[] LossOfValueLabels = ["ירידת ערך"];
+        private static readonly string[] ExactLossOfValueLabels = ["ירידת ערך הרכב"];
+        private static readonly string[] FallbackLossOfValueLabels = ["ירידת ערך"];
         private static readonly string[] VehicleDamageLabels =
             ["נזק לרכב עפ\"י דו\"ח שמאי", "נזק לרכב עפ״י דו״ח שמאי", "נזק לרכב על פי דו\"ח שמאי",
              "נזק לרכב על פי דו״ח שמאי", "נזק לרכב"];
@@ -50,7 +52,8 @@ namespace Odmon.Worker.Services
                 .Concat(MainCarNumberLabels)
                 .Concat(ThirdPartyCarNumberLabels)
                 .Concat(AppraiserFeeLabels)
-                .Concat(LossOfValueLabels)
+                .Concat(ExactLossOfValueLabels)
+                .Concat(FallbackLossOfValueLabels)
                 .Concat(VehicleDamageLabels)
                 .Concat(TotalDemandLabels)
                 .Concat(TotalPaidLabels)
@@ -68,13 +71,19 @@ namespace Odmon.Worker.Services
             ArgumentNullException.ThrowIfNull(document);
 
             var lines = TextExtractor.NormalizeLines(extractedText);
+            var searchableText = string.Join('\n', lines);
             return new DemandFormFields(
                 ClaimNumber: CaseIntakeClaimNumberResolver.Resolve(
                     document,
                     TextExtractor.Extract(lines, ExplicitClaimNumberLabels),
                     TextExtractor.Extract(lines, OurClaimNumberLabels)),
                 EventDate: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, EventDateLabels),
+                    CombineExtractions(
+                        TextExtractor.Extract(lines, EventDateLabels),
+                        ExtractContextValues(
+                            AccidentDateRegex(),
+                            searchableText,
+                            "תאונת דרכים מיום")),
                     document,
                     CaseIntakeFieldValidators.ValidateDate),
                 PolicyNumber: CaseIntakeFieldFactory.Build(
@@ -82,7 +91,12 @@ namespace Odmon.Worker.Services
                     document,
                     raw => CaseIntakeFieldValidators.ValidateNumber(raw, "Policy number")),
                 PolicyHolderName: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, PolicyHolderNameLabels),
+                    CombineExtractions(
+                        TextExtractor.Extract(lines, PolicyHolderNameLabels),
+                        ExtractContextValues(
+                            PolicyHolderNameRegex(),
+                            searchableText,
+                            "לפקודת מבוטחנו")),
                     document,
                     CaseIntakeFieldValidators.ValidateName),
                 PolicyHolderId: CaseIntakeFieldFactory.Build(
@@ -90,11 +104,21 @@ namespace Odmon.Worker.Services
                     document,
                     CaseIntakeFieldValidators.ValidateIdentifierNumber),
                 MainCarNumber: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, MainCarNumberLabels),
+                    CombineExtractions(
+                        TextExtractor.Extract(lines, MainCarNumberLabels),
+                        ExtractContextValues(
+                            InsuredVehicleRegex(),
+                            searchableText,
+                            "הרכב המבוטח בחברתנו ... מספר רישוי")),
                     document,
                     CaseIntakeFieldValidators.ValidateVehicleNumber),
                 ThirdPartyCarNumber: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, ThirdPartyCarNumberLabels),
+                    CombineExtractions(
+                        TextExtractor.Extract(lines, ThirdPartyCarNumberLabels),
+                        ExtractContextValues(
+                            OtherVehicleRegex(),
+                            searchableText,
+                            "הרכב שבבעלותך ... מספר רישוי")),
                     document,
                     CaseIntakeFieldValidators.ValidateVehicleNumber),
                 AppraiserFeeAmount: CaseIntakeFieldFactory.Build(
@@ -102,11 +126,98 @@ namespace Odmon.Worker.Services
                     document,
                     CaseIntakeFieldValidators.ValidateAmount),
                 LossOfValueAmount: CaseIntakeFieldFactory.Build(
-                    TextExtractor.Extract(lines, LossOfValueLabels),
+                    ExtractLossOfValue(lines, searchableText),
                     document,
                     CaseIntakeFieldValidators.ValidateAmount),
                 FinancialCandidates: ExtractFinancialCandidates(lines, document));
         }
+
+        private static RawFieldExtraction ExtractLossOfValue(
+            IReadOnlyList<string> lines,
+            string searchableText)
+        {
+            var exact = CombineExtractions(
+                TextExtractor.Extract(lines, ExactLossOfValueLabels),
+                ExtractContextValues(
+                    LossOfValueAmountRegex(),
+                    searchableText,
+                    "ירידת ערך הרכב"));
+            return exact.Status == RawFieldExtractionStatus.Missing
+                ? TextExtractor.Extract(lines, FallbackLossOfValueLabels)
+                : exact;
+        }
+
+        private static RawFieldExtraction ExtractContextValues(
+            Regex regex,
+            string text,
+            string sourceLabel)
+        {
+            var matches = regex.Matches(text)
+                .Select(match => match.Groups["value"].Value.Trim())
+                .Where(value => value.Length > 0)
+                .Distinct(StringComparer.Ordinal)
+                .Select(value => new RawFieldMatch(sourceLabel, value))
+                .ToArray();
+
+            return CreateExtraction(matches);
+        }
+
+        private static RawFieldExtraction CombineExtractions(
+            params RawFieldExtraction[] extractions)
+        {
+            var matches = extractions
+                .SelectMany(extraction => extraction.Matches)
+                .GroupBy(match => match.Value, StringComparer.Ordinal)
+                .Select(group => group.First())
+                .ToArray();
+            return CreateExtraction(matches);
+        }
+
+        private static RawFieldExtraction CreateExtraction(
+            IReadOnlyList<RawFieldMatch> matches)
+            => matches.Count switch
+            {
+                0 => new(
+                    RawFieldExtractionStatus.Missing,
+                    null,
+                    null,
+                    Array.Empty<RawFieldMatch>()),
+                1 => new(
+                    RawFieldExtractionStatus.Found,
+                    matches[0].Label,
+                    matches[0].Value,
+                    matches),
+                _ => new(
+                    RawFieldExtractionStatus.Ambiguous,
+                    string.Join(", ", matches.Select(match => match.Label).Distinct(StringComparer.Ordinal)),
+                    string.Join(" | ", matches.Select(match => match.Value)),
+                    matches)
+            };
+
+        [GeneratedRegex(
+            @"(?:הנדון\s*:\s*)?תאונת\s+דרכים\s+מיום\s*:?\s*(?<value>\d{1,2}[./-]\d{1,2}[./-]\d{4})(?!\d)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex AccidentDateRegex();
+
+        [GeneratedRegex(
+            @"לפקודת\s+מבוטחנו\s+(?<value>[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*(?:\s+[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*){1,3})(?=\s*[.,;:\r\n]|$)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex PolicyHolderNameRegex();
+
+        [GeneratedRegex(
+            @"הרכב\s+המבוטח\s+בחברתנו(?:(?!הרכב\s+(?:המבוטח\s+בחברתנו|שבבעלותך)).){0,160}?מספר\s+רישוי\s*:?\s*(?<value>\p{Nd}(?:[ .-]?\p{Nd}){6,7})(?!\p{Nd})",
+            RegexOptions.CultureInvariant | RegexOptions.Singleline)]
+        private static partial Regex InsuredVehicleRegex();
+
+        [GeneratedRegex(
+            @"הרכב\s+שבבעלותך(?:(?!הרכב\s+(?:המבוטח\s+בחברתנו|שבבעלותך)).){0,160}?מספר\s+רישוי\s*:?\s*(?<value>\p{Nd}(?:[ .-]?\p{Nd}){6,7})(?!\p{Nd})",
+            RegexOptions.CultureInvariant | RegexOptions.Singleline)]
+        private static partial Regex OtherVehicleRegex();
+
+        [GeneratedRegex(
+            @"ירידת\s+ערך\s+הרכב\s*:?\s*(?<value>[-+]?\p{Nd}[\p{Nd},.]*[-+]?\s*₪?)",
+            RegexOptions.CultureInvariant)]
+        private static partial Regex LossOfValueAmountRegex();
 
         private static IReadOnlyList<DemandFinancialCandidate> ExtractFinancialCandidates(
             IReadOnlyList<string> lines,
