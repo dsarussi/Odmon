@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Odmon.Worker.Data;
 using Odmon.Worker.Monday;
+using Odmon.Worker.Models;
 using Odmon.Worker.OdcanitAccess;
 using Odmon.Worker.Services;
 using Xunit;
@@ -19,6 +20,23 @@ namespace Odmon.Worker.Tests
 
             Assert.True(detected);
             Assert.Equal(40514, request.TikCounter);
+            Assert.False(request.DumpPdfText);
+        }
+
+        [Fact]
+        public void TryParse_DumpPdfTextFlag_EnablesDiagnosticMode()
+        {
+            var arguments = new[]
+            {
+                "--case-intake-tik-counter", "40514",
+                "--dump-pdf-text"
+            };
+
+            var detected = CaseIntakeCli.TryParse(arguments, out var request);
+
+            Assert.True(detected);
+            Assert.Equal(40514, request.TikCounter);
+            Assert.True(request.DumpPdfText);
         }
 
         [Fact]
@@ -45,7 +63,9 @@ namespace Odmon.Worker.Tests
             new[] { "--case-intake-tik-counter" },
             new[] { "--case-intake-tik-counter", "0" },
             new[] { "--case-intake-tik-counter", "-1" },
-            new[] { "--case-intake-tik-counter", "not-a-number" }
+            new[] { "--case-intake-tik-counter", "not-a-number" },
+            new[] { "--dump-pdf-text" },
+            new[] { "--case-intake-tik-counter", "40514", "--dump-pdf-text=true" }
         };
 
         [Theory]
@@ -73,6 +93,7 @@ namespace Odmon.Worker.Tests
             using var host = CaseIntakeCli.BuildReadOnlyHost(
                 [
                     "--case-intake-tik-counter", "40514",
+                    "--dump-pdf-text",
                     "--ConnectionStrings:OdcanitDb", "Server=localhost;Database=Odcanit;Integrated Security=true"
                 ]);
 
@@ -83,6 +104,82 @@ namespace Odmon.Worker.Tests
 
             using var scope = host.Services.CreateScope();
             Assert.NotNull(scope.ServiceProvider.GetService<CaseIntakeReadService>());
+        }
+
+        [Fact]
+        public async Task DumpPdfText_PrintsDelimitedRawTextForApprovedDocumentsOnly()
+        {
+            var approved = new OdcanitCaseDocument(
+                7001,
+                CaseIntakeDocumentClassifier.PrivatePartyDemandLetterName,
+                @"\\server\docs\demand.pdf",
+                40514,
+                "40514/1",
+                "1",
+                "PDF",
+                new DateTime(2026, 8, 18));
+            var unrelated = approved with
+            {
+                Id = 7002,
+                Name = "unrelated_document",
+                Path = @"\\server\docs\unrelated.pdf"
+            };
+            var reader = new FakeDocumentReader([approved, unrelated]);
+            var extractor = new FakePdfTextExtractor("raw line 1\nraw line 2");
+            using var output = new StringWriter();
+
+            await CaseIntakeCli.DumpPdfTextAsync(
+                reader,
+                extractor,
+                40514,
+                output,
+                CancellationToken.None);
+
+            var printed = output.ToString();
+            Assert.Contains("Document ID: 7001", printed, StringComparison.Ordinal);
+            Assert.Contains(
+                $"Document name: {CaseIntakeDocumentClassifier.PrivatePartyDemandLetterName}",
+                printed,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "BEGIN EXTRACTED TEXT\r\nraw line 1\nraw line 2\r\nEND EXTRACTED TEXT",
+                printed,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("unrelated_document", printed, StringComparison.Ordinal);
+            Assert.Equal([approved.Path], extractor.OpenedPaths);
+        }
+
+        private sealed class FakeDocumentReader : ICaseIntakeDocumentReader
+        {
+            private readonly IReadOnlyList<OdcanitCaseDocument> _documents;
+
+            public FakeDocumentReader(IReadOnlyList<OdcanitCaseDocument> documents)
+            {
+                _documents = documents;
+            }
+
+            public Task<IReadOnlyList<OdcanitCaseDocument>> GetRelevantDocumentsAsync(
+                int tikCounter,
+                CancellationToken ct)
+                => Task.FromResult(_documents);
+        }
+
+        private sealed class FakePdfTextExtractor : IPdfTextExtractor
+        {
+            private readonly string _text;
+
+            public FakePdfTextExtractor(string text)
+            {
+                _text = text;
+            }
+
+            public List<string> OpenedPaths { get; } = [];
+
+            public Task<string> ExtractTextAsync(string filePath, CancellationToken ct)
+            {
+                OpenedPaths.Add(filePath);
+                return Task.FromResult(_text);
+            }
         }
     }
 }
