@@ -198,57 +198,31 @@ namespace Odmon.Worker.Services
                 .ToArray();
             var detectedCaseNumber = ruleMatches.FirstOrDefault()?.Match.Value;
 
-            _logger.LogInformation(
-                "EMAILAUTOMATION message read. Mailbox={Mailbox}, Sender={Sender}, Subject={Subject}, ReceivedDateTime={ReceivedDateTime}, DetectedCourtCaseNumber={DetectedCourtCaseNumber}",
-                mailbox,
-                message.Sender,
-                message.Subject,
-                message.ReceivedDateTimeUtc,
-                detectedCaseNumber);
+            var messageFingerprint = CreateMessageFingerprint(mailbox, message);
 
             var alreadyProcessed = await _db.EmailAutomationLogs.AnyAsync(
                 x => x.Mailbox == mailbox &&
-                     x.GraphMessageId == message.Id &&
-                     x.Action != EmailAutomationActions.SkippedAlreadyProcessed,
+                     x.GraphMessageId == messageFingerprint,
                 cancellationToken);
             if (alreadyProcessed)
             {
-                AddAudit(mailbox, null, message, null, null,
-                    EmailAutomationActions.SkippedAlreadyProcessed);
-                await _db.SaveChangesAsync(cancellationToken);
                 return 0;
             }
 
-            AddAudit(mailbox, null, message, detectedCaseNumber, null, EmailAutomationActions.Read);
-
             if (ruleMatches.Length == 0)
             {
-                await _db.SaveChangesAsync(cancellationToken);
                 return 0;
             }
 
             var caseMatch = await _caseResolver.ResolveByCourtCaseNumberAsync(
                 detectedCaseNumber!,
                 cancellationToken);
-            if (caseMatch == null)
+            if (caseMatch == null || caseMatch.IsAmbiguous)
             {
-                foreach (var item in ruleMatches)
-                {
-                    AddAudit(
-                        mailbox,
-                        item.Rule.Name,
-                        message,
-                        item.Match.Value,
-                        null,
-                        EmailAutomationActions.NoCaseMatch,
-                        $"No Odcanit case was found for court proceeding number {item.Match.Value}.");
-                }
-
                 _logger.LogWarning(
-                    "EMAILAUTOMATION no Odcanit case match. Mailbox={Mailbox}, DetectedCourtCaseNumber={DetectedCourtCaseNumber}",
+                    "EMAILAUTOMATION message could not be resolved to one Odcanit case. Mailbox={Mailbox}, ResolutionCategory={ResolutionCategory}",
                     mailbox,
-                    detectedCaseNumber);
-                await _db.SaveChangesAsync(cancellationToken);
+                    caseMatch?.IsAmbiguous == true ? "Ambiguous" : "NotFound");
                 return 0;
             }
 
@@ -259,22 +233,16 @@ namespace Odmon.Worker.Services
                 {
                     AddAudit(
                         mailbox,
-                        item.Rule.Name,
                         message,
-                        item.Match.Value,
-                        null,
                         EmailAutomationActions.NoClientMatch,
-                        $"Odcanit case {caseMatch.TikCounter} has no resolvable client number.",
+                        "MissingRouting",
                         resolution: new RoutingResolution(caseMatch, null, null));
                 }
 
                 _logger.LogWarning(
-                    "EMAILAUTOMATION case has no client match. Mailbox={Mailbox}, DetectedCourtCaseNumber={DetectedCourtCaseNumber}, TikCounter={TikCounter}, TikNumber={TikNumber}, ClientVisualId={ClientVisualId}",
+                    "EMAILAUTOMATION case has no routing target. Mailbox={Mailbox}, TikCounter={TikCounter}",
                     mailbox,
-                    detectedCaseNumber,
-                    caseMatch.TikCounter,
-                    caseMatch.TikNumber,
-                    caseMatch.ClientVisualId);
+                    caseMatch.TikCounter);
                 await _db.SaveChangesAsync(cancellationToken);
                 return 0;
             }
@@ -282,12 +250,9 @@ namespace Odmon.Worker.Services
             var resolvedTargetEmail = ResolveTargetEmail(clientNumber.Value);
             var resolution = new RoutingResolution(caseMatch, clientNumber, resolvedTargetEmail);
             _logger.LogInformation(
-                "EMAILAUTOMATION routing resolved. Mailbox={Mailbox}, DetectedCourtCaseNumber={DetectedCourtCaseNumber}, ResolvedTikCounter={ResolvedTikCounter}, ResolvedTikNumber={ResolvedTikNumber}, ResolvedClientNumber={ResolvedClientNumber}, ResolvedTargetEmail={ResolvedTargetEmail}",
+                "EMAILAUTOMATION routing resolved. Mailbox={Mailbox}, ResolvedTikCounter={ResolvedTikCounter}, ResolvedTargetEmail={ResolvedTargetEmail}",
                 mailbox,
-                detectedCaseNumber,
                 caseMatch.TikCounter,
-                caseMatch.TikNumber,
-                clientNumber,
                 resolvedTargetEmail);
 
             var forwarded = 0;
@@ -296,10 +261,7 @@ namespace Odmon.Worker.Services
                 var rule = item.Rule;
                 AddAudit(
                     mailbox,
-                    rule.Name,
                     message,
-                    item.Match.Value,
-                    rule.TestForwardTo,
                     EmailAutomationActions.Matched,
                     resolution: resolution);
 
@@ -309,10 +271,7 @@ namespace Odmon.Worker.Services
                     {
                         AddAudit(
                             mailbox,
-                            rule.Name,
                             message,
-                            item.Match.Value,
-                            resolvedTargetEmail,
                             EmailAutomationActions.SkippedRealForwardBecauseTestModeEnabled,
                             "Real forwarding was skipped because test forwarding is enabled.",
                             resolution: resolution);
@@ -327,10 +286,7 @@ namespace Odmon.Worker.Services
                     {
                         AddAudit(
                             mailbox,
-                            rule.Name,
                             message,
-                            item.Match.Value,
-                            rule.TestForwardTo,
                             EmailAutomationActions.DryRunWouldForward,
                             resolution: resolution);
                         continue;
@@ -343,10 +299,7 @@ namespace Odmon.Worker.Services
                     {
                         AddAudit(
                             mailbox,
-                            rule.Name,
                             message,
-                            item.Match.Value,
-                            rule.TestForwardTo,
                             EmailAutomationActions.Failed,
                             "Test forwarding target is not on the phase-one allowlist.",
                             resolution: resolution);
@@ -356,7 +309,6 @@ namespace Odmon.Worker.Services
                     forwarded += await ForwardAsync(
                         mailbox,
                         rule.Name,
-                        item.Match.Value,
                         message,
                         AllowedTestRecipient,
                         EmailAutomationActions.ForwardedToTestMailbox,
@@ -376,10 +328,7 @@ namespace Odmon.Worker.Services
                 {
                     AddAudit(
                         mailbox,
-                        rule.Name,
                         message,
-                        item.Match.Value,
-                        resolvedTargetEmail,
                         EmailAutomationActions.DryRunWouldForward,
                         resolution: resolution);
                     continue;
@@ -389,10 +338,7 @@ namespace Odmon.Worker.Services
                 {
                     AddAudit(
                         mailbox,
-                        rule.Name,
                         message,
-                        item.Match.Value,
-                        resolvedTargetEmail,
                         EmailAutomationActions.SkippedAutomationGeneratedMessage,
                         "Sender is the ODMON automation mailbox.",
                         resolution: resolution);
@@ -403,10 +349,7 @@ namespace Odmon.Worker.Services
                 {
                     AddAudit(
                         mailbox,
-                        rule.Name,
                         message,
-                        item.Match.Value,
-                        resolvedTargetEmail,
                         EmailAutomationActions.SkippedTargetIsMailboxOwner,
                         resolution: resolution);
                     _logger.LogInformation(
@@ -422,10 +365,7 @@ namespace Odmon.Worker.Services
                 {
                     AddAudit(
                         mailbox,
-                        rule.Name,
                         message,
-                        item.Match.Value,
-                        resolvedTargetEmail,
                         EmailAutomationActions.SkippedTargetAlreadyRecipient,
                         "Resolved target is already an original To or Cc recipient.",
                         resolution: resolution);
@@ -436,10 +376,7 @@ namespace Odmon.Worker.Services
                 {
                     AddAudit(
                         mailbox,
-                        rule.Name,
                         message,
-                        item.Match.Value,
-                        resolvedTargetEmail,
                         EmailAutomationActions.SkippedForwardOrReplyThread,
                         "Subject indicates an already-forwarded or replied thread.",
                         resolution: resolution);
@@ -450,10 +387,7 @@ namespace Odmon.Worker.Services
                 {
                     AddAudit(
                         mailbox,
-                        rule.Name,
                         message,
-                        item.Match.Value,
-                        resolvedTargetEmail,
                         EmailAutomationActions.SkippedSenderIsResolvedTarget,
                         "Sender is the resolved target employee.",
                         resolution: resolution);
@@ -463,7 +397,6 @@ namespace Odmon.Worker.Services
                 forwarded += await ForwardAsync(
                     mailbox,
                     rule.Name,
-                    item.Match.Value,
                     message,
                     resolvedTargetEmail,
                     EmailAutomationActions.ForwardedToResolvedMailbox,
@@ -480,7 +413,6 @@ namespace Odmon.Worker.Services
         private async Task<int> ForwardAsync(
             string mailbox,
             string ruleName,
-            string detectedCaseNumber,
             EmailAutomationMessage message,
             string targetEmail,
             string successAction,
@@ -494,22 +426,8 @@ namespace Odmon.Worker.Services
                 throw new ForwardLimitReachedException();
             }
 
-            if (string.IsNullOrWhiteSpace(message.InternetMessageId))
-            {
-                AddAudit(
-                    mailbox,
-                    ruleName,
-                    message,
-                    detectedCaseNumber,
-                    targetEmail,
-                    EmailAutomationActions.Failed,
-                    "InternetMessageId is required for forwarding idempotency.",
-                    resolution: resolution);
-                return 0;
-            }
-
             var idempotencyKey = CreateIdempotencyKey(
-                message.InternetMessageId,
+                GetStableMessageIdentifier(message),
                 ruleName,
                 targetEmail);
             if (await _db.EmailAutomationLogs.AnyAsync(
@@ -518,10 +436,7 @@ namespace Odmon.Worker.Services
             {
                 AddAudit(
                     mailbox,
-                    ruleName,
                     message,
-                    detectedCaseNumber,
-                    targetEmail,
                     EmailAutomationActions.SkippedAlreadyProcessed,
                     resolution: resolution);
                 return 0;
@@ -529,14 +444,10 @@ namespace Odmon.Worker.Services
 
             var forwardAudit = AddAudit(
                 mailbox,
-                ruleName,
                 message,
-                detectedCaseNumber,
-                targetEmail,
                 successAction,
                 idempotencyKey: idempotencyKey,
-                resolution: resolution,
-                actualForwardTo: targetEmail);
+                resolution: resolution);
 
             // Reserve the unique key before the external side effect. This deliberately
             // provides at-most-once forwarding if Graph's response is ambiguous.
@@ -544,15 +455,11 @@ namespace Odmon.Worker.Services
             try
             {
                 _logger.LogInformation(
-                    "EMAILAUTOMATION forwarding message. ForwardMode={ForwardMode}, Mailbox={Mailbox}, DetectedCourtCaseNumber={DetectedCourtCaseNumber}, ResolvedTikCounter={ResolvedTikCounter}, ResolvedTikNumber={ResolvedTikNumber}, ResolvedClientNumber={ResolvedClientNumber}, ResolvedTargetEmail={ResolvedTargetEmail}, ActualForwardTo={ActualForwardTo}",
+                    "EMAILAUTOMATION forwarding message. ForwardMode={ForwardMode}, Mailbox={Mailbox}, ResolvedTikCounter={ResolvedTikCounter}, ResolvedTargetEmail={ResolvedTargetEmail}",
                     forwardMode,
                     mailbox,
-                    detectedCaseNumber,
                     resolution.CaseMatch.TikCounter,
-                    resolution.CaseMatch.TikNumber,
-                    resolution.ClientNumber,
-                    resolution.ResolvedTargetEmail,
-                    targetEmail);
+                    resolution.ResolvedTargetEmail);
                 await _graphClient.ForwardMessageAsync(
                     mailbox,
                     message.Id,
@@ -564,25 +471,23 @@ namespace Odmon.Worker.Services
                 forwardAudit.ProcessedAtUtc = UtcNow();
                 return 1;
             }
-            catch (GraphThrottledException ex)
+            catch (GraphThrottledException)
             {
                 forwardAudit.Action = EmailAutomationActions.Failed;
-                forwardAudit.ErrorMessage = Truncate(ex.Message, 2000);
+                forwardAudit.ErrorMessage = "GraphThrottled";
                 await _db.SaveChangesAsync(cancellationToken);
                 throw;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 forwardAudit.Action = EmailAutomationActions.Failed;
-                forwardAudit.ErrorMessage = Truncate(ex.Message, 2000);
+                forwardAudit.ErrorMessage = "ForwardFailed";
                 _logger.LogError(
-                    ex,
-                    "EMAILAUTOMATION {ForwardMode} forward failed. Mailbox={Mailbox}, GraphMessageId={GraphMessageId}, RuleName={RuleName}, ActualForwardTo={ActualForwardTo}",
+                    "EMAILAUTOMATION {ForwardMode} forward failed. Mailbox={Mailbox}, TikCounter={TikCounter}, ErrorCategory={ErrorCategory}",
                     forwardMode,
                     mailbox,
-                    message.Id,
-                    ruleName,
-                    targetEmail);
+                    resolution.CaseMatch.TikCounter,
+                    ex.GetType().Name);
                 return 0;
             }
         }
@@ -657,50 +562,68 @@ namespace Odmon.Worker.Services
                 TimeSpan.FromSeconds(1));
         }
 
-        internal static string CreateIdempotencyKey(
-            string internetMessageId,
+        internal string CreateIdempotencyKey(
+            string messageIdentifier,
             string ruleName,
             string targetEmail)
         {
             var value = string.Join(
                 "\n",
-                internetMessageId.Trim(),
+                "forward-v1",
+                messageIdentifier.Trim(),
                 ruleName.Trim().ToLowerInvariant(),
                 targetEmail.Trim().ToLowerInvariant());
-            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+            return CreateFingerprint(value);
+        }
+
+        private string CreateMessageFingerprint(
+            string mailbox,
+            EmailAutomationMessage message)
+            => CreateFingerprint(string.Join(
+                "\n",
+                "message-v1",
+                mailbox.Trim().ToLowerInvariant(),
+                GetStableMessageIdentifier(message)));
+
+        private static string GetStableMessageIdentifier(EmailAutomationMessage message)
+            => !string.IsNullOrWhiteSpace(message.InternetMessageId)
+                ? $"internet:{message.InternetMessageId.Trim()}"
+                : $"graph:{message.Id.Trim()}";
+
+        private string CreateFingerprint(string value)
+        {
+            using var hmac = new HMACSHA256(
+                Encoding.UTF8.GetBytes(_settings.FingerprintKey));
+            return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(value)));
         }
 
         private EmailAutomationLog AddAudit(
             string mailbox,
-            string? ruleName,
             EmailAutomationMessage message,
-            string? detectedCaseNumber,
-            string? targetEmail,
             string action,
-            string? errorMessage = null,
+            string? errorCategory = null,
             string? idempotencyKey = null,
-            RoutingResolution? resolution = null,
-            string? actualForwardTo = null)
+            RoutingResolution? resolution = null)
         {
             var audit = new EmailAutomationLog
             {
                 Mailbox = mailbox,
-                RuleName = ruleName,
-                InternetMessageId = message.InternetMessageId,
-                GraphMessageId = message.Id,
-                Subject = Truncate(message.Subject, 1000),
-                Sender = Truncate(message.Sender, 320),
-                ReceivedDateTimeUtc = message.ReceivedDateTimeUtc,
-                DetectedCourtCaseNumber = detectedCaseNumber,
+                RuleName = null,
+                InternetMessageId = null,
+                GraphMessageId = CreateMessageFingerprint(mailbox, message),
+                Subject = null,
+                Sender = null,
+                ReceivedDateTimeUtc = null,
+                DetectedCourtCaseNumber = null,
                 ResolvedTikCounter = resolution?.CaseMatch.TikCounter,
-                ResolvedTikNumber = resolution?.CaseMatch.TikNumber,
-                ResolvedClientNumber = resolution?.ClientNumber,
+                ResolvedTikNumber = null,
+                ResolvedClientNumber = null,
                 ResolvedTargetEmail = resolution?.ResolvedTargetEmail,
-                ActualForwardTo = actualForwardTo,
-                TargetEmail = targetEmail,
+                ActualForwardTo = null,
+                TargetEmail = null,
                 Action = action,
                 IdempotencyKey = idempotencyKey,
-                ErrorMessage = Truncate(errorMessage, 2000),
+                ErrorMessage = SanitizeErrorCategory(errorCategory),
                 CreatedAtUtc = UtcNow()
             };
             _db.EmailAutomationLogs.Add(audit);
@@ -714,8 +637,25 @@ namespace Odmon.Worker.Services
                 ? DateTime.SpecifyKind(value, DateTimeKind.Utc)
                 : value.ToUniversalTime();
 
-        private static string? Truncate(string? value, int maxLength)
-            => value?.Length > maxLength ? value[..maxLength] : value;
+        private static string? SanitizeErrorCategory(string? value)
+            => value switch
+            {
+                null => null,
+                "MissingRouting" => value,
+                "GraphThrottled" => value,
+                "ForwardFailed" => value,
+                "Test forwarding target is not on the phase-one allowlist." =>
+                    "TestTargetNotAllowed",
+                "Real forwarding was skipped because test forwarding is enabled." =>
+                    "TestModeEnabled",
+                "Sender is the ODMON automation mailbox." => "AutomationSender",
+                "Resolved target is already an original To or Cc recipient." =>
+                    "TargetAlreadyRecipient",
+                "Subject indicates an already-forwarded or replied thread." =>
+                    "ForwardOrReplyThread",
+                "Sender is the resolved target employee." => "SenderIsTarget",
+                _ => "OperationalFailure"
+            };
 
         private sealed record RoutingResolution(
             EmailAutomationCaseMatch CaseMatch,

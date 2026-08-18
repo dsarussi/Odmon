@@ -1,6 +1,6 @@
 # תיעוד מערכת ODMON
 
-> **עדכון אחרון:** אפריל 2026  
+> **עדכון אחרון:** 31 ביולי 2026  
 > **קהל יעד:** מפתחים, DevOps, מפעילים, בעלי עניין
 
 ---
@@ -20,6 +20,8 @@
    - 4.7 [קליטת מסמכים (לוח משימות)](#47-קליטת-מסמכים-לוח-משימות)
    - 4.8 [כתיבת נספח סיפור תאונה](#48-כתיבת-נספח-סיפור-תאונה)
    - 4.9 [סיכומי שיחות Voicenter → כתיבת נספח](#49-סיכומי-שיחות-voicenter--כתיבת-נספח)
+   - 4.10 [התראות החלטות NetCourt](#410-התראות-החלטות-netcourt)
+   - 4.11 [אוטומציית דוא"ל](#411-אוטומציית-דואל)
 5. [אינטגרציות](#5-אינטגרציות)
    - 5.1 [Monday.com](#51-mondaycom)
    - 5.2 [Odcanit (ניהול תיקים משפטיים)](#52-odcanit-ניהול-תיקים-משפטיים)
@@ -56,6 +58,8 @@ ODMON הוא שירות Worker של .NET 8 הפועל כשירות Windows. הו
 | קליטת מסמכים | Monday → Odcanit | הורדת קבצים מ-Monday וייבוא ל-Odcanit |
 | סיפור תאונה | Monday → Odcanit | הרכבת תשובות שאלון לטקסט נספח |
 | סיכומי שיחות | Voicenter → Odcanit | צירוף סיכומי שיחות AI כנספחים לתיקים |
+| החלטות NetCourt | Odcanit → דוא"ל | שליחת התראות לעובד מנותב, עם קובץ PDF במאמץ מיטבי |
+| אוטומציית דוא"ל | Microsoft 365 → דוא"ל | ניתוב והעברת הודעות לפי תיק ולקוח; ללא תיוק ב-Odcanit |
 | ניטור | פנימי | דוא"ל סיכום יומי, התראות קריטיות, מעקב כשלונות |
 
 ---
@@ -110,14 +114,16 @@ ODMON הוא שירות Worker של .NET 8 הפועל כשירות Windows. הו
 רמזור תנועה מבטיח שרק Worker כבד אחד רץ בכל רגע נתון, כדי שבסיס הנתונים לא יהיה עמוס מדי.
 
 **פירוט טכני:**  
-`WorkerCoordinator` הוא Singleton שעוטף `SemaphoreSlim(1,1)`. ה-`SyncWorker` וה-`DocumentIngestionWorker` מתחרים על חכירה (lease) לפני הרצת המחזורים שלהם. אם החכירה תפוסה, ה-Worker השני מדלג על המחזור שלו בצורה מסודרת. ה-`EmailBackgroundService` וה-`VoicenterCallSummaryWorker` אינם מוגבלים על ידי מתאם זה — דוא"ל חייב תמיד להיות ניתן לשליחה, ו-Voicenter פונה בעיקר ל-API חיצוניים ולא לבסיס הנתונים.
+`WorkerCoordinator` הוא Singleton שעוטף `SemaphoreSlim(1,1)`. ה-`SyncWorker`, ה-`DocumentIngestionWorker` וה-`HearingNearestScheduleWorker` מקבלים lease לפני עבודה כבדה על בסיסי הנתונים. אם ה-lease תפוס, המחזור המתוזמן מדולג בצורה מסודרת. ה-`EmailBackgroundService`, ה-`VoicenterCallSummaryWorker`, ה-`NetCourtDecisionAlertWorker` וה-`EmailAutomationWorker` אינם כפופים למתאם זה.
 
 ### הזרקת תלויות (Dependency Injection)
 
 כל ה-Workers, שירותים ותשתיות רשומים ב-`Program.cs`. רישומים עיקריים:
 - **Singletons:** `WorkerCoordinator`, `VoicenterApiClient`, `EmailNotifier`
 - **Scoped (למחזור):** `SyncService`, `VoicenterCallSummaryService`, `DocumentIngestionService`, `HearingApprovalSyncService`, `HearingNearestSyncService`, `NispahWriterService`
-- **Hosted services:** `SyncWorker`, `DocumentIngestionWorker`, `EmailBackgroundService`, `VoicenterCallSummaryWorker`, `HearingBackfillWorker`, `HearingApprovalBackfillWorker`
+- **Hosted services:** `SyncWorker`, `HearingNearestScheduleWorker`, `DocumentIngestionWorker`, `EmailBackgroundService`, `VoicenterCallSummaryWorker`, `NetCourtDecisionAlertWorker`, `EmailAutomationWorker`, `HearingBackfillWorker`, `HearingApprovalBackfillWorker`
+- **שירותי NetCourt:** `NetCourtDecisionAlertService`, `SqlNetCourtDocumentReader`, `SqlNetCourtDocumentFileResolver`
+- **שירותי אוטומציית דוא"ל:** `EmailAutomationService`, `MicrosoftGraphEmailAutomationClient`, `EmailAutomationCaseResolver`
 - **DbContexts:** `IntegrationDbContext`, `OdcanitDbContext` (שניהם Scoped, SQL Server)
 
 ---
@@ -197,6 +203,39 @@ ODMON הוא שירות Worker של .NET 8 הפועל כשירות Windows. הו
 | קונפיגורציה | `HearingApprovalBackfill` |
 | שימוש טיפוסי | מושבת; מופעל לאחר השקת הפיצ'ר לכיסוי נתונים היסטוריים |
 
+### HearingNearestScheduleWorker
+
+**מה הוא עושה:** מריץ את אותו reconciliation של הדיון הקרוב באופן עצמאי מהסנכרון הראשי, בשעות ישראל קבועות.
+
+| מאפיין | ערך |
+|--------|-----|
+| מחלקה | `HearingNearestScheduleWorker` |
+| לוח זמנים | `HearingNearestSchedule:TimesIsrael`; ברירת המחדל וההגדרה הנוכחית הן `07:00`, `11:00`, `15:00`, `19:00`, `23:00` לפי שעון ישראל |
+| תיאום | מקבל lease מ-`WorkerCoordinator` |
+| מאציל ל | `HearingNearestSyncService` |
+| מצב ברירת מחדל | מושבת (`HearingNearestSchedule:Enabled=false`) |
+
+### NetCourtDecisionAlertWorker
+
+**מה הוא עושה:** סורק החלטות NetCourt זכאיות ב-Odcanit ושולח התראות דוא"ל מנותבות, עם PDF מאומת כאשר ניתן לצרפו.
+
+| מאפיין | ערך |
+|--------|-----|
+| תדירות | `NetCourtDecisionAlerts:IntervalSeconds` (מינימום 30 שניות; מוגדר 300) |
+| מאציל ל | `NetCourtDecisionAlertService` |
+| מצב עמיד | זהויות מסמך בטבלת `NetCourtDecisionAlerts` |
+
+### EmailAutomationWorker
+
+**מה הוא עושה:** מנטר תיבות Microsoft 365 מוגדרות ומעביר הודעות תואמות. הוא אינו מתייק הודעות או קבצים מצורפים ב-Odcanit.
+
+| מאפיין | ערך |
+|--------|-----|
+| תדירות | `EmailAutomation:IntervalMinutes` (מינימום דקה; מוגדר 3) |
+| מאציל ל | `EmailAutomationService` |
+| מצב ברירת מחדל | מושבת; `DryRun=true`, `RealForwardEnabled=false` |
+| מצב עמיד | `EmailAutomationMailboxStates`, `EmailAutomationLogs` |
+
 ---
 
 ## 4. זרימות פיצ'רים
@@ -208,16 +247,17 @@ ODMON הוא שירות Worker של .NET 8 הפועל כשירות Windows. הו
 
 **זרימה טכנית:**
 
-1. **בחירת TikCounter** — `SyncService` קובע אילו תיקים לטעון. שני מצבים:
+1. **בחירת תיקים** — `SyncService` קובע אילו תיקים לטעון:
    - *מצב Allowlist* (`OdcanitLoad:EnableAllowList`): טוען רק TikCounters/TikNumbers מוגדרים
-   - *מצב Change Feed*: שואל את `vwExportToOuterSystems_ActionLog` לתיקים שהשתנו מאז ה-watermark האחרון
+   - *מצב Listener* (`Sync:ListenerUpdateOnly=true` יחד עם `ListenerCreationCutoffDate`): מבצע bootstrap לתיקים לא ממופים שנוצרו מה-cutoff ואילך, ולאחר מכן reconciliation לכל האוכלוסייה הזכאית והממופה מאותו cutoff. מסלול הייצור הזה אינו משתמש ב-`vwExportToOuterSystems_ActionLog`
+   - *מצב Legacy/non-listener*: שואל את `vwExportToOuterSystems_ActionLog` לתיקים שהשתנו מאז ה-watermark האחרון
 2. **טעינת תיקים** — `IOdcanitReader` (`SqlOdcanitReader`) טוען נתוני תיק מלאים מ-Views של Odcanit, ומעשיר כל `OdcanitCase` עם לקוחות, צדדים, אירועי יומן, נתוני משתמש ונתוני חוזלפ
 3. **קליטת תיקים חדשים (Bootstrap)** — תיקים חדשים (ללא `MondayItemMapping` קיים) עוברים תקופת המתנה (`Onboarding:CoolingPeriodDays`) לפני יצירתם כפריטי Monday. מנגנון זה מונע יצירת פריטים לתיקים שנסגרים או מתוקנים מיד
-4. **התאמה (Reconciliation)** — תיקים ממופים קיימים מושווים באמצעות checksums (`OdcanitVersion`, `MondayChecksum`). רק שדות שהשתנו מפעילים עדכון Monday API
+4. **זהות יציבה ו-Reconciliation** — `TikCounter` הוא המזהה הפנימי הקבוע והמפתח הייחודי במיפוי. `TikNumber` הוא מספר התיק המוצג והוא עשוי להשתנות. החיפוש מתחיל ב-`TikCounter + BoardId`, מסוגל ליישב מיפויים ישנים, ומשתמש בעמודת מספר התיק ב-Monday כמסלול שחזור. שינוי `TikNumber` מעדכן את אותו פריט Monday ואינו יוצר תיק חדש. checksums של תוכן ודיון יחד עם גרסת Odcanit מונעים קריאות API מיותרות
 5. **סנכרון דיונים** — מואצל ל-`HearingNearestSyncService` (ראו 4.2)
 6. **סנכרון אישור הגעה** — מואצל ל-`HearingApprovalSyncService` (ראו 4.3)
 7. **Circuit Breaker** — אם כשלונות חורגים מ-`Monday:CircuitBreakerFailureThreshold`, הריצה מבוטלת ומטריקה נרשמת
-8. **נעילת ריצה** — טבלת `SyncRunLock` מונעת ריצות חופפות (נעילה בשורה אחת עם תפוגה)
+8. **נעילת ריצה** — טבלת `SyncRunLocks` מונעת ריצות סנכרון חופפות (lease בשורה אחת עם תפוגה)
 9. **מטריקות** — כל ריצה רושמת שורת `SyncRunMetric`: נוצרו, עודכנו, נכשלו, דולגו, משך, סטטוס circuit breaker
 
 **טבלאות מרכזיות:** `MondayItemMappings`, `SyncLogs`, `SyncFailures`, `SyncRunMetrics`, `SyncRunLocks`, `ListenerStates`
@@ -230,10 +270,14 @@ ODMON הוא שירות Worker של .NET 8 הפועל כשירות Windows. הו
 **זרימה טכנית:**
 
 1. `HearingNearestSyncService.SyncNearestHearingsAsync` נקרא בכל מחזור סנכרון
-2. `HearingSelector.PickNearestUpcomingHearing` בוחר את אירוע היומן העתידי הקרוב ביותר לכל `TikCounter` מתוך שורות `OdcanitDiaryEvent`
-3. שינויים מזוהים על ידי השוואה ל-`HearingNearestSnapshots`
-4. עמודות Monday מתעדכנות: תאריך דיון, שעה, שם שופט, עיר בית משפט, סטטוס דיון
-5. Snapshots נשמרים להשוואה בריצה הבאה
+2. אותו שירות יכול לרוץ גם מ-`HearingNearestScheduleWorker`, שמושבת כברירת מחדל, בשעות ישראל קבועות (`07:00`, `11:00`, `15:00`, `19:00`, `23:00`)
+3. `HearingSelector.PickNearestUpcomingHearing` בוחן שורות יומן עתידיות ומעדיף את הדיון הפעיל הקרוב ביותר; רק אם אין דיון פעיל הוא עובר לדיון מבוטל, ולאחר מכן לדיון שהועבר
+4. שינויים מזוהים בהשוואה ל-`HearingNearestSnapshots`
+5. סטטוס הדיון מתעדכן באופן עצמאי (`0 → "פעיל"`, `1 → "מבוטל"`, `2 → "הועבר"`), בתנאי שהתווית מותרת בעמודת Monday
+6. שינוי שם שופט עצמאי. תאריך ושעת הדיון נכתבים רק כאשר קיימים גם שופט וגם עיר בית משפט אפקטיבית. העיר האפקטיבית היא `City` משורת היומן, ובחסרונו `CourtName`
+7. שירות הדיונים העצמאי אינו כותב במכוון ל-`Monday:CourtCityColumnId`; עמודה זו נשארת בבעלות הסנכרון הראשי ומקבלת רק את `OdcanitCase.LegalCourtName` מ-UserData המשפטי
+8. חסימת תאריך/שעה מונעת מאוטומציות התראה ב-Monday לפעול עם הקשר חלקי של שופט או בית משפט
+9. `OdcanitWrites:DryRun=true` רושם את הצעדים המתוכננים אך אינו מעדכן את Monday ואינו מקדם snapshot
 
 **טבלאות מרכזיות:** `HearingNearestSnapshots`, `MondayItemMappings`
 
@@ -266,7 +310,7 @@ ODMON הוא שירות Worker של .NET 8 הפועל כשירות Windows. הו
 1. `HearingApprovalBackfillService.RunAsync` עובר על כל ה-`MondayItemMappings`
 2. לכל מיפוי, שואב ערך עמודת אישור הגעה מ-Monday
 3. מדלג אם קיימת רשומת `NispahWriteLog` עם `SourceKind="HearingApproval"` עבור TikCounter זה (הוכחה לכתיבה קודמת, לא רק מעקב מצב)
-4. עבור `TikCounter <= 0` (מיפויים שליליים מייבוא), פותר TikCounter אמיתי מטבלת `dbo.MainTik` ב-Odcanit לפי TikNumber
+4. דוחה מיפויים עם `TikCounter <= 0`; כללי תקינות המיפוי הנוכחיים אוסרים TikCounters סינתטיים או שליליים
 5. כותב נספח דרך `IOdcanitWriter.AppendNispahAsync` ורושם `NispahWriteLog`
 6. תומך ב-`DryRun`, `MaxItems`, מסנני `OnlyTikCounters`, ו-`ThrottleMs` להאטה
 
@@ -336,8 +380,8 @@ CREATE TABLE dbo.HearingBackfill_JunJul2026
    - הבחנה HEIC/HEIF מול MP4/MOV: על פי major brand ב-ISO BMFF `ftyp`
 5. הקובץ נשמר לתיקיית inbox, ואז Stored Procedure `dbo.ProcDocuments_AddNewDocument` ב-Odcanit יוצר רשומת מסמך
 6. הקובץ מועבר לנתיב המסמך הסופי ב-Odcanit
-7. מעקב ב-`MondayDocumentImports` עם מצבים: `Pending → InProgress → Success/Failed/Skipped`
-8. ניסיונות חוזרים עד `MaxRetryCount` עבור כשלונות חולפים
+7. מעקב ב-`MondayDocumentImports` עם מצבים: `Pending → Downloaded → SpCreated → Copied → Verified → Success` או `Failed`
+8. רשומות כשל עוברות ניסיון חוזר עד `MaxRetryCount`; כשלי אימות קבועים מועברים ישירות לגבול הניסיונות
 
 **סיומות קבצים נתמכות:** `pdf`, `jpg`, `jpeg`, `png`, `docx`, `doc`, `mp4`, `mov`, `qt`, `heic`, `heif`
 
@@ -348,7 +392,7 @@ CREATE TABLE dbo.HearingBackfill_JunJul2026
 ### 4.7 קליטת מסמכים (לוח משימות)
 
 **במילים פשוטות:**  
-מסמכי PDF ו-Word שהועלו ללוח "משימות" נפרד ב-Monday מיובאים גם הם אוטומטית ל-Odcanit.
+מסמכי Word שהועלו ללוח "משימות" נפרד ב-Monday מיובאים גם הם אוטומטית ל-Odcanit.
 
 **זרימה טכנית:**
 
@@ -356,7 +400,9 @@ CREATE TABLE dbo.HearingBackfill_JunJul2026
 2. שואב פריטים מלוח שונה (`TasksSource:BoardId`)
 3. פותר TikNumber דרך עמודת lookup
 4. מוריד קובץ מעמודת הקובץ בלוח המשימות
-5. בהצלחה, מעדכן עמודת סטטוס Monday כדי לציין שהטופס עובד
+5. מעבד רק את קובץ ה-`.doc`/`.docx` הראשון ורק כאשר סטטוס המשימה הוא אחת מתוויות המוכנות המוגדרות. פריט מוכן ללא קובץ הופך לכשל timeout מתועד לאחר `WaitForFileTimeoutHours`
+
+`TasksSource:TestTikNumber` מצמצם את מקור הייצור; הוא אינו מצב dry-run. לצינור קליטת המסמכים אין מתג dry-run כללי.
 
 **קונפיגורציה:** מקוננת תחת `MondayDocumentIngestion:TasksSource`
 
@@ -388,9 +434,9 @@ CREATE TABLE dbo.HearingBackfill_JunJul2026
 3. מסנן: רק שיחות שנענו (מוגדר), משך מינימלי, חלון lookback
 4. לכל רשומת CDR מתאימה, שואב פרטי שיחה מלאים מ-`/Call/History/{CallID}` עם Bearer token
 5. מחלץ סיכום AI מ-`Data.ai_data.insights.summary`
-6. פותר טלפון לקוח מ-`Data.ai_data.client_phone` → `Data.cdr_data.client_phone` → fallbacks
+6. פותר את מספר הטלפון מ-`Data.ai_data.client_phone` → מספר יעד → מספר מתקשר
 7. מנרמל לפורמט טלפון ישראלי (דטרמיניסטי `0XX-XXXXXXX`)
-8. מתאים לתיקי Odcanit על ידי שאילתת `vwExportToOuterSystems_UserData` עבור שדות "סלולרי עד" ו-"נייד צד ג"
+8. מתאים ישירות לתיקי Odcanit דרך `vwExportToOuterSystems_UserData`, לפי `PhoneFieldNames` מוגדרים או רשימת ברירת המחדל של טלפוני עד, נהג, בעל פוליסה, צד ג', עו"ד צד ג' ותובע
 9. **כלל התאמה מרובה**: כותב לכל התיקים המתאימים (לא רק הראשון)
 10. מניעת כפילויות לפי `CallID + TikCounter` דרך `NispahWriteLogs` (`SourceKind="VoicenterCall"`, `SourceItemId` = hash של CallID)
 11. כותב נספח דרך `IOdcanitWriter.AppendNispahAsync`
@@ -400,15 +446,33 @@ CREATE TABLE dbo.HearingBackfill_JunJul2026
 
 **זיהוי Worker תקוע:** אם לא התרחש מחזור מוצלח תוך `StaleWorkerThresholdHours` (ברירת מחדל 18 שעות), נשלח דוא"ל התראה.
 
-**מצב בדיקה:** כאשר `TestMode=true` ו-`TestCallId` מוגדר, רק שיחה אחת מעובדת (עם לוגים אבחוניים).
+**מצב בדיקה:** כאשר `TestMode=true` ו-`TestCallId` מוגדר, רק שיחה אחת מעובדת עם לוגים אבחוניים. מצב זה פונה ל-detail endpoint ועלול לכתוב נספח חי ב-Odcanit; רק `VoicenterBackfill:DryRun=true` מונע כתיבה.
 
 **מעקב מכסה שבועית (מאי 2026):** Voicenter אוכפת מגבלת שימוש שבועית (כיום 400 לשבוע עבור משתמש 203570) על נקודת הקצה `Call/History/{CallID}`. ODMON רושם כעת כל קריאת API ב-`VoicenterApiRequestLogs` בהפרדה לפי `EndpointType` (`CdrList` מול `CallHistoryDetail`), סופר את שבוע ה-ISO הנוכחי, ושולח דוא"ל אזהרה פעם בשבוע כאשר השימוש מגיע ל-`WeeklyUsageWarningThreshold` (ברירת מחדל 350). כאשר Voicenter מחזירה HTTP 401 או גוף תגובה המכיל "weekly usage limit" / "usage limit" / "quota" / "limit reached", `VoicenterApiClient` זורקת `VoicenterQuotaExceededException`; השירות מפסיק לשלוח קריאות פרטים נוספות במחזור וסופר את שורות ה-CDR הנותרות כ-`SkippedDueToQuotaExceeded`.
 
-**מטמון מצב עיבוד מקומי:** `VoicenterCallProcessingStates` שומר סטטוס סופי לכל CallID (`Written`, `NoAI`, `NoMatch`, `Duplicate`, `Failed`, `QuotaExceeded`). ה-Worker בודק את המטמון **לפני** שליחת בקשת `CallHistoryDetail`, כך ש-CallIDs שכבר טופלו לא מבזבזים מכסה. גם `NispahWriteLogs` נבדק כהוכחה שנייה לכתיבה קודמת.
+**מטמון מצב עיבוד מקומי:** `VoicenterCallProcessingStates` שומר מצב לכל CallID (`Written`, `NoAI`, `NoMatch`, `Duplicate`, `Failed`, `QuotaExceeded`). המצבים `Written` ו-`Duplicate` תמיד מדולגים. רשומות `QuotaExceeded` עדכניות, וגם `NoMatch` כאשר הוגדר לכך חלון, עשויות לעבור ניסיון חוזר בתוך חלון ה-lookback ועד `MaxDeferredReprocessCallsPerRun`. `NispahWriteLogs` נבדקת לפני שליפת הפרטים ושוב לכל תיק תואם.
 
 **מצב Backfill ידני:** בלוק קונפיגורציה `VoicenterBackfill` מאפשר טווח תאריכים רחב יותר חד-פעמי (לדוגמה: שחזור כל השיחות מאז 27.04.2026 לאחר הפסקת מכסה). ברירת המחדל `DryRun=true` לתצוגה מקדימה בטוחה. ראו `docs/VOICENTER_QUOTA_RUNBOOK.md`.
 
 **טבלאות מרכזיות:** `NispahWriteLogs`, `VoicenterApiRequestLogs`, `VoicenterQuotaWarningStates`, `VoicenterCallProcessingStates`
+
+### 4.10 התראות החלטות NetCourt
+
+`NetCourtDecisionAlertWorker` קורא מ-`vwNetCourtDocs` שורות שבהן `DocType IN (2,3)` ו-`DocDate >= NetCourtDecisionAlerts:StartFromDocDate`. סדר העדיפות לזהות עמידה הוא `CourtDocumentID`, אחריו `ODDocID`, `DecisionID`, ולבסוף `Counter` של המקור. זהויות שכבר תועדו מוסרות לפני החלת `MaxBatchSize`.
+
+התיק נפתר ב-Odcanit והלקוח מנותב לפי `ClientNumberToRecipientEmail`. במצב Test ההודעה הראשית נשלחת רק ל-`TestRecipient`; במצב Live היא נשלחת לעובד המנותב. `BccRecipients` חל רק על הודעות NetCourt. כאשר אין ניתוב ו-fallback מושבת, נרשם `MissingRouting` ולא נשלח דוא"ל.
+
+כאשר צירוף PDF מופעל, הנתיב מתקבל בצורה positional דרך `dbo.procDocumentsGroup_BuildDocPath` לפי `ODDocID` וסיומת `.pdf`. הנתיב חייב להיות תחת `AttachmentAllowedRoots`, להתקיים, להסתיים ב-`.pdf`, להתחיל ב-`%PDF` ולא לחרוג מ-`MaxAttachmentBytes`. הצירוף הוא best effort: כשל בצירוף אינו מונע את שליחת ההתראה ללא הקובץ. ראו [NETCOURT_DECISION_ALERTS.md](NETCOURT_DECISION_ALERTS.md).
+
+### 4.11 אוטומציית דוא"ל
+
+`EmailAutomationWorker` משתמש בהרשאות אפליקציה של Microsoft Graph ובשאילתות delta מסוג `changeType=created` לכל תיבה ותיקייה מוגדרות. תיבה חדשה מתחילה מ-`StartProcessingFromUtc` או מזמן האתחול, ולכן דואר היסטורי אינו מעובד כברירת מחדל. מצב delta מתקדם רק לאחר השלמת כל רצף הדפים; throttling או הגעה למגבלת המחזור משאירים אותו ללא שינוי לניסיון הבא.
+
+הכללים מזהים מספר הליך משפטי בנושא, פותרים אותו דרך Hozlap/UserData לתיק Odcanit, מפענחים את מספר הלקוח ומנתבים לאמיר (`5,8,23,253,101,3`), ליונתן (`2,15`) או לעדן (יתר הלקוחות). Dry-run רושם `DryRunWouldForward`. העברת בדיקה מוגבלת ל-`odmon@ezer-law.com`. העברה אמיתית דורשת `RealForwardEnabled=true` ו-`DryRun=false`, ומיישמת הגנות מפני לולאה: בעל התיבה, נמען שכבר נמצא ב-To/Cc, נושא reply/forward, שולח היעד ודואר שנוצר על ידי האוטומציה.
+
+הודעות שאין בהן מספר תיק, שאינן נפתרות לתיק, או שנפתרות באופן דו-משמעי אינן נשמרות ב-ODMON, ופרטים מזהים שלהן אינם נכתבים ללוגים. עבור הודעה שהותאמה נשמרים ב-`EmailAutomationLogs` רק התיבה התפעולית, טביעות HMAC ממופתחות, `TikCounter` שנפתר, עובד היעד, פעולה/תוצאה, קטגוריית שגיאה מנוטרלת וחותמות זמן. הנושא, השולח, הנמענים, מזהי Graph/Internet גולמיים, מספר ההליך שזוהה, גוף ההודעה, מידע על קבצים מצורפים ו-`TikNumber` אינם נשמרים.
+
+לפני פעולת Graph נשמר מפתח idempotency ייעודי מסוג HMAC-SHA-256. הסוד היציב מסופק דרך `EmailAutomation:FingerprintKey`; טביעת ההעברה מחושבת ממזהה ה-Internet של ההודעה (או מזהה Graph כגיבוי), שם הכלל ועובד היעד. טביעת הודעה נפרדת מחושבת ממזהה המקור ומהתיבה. אף טביעה אינה כוללת נושא, שולח, גוף, נמענים או פרטי קבצים מצורפים. ההודעה המקורית, לרבות הקבצים המצורפים, מועברת בתוך Microsoft 365 בלי הורדה או שמירה על ידי ODMON. ODMON אינו מוחק, מעביר תיקייה, מאחסן בארכיון או משנה את הודעת המקור, אינו יוצר רשומות מסמך ב-Odcanit ואינו מתייק קבצים מצורפים נכנסים.
 
 ---
 
@@ -510,12 +574,16 @@ Voicenter היא מערכת הטלפון. היא מקליטה שיחות ויו�
 | `NispahDeduplications` | מניעת כפילויות לפי hash תוכן עבור כתיבות נספח |
 | `CaseAnnexWriteStates` | דגלי אידמפוטנטיות לכל תיק (לדוגמה: סיפור תאונה נכתב) |
 | `AllowedTiks` | רשימת TikCounters מורשים לטעינה מבוקרת |
-| `EmailAlertDedups` | מניעת כפילויות והגבלת קצב להתראות דוא"ל |
+| `EmailAlertDedups` | סכימה שמורה לטביעות אצבע עמידות; `EmailNotifier` הנוכחי משתמש במטמון suppression בזיכרון |
 | `VoicenterApiRequestLogs` | רשומת ביקורת לכל קריאת API יוצאת ל-Voicenter, מופרדת לפי סוג נקודת קצה (למעקב מכסה) |
 | `VoicenterQuotaWarningStates` | שורה אחת לכל (שבוע, סוג נקודת קצה) כאשר נשלח דוא"ל אזהרת מכסה — מונע ספאם אזהרות שבועיות |
 | `VoicenterCallProcessingStates` | מטמון מצב סופי לכל CallID; מונע מה-Worker לשלוף שוב פרטים עבור שיחות שכבר טופלו |
+| `NetCourtDecisionAlerts` | זהות החלטה עמידה, תוצאת ניתוב, מצב דוא"ל וסטטוס תור |
+| `NetCourtDecisionAlertStates` | מצב אבחון שנשמר עבור אתחול/watermark של NetCourt |
+| `EmailAutomationMailboxStates` | delta link ו-baseline לכל תיבה ותיקייה |
+| `EmailAutomationLogs` | ביקורת מצומצמת להודעות מותאמות בלבד: תיבה, טביעות ממופתחות, `TikCounter`, עובד יעד, פעולה/תוצאה, קטגוריית שגיאה מנוטרלת וחותמות זמן; הודעות לא מותאמות אינן יוצרות שורה |
 
-**אינדקסים על `MondayItemMappings`:** אינדקסים ייחודיים על `TikCounter`, `(TikNumber, BoardId)`, ו-`MondayItemId` לחיפוש יעיל ואכיפת ייחודיות.
+**אינדקסים על `MondayItemMappings`:** `TikCounter` ייחודי ומוגבל לערכים חיוביים. `(TikNumber, BoardId)` ו-`MondayItemId` הם אינדקסי חיפוש שאינם ייחודיים. אינדקס covering על `(BoardId, TikCounter)` תומך בקריאות מיפוי. הקריאות הן candidate-scoped עם `WITH (NOLOCK)` ובאצוות; מועמדים שנותרו unresolved לאחר ניסיונות מדורגים נדחים לריצה הבאה ואינם נחשבים ללא-ממופים.
 
 ### 6.2 בסיס נתוני Odcanit
 
@@ -609,9 +677,11 @@ ODMON משתמש במספר שכבות למניעת כתיבות כפולות:
 2. **דיונים שסונכרנו** — מספר עדכוני דיונים שנדחפו ל-Monday
 3. **פריטים שעודכנו** — סך פריטי Monday שעודכנו
 4. **כשלונות סנכרון** — מקובצים לפי תיק וסיבת שורש, עם ספירות
-5. **כשלונות קליטת מסמכים** — `MondayDocumentImports` שנכשלו עם TikNumber, עמודה, שגיאה, חותמות זמן
-6. **סיכומי שיחות Voicenter** — רשומות CDR שנשלפו, פרטי שיחות שנשלפו, נספחים שנכתבו, ספירות דילוג, כתיבות שנכשלו עם דוגמאות CallIDs
-7. **הערות מערכת** — התראות circuit breaker, ספירת כשלונות גבוהה באופן חריג
+5. **קליטת מסמכים** — מספר הצלחות וכשלונות מקובצים לפי actionable, timeout ישן, קובץ משתמש לא תקין, כשל חיצוני חולף, חסימה ידועה ובעיית נתונים ידועה
+6. **סיכומי שיחות Voicenter** — מטריקות CDR/detail/dedup מהריצה האחרונה, כתיבות וכשלונות נספח, שימוש שבועי ב-`CallHistoryDetail` ומצב מכסה
+7. **מצב מערכת ואנומליות** — circuit breaker, נפח כשלונות גבוה, כשלונות אמיתיים, בעיות קליטת מסמכים ובעיות מכסה/detail של Voicenter
+
+`FailureClassifier` משתמש בערכי `ErrorType` ו-`Operation` מפורשים כדי להפריד כשלונות קריטיים/תפעוליים מבעיות נתונים ידועות ומדילוגים צפויים. פריט לא פעיל, חוסר ניתוב, קובץ מצורף גדול מדי ואירוע duplicate-idempotent אינם מדווחים ככשלונות אמיתיים.
 
 **מקורות נתונים:**
 - `MondayItemMappings` (נוצרו בחלון)
@@ -636,7 +706,7 @@ ODMON משתמש במספר שכבות למניעת כתיבות כפולות:
 **הגבלת קצב:**
 - `Email:MaxEmailsPerHour` (ברירת מחדל 10)
 - `Email:DedupWindowMinutes` (ברירת מחדל 60)
-- טביעת אצבע לכל התראה דרך טבלת `EmailAlertDedups`
+- טביעות האצבע ומוני ה-suppression נשמרים בזיכרון התהליך ומתאפסים באתחול; `EmailAlertDedups` אינה משמשת את `EmailNotifier` הנוכחי
 - ספציפי ל-Voicenter: `FailureAlertCooldownMinutes` (ברירת מחדל 60) להתראות ברמת Worker
 
 **מקורות התראה:**
@@ -651,7 +721,7 @@ ODMON משתמש במספר שכבות למניעת כתיבות כפולות:
 
 ### תקציר תקופתי (Digest)
 
-`EmailBackgroundService` מצבר התראות לא-קריטיות לתקציר תקופתי (תדירות מוגדרת דרך `Email:DigestIntervalMinutes`), ומונע סערות התראות עבור בעיות חוזרות בחומרה נמוכה.
+`EmailBackgroundService` שולח תקציר תקופתי (בתדירות `Email:DigestIntervalMinutes`) רק כאשר במטמון ההתראות שבזיכרון קיימים אירועים שדוכאו עקב dedup או הגבלת קצב.
 
 ### לוגים מובנים
 
@@ -690,6 +760,9 @@ ODMON משתמש במספר שכבות למניעת כתיבות כפולות:
 | `NispahWriter` | הגנות כתיבת נספח | `MaxCreatesPerRun`, `MaxCreatesPerMinute`, `DeduplicationWindowMinutes`, `CommandTimeoutSeconds` |
 | `VoicenterCallSummaries` | אינטגרציית Voicenter | `Enabled`, `IntervalHours`, `LookbackHours`, `NispahTypeName`, `OnlyAnsweredCalls`, `MinimumDurationSeconds`, `ThrottleMs`, `TestMode`, `TestCallId`, `AlertOnUnhandledException`, `AlertOnStaleWorker`, `StaleWorkerThresholdHours`, `FailureAlertCooldownMinutes`, `WeeklyUsageWarningThreshold`, `WeeklyUsageHardLimit`, `UsageWarningEmailEnabled` |
 | `VoicenterBackfill` | Backfill חד-פעמי לסיכומי שיחות Voicenter (שחזור שיחות שהוחמצו לאחר הפסקת מכסה) | `Enable`, `FromUtc`, `ToUtc`, `MaxCalls`, `ForceRecheck`, `DryRun` |
+| `HearingNearestSchedule` | reconciliation עצמאי של הדיון הקרוב בשעות קבועות | `Enabled`, `BoardId`, `TimesIsrael[]` |
+| `NetCourtDecisionAlerts` | התראות החלטה מ-Odcanit לדוא"ל | `Enabled`, `IntervalSeconds`, `StartFromDocDate`, `MaxBatchSize`, אימות קובץ, `EmailMode`, ניתוב ו-BCC |
+| `EmailAutomation` | ניתוב/העברת תיבות Microsoft Graph | `Enabled`, `DryRun`, `RealForwardEnabled`, תדירות/מגבלות, credentials, הסוד `FingerprintKey`, baseline, תיבות וכללים |
 | `Email` | SMTP והתראות | `Enabled`, `SmtpHost`, `SmtpPort`, `UseTls`, `Username`, `Recipients[]`, `MaxEmailsPerHour`, `DedupWindowMinutes`, `DigestIntervalMinutes`, `DailySummaryTimeIsrael` |
 | `HearingBackfill` | ייבוא דיונים מרוכז | `Enable`, `SourceTable`, `BoardId`, `BatchSize` |
 | `HearingApprovalBackfill` | Backfill אישורי הגעה היסטוריים | `Enable`, `DryRun`, `MaxItems`, `OnlyTikCounters`, `ThrottleMs` |
@@ -759,12 +832,12 @@ ODMON משתמש במספר שכבות למניעת כתיבות כפולות:
 - `TestSafetyPolicy` מגביל סנכרון ל-TikCounters/TikNumbers/קידומות שם מורשים
 - `GuardOdcanitReader` עוטף את הקורא האמיתי וזורק חריגה בכל קריאה כאשר מצב בדיקה חוסם גישה ל-Odcanit
 - `Safety:AllowedTikNumberPrefixes` (לדוגמה `["9/999"]`) מונע כתיבה בטעות לתיקים בייצור
-- `OdcanitWrites:DryRun` משבית את כל הקריאות ל-Stored Procedures של Odcanit
+- `OdcanitWrites:DryRun` שולט בכתיבות אישור הגעה ובמסלול הדיון הקרוב; הוא אינו משבית את קליטת המסמכים מ-Monday
 - `Sync:DryRun` משבית מוטציות Monday API
 
 ### מצב בדיקת Voicenter
 
-כאשר `VoicenterCallSummaries:TestMode=true` ו-`TestCallId` מוגדר, רק אותה שיחה בודדת מעובדת עם לוגים אבחוניים מורחבים (נוכחות סיכום, אורך סיכום).
+כאשר `VoicenterCallSummaries:TestMode=true` ו-`TestCallId` מוגדר, רק אותה שיחה בודדת מעובדת עם לוגים אבחוניים מורחבים. זהו מסנן לשיחה חיה ולא מצב שמונע כתיבה. לתצוגה מקדימה ללא כתיבה יש להשתמש ב-`VoicenterBackfill:DryRun=true`.
 
 ---
 

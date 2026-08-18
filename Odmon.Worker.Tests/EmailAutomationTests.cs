@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Odmon.Worker.Configuration;
@@ -61,6 +62,7 @@ namespace Odmon.Worker.Tests
             Assert.Contains(
                 db.EmailAutomationLogs,
                 x => x.Action == EmailAutomationActions.DryRunWouldForward);
+            Assert.All(db.EmailAutomationLogs, AssertPrivacyMinimizedAudit);
         }
 
         [Fact]
@@ -93,7 +95,8 @@ namespace Odmon.Worker.Tests
             Assert.Contains(
                 db.EmailAutomationLogs,
                 x => x.Action == EmailAutomationActions.Failed &&
-                     x.TargetEmail == "employee@ezer-law.com");
+                     x.ErrorMessage == "TestTargetNotAllowed");
+            Assert.All(db.EmailAutomationLogs, AssertPrivacyMinimizedAudit);
         }
 
         [Fact]
@@ -103,39 +106,30 @@ namespace Odmon.Worker.Tests
             var graph = new FakeGraphClient(Message("graph-1", "<same@test>"));
             var service = CreateService(db, graph, dryRun: false, testForwardEnabled: true);
             await service.RunAsync(CancellationToken.None);
+            var auditCount = db.EmailAutomationLogs.Count();
 
             graph.Enqueue(Message("graph-2", "<same@test>"), "delta-2");
             await service.RunAsync(CancellationToken.None);
 
             Assert.Single(graph.Forwards);
-            Assert.Contains(
-                db.EmailAutomationLogs,
-                x => x.GraphMessageId == "graph-2" &&
-                     x.Action == EmailAutomationActions.SkippedAlreadyProcessed);
+            Assert.Equal(auditCount, db.EmailAutomationLogs.Count());
+            Assert.DoesNotContain(db.EmailAutomationLogs, x => x.GraphMessageId.Contains("same@test"));
         }
 
         [Fact]
         public async Task AlreadyProcessedGraphMessageIsSkipped()
         {
             await using var db = CreateDb();
-            db.EmailAutomationLogs.Add(new EmailAutomationLog
-            {
-                Mailbox = "amir@ezer-law.com",
-                GraphMessageId = "graph-1",
-                Action = EmailAutomationActions.Read,
-                CreatedAtUtc = BaselineUtc
-            });
-            await db.SaveChangesAsync();
-
             var graph = new FakeGraphClient(Message("graph-1", "<mail-1@test>"));
             var service = CreateService(db, graph, dryRun: false, testForwardEnabled: true);
             await service.RunAsync(CancellationToken.None);
+            var auditCount = db.EmailAutomationLogs.Count();
 
-            Assert.Empty(graph.Forwards);
-            Assert.Contains(
-                db.EmailAutomationLogs,
-                x => x.GraphMessageId == "graph-1" &&
-                     x.Action == EmailAutomationActions.SkippedAlreadyProcessed);
+            graph.Enqueue(Message("graph-1", "<mail-1@test>"), "delta-2");
+            await service.RunAsync(CancellationToken.None);
+
+            Assert.Single(graph.Forwards);
+            Assert.Equal(auditCount, db.EmailAutomationLogs.Count());
         }
 
         [Fact]
@@ -170,7 +164,7 @@ namespace Odmon.Worker.Tests
             Assert.Null(state.DeltaLink);
             Assert.Null(state.LastSuccessfulSyncUtc);
             Assert.Single(
-                db.EmailAutomationLogs.Where(x => x.Action == EmailAutomationActions.Read));
+                db.EmailAutomationLogs.Where(x => x.Action == EmailAutomationActions.Matched));
         }
 
         [Fact]
@@ -232,11 +226,8 @@ namespace Odmon.Worker.Tests
                 db.EmailAutomationLogs.Where(
                     x => x.Action == EmailAutomationActions.ForwardedToTestMailbox));
             Assert.Equal("amir@ezer-law.com", audit.ResolvedTargetEmail);
-            Assert.Equal("odmon@ezer-law.com", audit.ActualForwardTo);
             Assert.Equal(456, audit.ResolvedTikCounter);
-            Assert.Equal("5/2000", audit.ResolvedTikNumber);
-            Assert.Equal(5, audit.ResolvedClientNumber);
-            Assert.Equal("123-45-67", audit.DetectedCourtCaseNumber);
+            AssertPrivacyMinimizedAudit(audit);
             Assert.Equal("odmon@ezer-law.com", Assert.Single(graph.Forwards).Target);
             Assert.Equal("ODMON email automation test forward", Assert.Single(graph.ForwardComments));
         }
@@ -284,7 +275,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task NoMatchingCase_DoesNotForward_AndAuditsNoCaseMatch()
+        public async Task NoMatchingCase_DoesNotForward_AndCreatesNoAudit()
         {
             await using var db = CreateDb();
             var graph = new FakeGraphClient(Message("graph-1", "<mail-1@test>"));
@@ -297,11 +288,108 @@ namespace Odmon.Worker.Tests
             await service.RunAsync(CancellationToken.None);
 
             Assert.Empty(graph.Forwards);
-            var audit = Assert.Single(
-                db.EmailAutomationLogs.Where(
-                    x => x.Action == EmailAutomationActions.NoCaseMatch));
-            Assert.Equal("123-45-67", audit.DetectedCourtCaseNumber);
-            Assert.Contains("No Odcanit case", audit.ErrorMessage);
+            Assert.Empty(db.EmailAutomationLogs);
+        }
+
+        [Fact]
+        public async Task UnmatchedMessageDoesNotPersistOrLogIdentifiers()
+        {
+            const string graphId = "sensitive-graph-id";
+            const string internetId = "<sensitive-internet-id@example.test>";
+            const string subject = "Private court update 987-65-43";
+            const string sender = "private.sender@example.test";
+            var message = Message(graphId, internetId) with
+            {
+                Subject = subject,
+                Sender = sender
+            };
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(message);
+            var logger = new CollectingLogger<EmailAutomationService>();
+            var service = CreateService(
+                db,
+                graph,
+                CreateSettings(dryRun: false, testForwardEnabled: true),
+                new FakeCaseResolver(null),
+                logger);
+
+            await service.RunAsync(CancellationToken.None);
+
+            Assert.Empty(db.EmailAutomationLogs);
+            var logText = string.Join("\n", logger.Messages);
+            Assert.DoesNotContain(graphId, logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(internetId, logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(subject, logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(sender, logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("987-65-43", logText, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task AmbiguousCaseDoesNotForwardOrCreateAudit()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(Message("ambiguous-graph", "<ambiguous@test>"));
+            var ambiguous = new EmailAutomationCaseMatch(0, null, null, IsAmbiguous: true);
+
+            await CreateService(
+                db,
+                graph,
+                CreateSettings(dryRun: false, testForwardEnabled: true),
+                new FakeCaseResolver(ambiguous))
+                .RunAsync(CancellationToken.None);
+
+            Assert.Empty(graph.Forwards);
+            Assert.Empty(db.EmailAutomationLogs);
+        }
+
+        [Fact]
+        public async Task ForwardFailureStoresAndLogsOnlySanitizedCategory()
+        {
+            const string sensitiveError =
+                "subject=Private 123-45-67 sender=secret@example.test graph=sensitive-id";
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(Message("sensitive-id", "<mail@test>"))
+            {
+                ForwardException = new InvalidOperationException(sensitiveError)
+            };
+            var logger = new CollectingLogger<EmailAutomationService>();
+            var service = CreateService(
+                db,
+                graph,
+                CreateSettings(dryRun: false, testForwardEnabled: true),
+                new FakeCaseResolver(CaseMatch("5\\456")),
+                logger);
+
+            await service.RunAsync(CancellationToken.None);
+
+            var failed = Assert.Single(
+                db.EmailAutomationLogs.Where(x => x.Action == EmailAutomationActions.Failed));
+            Assert.Equal("ForwardFailed", failed.ErrorMessage);
+            AssertPrivacyMinimizedAudit(failed);
+            Assert.DoesNotContain(
+                sensitiveError,
+                string.Join("\n", logger.Messages),
+                StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task OriginalGraphMessageIsForwardedWithoutContentOrAttachmentPersistence()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeGraphClient(Message("graph-with-attachments", "<attachment-mail@test>"));
+            var service = CreateService(db, graph, dryRun: false, testForwardEnabled: true);
+
+            await service.RunAsync(CancellationToken.None);
+
+            var forward = Assert.Single(graph.Forwards);
+            Assert.Equal("graph-with-attachments", forward.MessageId);
+            Assert.All(db.EmailAutomationLogs, AssertPrivacyMinimizedAudit);
+            var auditProperties = typeof(EmailAutomationLog)
+                .GetProperties()
+                .Select(x => x.Name)
+                .ToArray();
+            Assert.DoesNotContain(auditProperties, x => x.Contains("Body", StringComparison.OrdinalIgnoreCase));
+            Assert.DoesNotContain(auditProperties, x => x.Contains("Attachment", StringComparison.OrdinalIgnoreCase));
         }
 
         [Fact]
@@ -321,7 +409,9 @@ namespace Odmon.Worker.Tests
             Assert.Contains(
                 db.EmailAutomationLogs,
                 x => x.Action == EmailAutomationActions.NoClientMatch &&
-                     x.ResolvedTikCounter == 456);
+                     x.ResolvedTikCounter == 456 &&
+                     x.ErrorMessage == "MissingRouting");
+            Assert.All(db.EmailAutomationLogs, AssertPrivacyMinimizedAudit);
         }
 
         [Fact]
@@ -439,7 +529,7 @@ namespace Odmon.Worker.Tests
                 db.EmailAutomationLogs.Where(
                     x => x.Action == EmailAutomationActions.ForwardedToResolvedMailbox));
             Assert.Equal(expectedTarget, audit.ResolvedTargetEmail);
-            Assert.Equal(expectedTarget, audit.ActualForwardTo);
+            AssertPrivacyMinimizedAudit(audit);
         }
 
         [Fact]
@@ -543,6 +633,7 @@ namespace Odmon.Worker.Tests
                 settings,
                 new FakeCaseResolver(CaseMatch("2\\123")));
             await service.RunAsync(CancellationToken.None);
+            var auditCount = db.EmailAutomationLogs.Count();
 
             graph.Enqueue(
                 RealForwardMessage("graph-2", "<same-real@test>"),
@@ -550,10 +641,7 @@ namespace Odmon.Worker.Tests
             await service.RunAsync(CancellationToken.None);
 
             Assert.Single(graph.Forwards);
-            Assert.Contains(
-                db.EmailAutomationLogs,
-                x => x.GraphMessageId == "graph-2" &&
-                     x.Action == EmailAutomationActions.SkippedAlreadyProcessed);
+            Assert.Equal(auditCount, db.EmailAutomationLogs.Count());
         }
 
         [Fact]
@@ -605,6 +693,22 @@ namespace Odmon.Worker.Tests
                 db.EmailAutomationLogs.Where(x => x.Action == expectedAction));
             Assert.Equal(expectedTarget, audit.ResolvedTargetEmail);
             Assert.Null(audit.ActualForwardTo);
+            AssertPrivacyMinimizedAudit(audit);
+        }
+
+        private static void AssertPrivacyMinimizedAudit(EmailAutomationLog audit)
+        {
+            Assert.Null(audit.RuleName);
+            Assert.Null(audit.InternetMessageId);
+            Assert.Matches("^[0-9A-F]{64}$", audit.GraphMessageId);
+            Assert.Null(audit.Subject);
+            Assert.Null(audit.Sender);
+            Assert.Null(audit.ReceivedDateTimeUtc);
+            Assert.Null(audit.DetectedCourtCaseNumber);
+            Assert.Null(audit.ResolvedTikNumber);
+            Assert.Null(audit.ResolvedClientNumber);
+            Assert.Null(audit.ActualForwardTo);
+            Assert.Null(audit.TargetEmail);
         }
 
         private static EmailAutomationCaseMatch CaseMatch(string? clientVisualId)
@@ -669,12 +773,25 @@ namespace Odmon.Worker.Tests
             FakeGraphClient graph,
             EmailAutomationSettings settings,
             IEmailAutomationCaseResolver resolver)
+            => CreateService(
+                db,
+                graph,
+                settings,
+                resolver,
+                NullLogger<EmailAutomationService>.Instance);
+
+        private static EmailAutomationService CreateService(
+            IntegrationDbContext db,
+            FakeGraphClient graph,
+            EmailAutomationSettings settings,
+            IEmailAutomationCaseResolver resolver,
+            ILogger<EmailAutomationService> logger)
             => new(
                 db,
                 graph,
                 resolver,
                 Options.Create(settings),
-                NullLogger<EmailAutomationService>.Instance,
+                logger,
                 new FixedTimeProvider(BaselineUtc));
 
         private static EmailAutomationSettings CreateSettings(
@@ -688,6 +805,7 @@ namespace Odmon.Worker.Tests
                 RealForwardEnabled = realForwardEnabled,
                 MaxMessagesPerCycle = 50,
                 MaxForwardsPerCycle = 20,
+                FingerprintKey = "unit-test-email-automation-fingerprint-key",
                 StartProcessingFromUtc = BaselineUtc,
                 Mailboxes =
                 [
@@ -721,6 +839,7 @@ namespace Odmon.Worker.Tests
 
             public List<(string Mailbox, string MessageId, string Target)> Forwards { get; } = [];
             public bool ThrottleForward { get; init; }
+            public Exception? ForwardException { get; init; }
 
             public void Enqueue(EmailAutomationMessage message, string deltaLink)
                 => Enqueue([message], deltaLink);
@@ -749,6 +868,11 @@ namespace Odmon.Worker.Tests
                     throw new GraphThrottledException(TimeSpan.FromMinutes(1));
                 }
 
+                if (ForwardException != null)
+                {
+                    throw ForwardException;
+                }
+
                 Forwards.Add((mailbox, graphMessageId, targetEmail));
                 ForwardComments.Add(comment);
                 return Task.CompletedTask;
@@ -760,6 +884,24 @@ namespace Odmon.Worker.Tests
         private sealed class FixedTimeProvider(DateTime utcNow) : TimeProvider
         {
             public override DateTimeOffset GetUtcNow() => new(utcNow);
+        }
+
+        private sealed class CollectingLogger<T> : ILogger<T>
+        {
+            public List<string> Messages { get; } = [];
+
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull
+                => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+                => Messages.Add(formatter(state, exception));
         }
 
         private sealed class FakeCaseResolver(EmailAutomationCaseMatch? match)

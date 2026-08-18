@@ -1,6 +1,6 @@
 # ODMON System Documentation
 
-> **Last updated:** April 2026  
+> **Last updated:** July 31, 2026  
 > **Audience:** Developers, DevOps, Operators, Stakeholders
 
 ---
@@ -20,6 +20,8 @@
    - 4.7 [Document Ingestion (Tasks Board)](#47-document-ingestion-tasks-board)
    - 4.8 [Accident Story Annex Writing](#48-accident-story-annex-writing)
    - 4.9 [Voicenter Call Summaries → Annex Writing](#49-voicenter-call-summaries--annex-writing)
+   - 4.10 [NetCourt Decision Alerts](#410-netcourt-decision-alerts)
+   - 4.11 [Email Automation](#411-email-automation)
 5. [Integrations](#5-integrations)
    - 5.1 [Monday.com](#51-mondaycom)
    - 5.2 [Odcanit (Legal Case Management)](#52-odcanit-legal-case-management)
@@ -111,15 +113,16 @@ ODMON is a .NET 8 worker service that runs as a Windows Service. It hosts multip
 A traffic light ensures only one heavy worker runs at a time, so the database doesn't get overloaded.
 
 **Technical detail:**  
-`WorkerCoordinator` is a singleton that wraps a `SemaphoreSlim(1,1)`. The `SyncWorker` and `DocumentIngestionWorker` compete for a lease before running their cycles. If the lease is held, the other worker skips its cycle gracefully. The `EmailBackgroundService` and `VoicenterCallSummaryWorker` are not gated by this coordinator — email must always be sendable, and Voicenter primarily hits external APIs rather than the integration database.
+`WorkerCoordinator` is a singleton that wraps a `SemaphoreSlim(1,1)`. `SyncWorker`, `DocumentIngestionWorker`, and `HearingNearestScheduleWorker` acquire this lease before database-heavy work. If the lease is held, the scheduled cycle is skipped cleanly. `EmailBackgroundService`, `VoicenterCallSummaryWorker`, `NetCourtDecisionAlertWorker`, and `EmailAutomationWorker` are not gated by this coordinator.
 
 ### Dependency Injection
 
 All workers, services, and infrastructure are registered in `Program.cs`. Key registrations:
 - **Singletons:** `WorkerCoordinator`, `VoicenterApiClient`, `EmailNotifier`
 - **Scoped (per-cycle):** `SyncService`, `VoicenterCallSummaryService`, `DocumentIngestionService`, `HearingApprovalSyncService`, `HearingNearestSyncService`, `NispahWriterService`
-- **Hosted services:** `SyncWorker`, `DocumentIngestionWorker`, `EmailBackgroundService`, `VoicenterCallSummaryWorker`, `HearingBackfillWorker`, `HearingApprovalBackfillWorker`
-- **NetCourt services:** `NetCourtDecisionAlertWorker`, `NetCourtDecisionAlertService`, `SqlNetCourtDocumentReader`, `SqlNetCourtDocumentFileResolver`
+- **Hosted services:** `SyncWorker`, `HearingNearestScheduleWorker`, `DocumentIngestionWorker`, `EmailBackgroundService`, `VoicenterCallSummaryWorker`, `NetCourtDecisionAlertWorker`, `EmailAutomationWorker`, `HearingBackfillWorker`, `HearingApprovalBackfillWorker`
+- **NetCourt services:** `NetCourtDecisionAlertService`, `SqlNetCourtDocumentReader`, `SqlNetCourtDocumentFileResolver`
+- **Email automation services:** `EmailAutomationService`, `MicrosoftGraphEmailAutomationClient`, `EmailAutomationCaseResolver`
 - **DbContexts:** `IntegrationDbContext`, `OdcanitDbContext` (both scoped, SQL Server)
 
 ---
@@ -199,6 +202,39 @@ All workers, services, and infrastructure are registered in `Program.cs`. Key re
 | Config section | `HearingApprovalBackfill` |
 | Typical use | Disabled; enabled after feature launch to cover historical data |
 
+### HearingNearestScheduleWorker
+
+**What it does:** Runs the same nearest-hearing reconciliation independently of the main sync cycle at fixed Israel-time slots.
+
+| Property | Value |
+|---------|-------|
+| Class | `HearingNearestScheduleWorker` |
+| Schedule | `HearingNearestSchedule:TimesIsrael`; current default/configuration is `07:00`, `11:00`, `15:00`, `19:00`, `23:00` Israel time |
+| Coordination | Acquires `WorkerCoordinator` lease |
+| Delegates to | `HearingNearestSyncService` |
+| Default state | Disabled (`HearingNearestSchedule:Enabled=false`) |
+
+### NetCourtDecisionAlertWorker
+
+**What it does:** Polls eligible NetCourt decisions in Odcanit and queues routed email alerts, optionally with a validated PDF attachment.
+
+| Property | Value |
+|---------|-------|
+| Interval | `NetCourtDecisionAlerts:IntervalSeconds` (minimum 30 seconds; configured 300) |
+| Delegates to | `NetCourtDecisionAlertService` |
+| Key state | `NetCourtDecisionAlerts` durable document identities |
+
+### EmailAutomationWorker
+
+**What it does:** Monitors configured Microsoft 365 mailboxes and forwards matched messages. It does not file email messages or attachments into Odcanit.
+
+| Property | Value |
+|---------|-------|
+| Interval | `EmailAutomation:IntervalMinutes` (minimum 1 minute; configured 3) |
+| Delegates to | `EmailAutomationService` |
+| Default state | Disabled; `DryRun=true`, `RealForwardEnabled=false` |
+| Key state | `EmailAutomationMailboxStates`, `EmailAutomationLogs` |
+
 ---
 
 ## 4. Feature Flows
@@ -210,16 +246,17 @@ Case information from the law firm's system appears automatically on Monday.com 
 
 **Technical flow:**
 
-1. **TikCounter selection** — `SyncService` determines which cases to load. Two modes:
+1. **Case selection** — `SyncService` determines which cases to load:
    - *Allowlist mode* (`OdcanitLoad:EnableAllowList`): load only specified TikCounters/TikNumbers
-   - *Change feed mode*: query `vwExportToOuterSystems_ActionLog` for cases modified since last watermark
+   - *Listener mode* (`Sync:ListenerUpdateOnly=true` with `ListenerCreationCutoffDate`): bootstrap unmapped cases created on or after the cutoff, then reconcile the complete eligible mapped population created on or after that cutoff. This production path does not use `vwExportToOuterSystems_ActionLog`
+   - *Legacy/non-listener mode*: query `vwExportToOuterSystems_ActionLog` for cases modified since the last watermark
 2. **Case loading** — `IOdcanitReader` (`SqlOdcanitReader`) loads full case data from Odcanit views, enriching each `OdcanitCase` with clients, sides, diary events, user data, and hozlap data
 3. **Bootstrap onboarding** — New cases (no existing `MondayItemMapping`) undergo a cooling period (`Onboarding:CoolingPeriodDays`) before being created as Monday items. This prevents creating items for cases that are immediately closed or corrected
-4. **Reconciliation** — Existing mapped cases are compared via checksums (`OdcanitVersion`, `MondayChecksum`). Only changed fields trigger a Monday API update
+4. **Stable identity and reconciliation** — `TikCounter` is the immutable internal identity and the unique mapping key. `TikNumber` is the visible, mutable case number. Mapping lookup starts with `TikCounter + BoardId`, can reconcile legacy/global mappings, and uses the Monday case-number column as a recovery path. A TikNumber change updates the existing Monday item instead of creating a new case. Content and hearing checksums plus Odcanit version data avoid unnecessary API writes
 5. **Hearing sync** — Delegated to `HearingNearestSyncService` (see 4.2)
 6. **Hearing approval sync** — Delegated to `HearingApprovalSyncService` (see 4.3)
 7. **Circuit breaker** — If failures exceed `Monday:CircuitBreakerFailureThreshold`, the run is aborted and a metric is recorded
-8. **Run lock** — `SyncRunLock` table prevents overlapping runs (single-row lock with expiry)
+8. **Run lock** — `SyncRunLocks` prevents overlapping sync runs (single-row lease with expiry)
 9. **Metrics** — Every run logs a `SyncRunMetric` row: created, updated, failed, skipped counts, duration, circuit breaker status
 
 **Key tables:** `MondayItemMappings`, `SyncLogs`, `SyncFailures`, `SyncRunMetrics`, `SyncRunLocks`, `ListenerStates`
@@ -232,10 +269,14 @@ For each case, the system finds the next upcoming court hearing and shows its de
 **Technical flow:**
 
 1. `HearingNearestSyncService.SyncNearestHearingsAsync` is called during each sync cycle
-2. `HearingSelector.PickNearestUpcomingHearing` selects the closest future diary event per `TikCounter` from `OdcanitDiaryEvent` rows
-3. Changes are detected by comparing against `HearingNearestSnapshots`
-4. Monday columns updated: hearing date, hour, judge name, court city, hearing status
-5. Snapshots are persisted for next-run comparison
+2. The same service can also run from the disabled-by-default `HearingNearestScheduleWorker` at fixed Israel times (`07:00`, `11:00`, `15:00`, `19:00`, `23:00`)
+3. `HearingSelector.PickNearestUpcomingHearing` considers future diary rows and prioritizes the nearest active row; only when no active row exists does it fall back to cancelled, then transferred rows
+4. Changes are detected against `HearingNearestSnapshots`
+5. Hearing status is reconciled independently (`0 → "פעיל"`, `1 → "מבוטל"`, `2 → "הועבר"`), subject to the Monday column's allowed labels
+6. Judge changes are independent. Hearing date and hour are written only when both judge and effective court city are present. Effective city is diary `City`, falling back to diary `CourtName`; it is used as a completeness gate and snapshot value
+7. The independent hearing service intentionally does **not** write `Monday:CourtCityColumnId`; that column remains owned by legal UserData (`OdcanitCase.LegalCourtName`) in the main case sync
+8. The date/hour gate prevents downstream Monday notification automations from firing with incomplete judge/court context
+9. `OdcanitWrites:DryRun=true` logs planned steps and does not update Monday or advance snapshots
 
 **Key tables:** `HearingNearestSnapshots`, `MondayItemMappings`
 
@@ -268,7 +309,7 @@ A one-time job that goes back through all existing approvals/rejections and writ
 1. `HearingApprovalBackfillService.RunAsync` iterates all `MondayItemMappings`
 2. For each mapping, fetches Monday hearing approval column value
 3. Skips if a `NispahWriteLog` with `SourceKind="HearingApproval"` already exists for this TikCounter (proof of prior write, not just state tracking)
-4. For `TikCounter <= 0` (negative mappings from import), resolves real TikCounter from Odcanit `dbo.MainTik` using TikNumber
+4. Rejects mappings with `TikCounter <= 0`; current mapping integrity rules prohibit synthetic or negative TikCounters
 5. Writes annex via `IOdcanitWriter.AppendNispahAsync` and records `NispahWriteLog`
 6. Supports `DryRun`, `MaxItems`, `OnlyTikCounters` filters, and `ThrottleMs` pacing
 
@@ -356,8 +397,8 @@ Files uploaded to the Monday questionnaire form (photos, PDFs, videos) are autom
    - HEIC/HEIF vs MP4/MOV: ISO BMFF `ftyp` major brand differentiation
 5. File is saved to inbox directory, then Odcanit stored procedure `dbo.ProcDocuments_AddNewDocument` creates the document record
 6. File is moved to final Odcanit document path
-7. Tracking in `MondayDocumentImports` with states: `Pending → InProgress → Success/Failed/Skipped`
-8. Retries up to `MaxRetryCount` for transient failures
+7. Tracking in `MondayDocumentImports` with states: `Pending → Downloaded → SpCreated → Copied → Verified → Success` or `Failed`
+8. Retries failed records up to `MaxRetryCount`; permanent validation failures are moved to the retry limit
 
 **Supported file types:** `pdf`, `jpg`, `jpeg`, `png`, `docx`, `doc`, `mp4`, `mov`, `qt`, `heic`, `heif`
 
@@ -368,7 +409,7 @@ Files uploaded to the Monday questionnaire form (photos, PDFs, videos) are autom
 ### 4.7 Document Ingestion (Tasks Board)
 
 **What it does in simple terms:**  
-PDF and Word documents uploaded to a separate Monday "tasks" board are also automatically imported into Odcanit.
+Word documents uploaded to a separate Monday "tasks" board are also automatically imported into Odcanit.
 
 **Technical flow:**
 
@@ -376,7 +417,9 @@ PDF and Word documents uploaded to a separate Monday "tasks" board are also auto
 2. Fetches items from a different board (`TasksSource:BoardId`)
 3. Resolves TikNumber via a lookup column
 4. Downloads file from the tasks board file column
-5. On success, updates a Monday status column to indicate the form was processed
+5. Processes the first `.doc`/`.docx` asset only after the task status is one of the configured ready labels. A ready item with no file becomes a tracked timeout failure after `WaitForFileTimeoutHours`
+
+`TasksSource:TestTikNumber` narrows the live source; it is not a dry-run switch. The document-ingestion pipeline has no general dry-run mode.
 
 **Config:** Nested under `MondayDocumentIngestion:TasksSource`
 
@@ -408,9 +451,9 @@ When a phone call is made to a client or witness and the AI generates a summary 
 3. Filters: only answered calls (configurable), minimum duration, lookback window
 4. For each qualifying CDR entry, fetches full call details from `/Call/History/{CallID}` with Bearer token
 5. Extracts AI summary from `Data.ai_data.insights.summary`
-6. Resolves client phone from `Data.ai_data.client_phone` → `Data.cdr_data.client_phone` → target/caller fallbacks
+6. Resolves call phone from `Data.ai_data.client_phone` → target number → caller number
 7. Normalizes to Israeli phone format (deterministic `0XX-XXXXXXX` style)
-8. Matches against Odcanit cases by querying `vwExportToOuterSystems_UserData` for "סלולרי עד" (witness mobile) and "נייד צד ג" (third-party driver mobile) fields
+8. Matches directly against Odcanit `vwExportToOuterSystems_UserData` using configured `PhoneFieldNames`, or the built-in allowlist of witness, driver, policy-holder, third-party, third-party-lawyer, and plaintiff phone fields
 9. **Multi-match rule**: writes to ALL matched cases (not just first)
 10. Dedup per `CallID + TikCounter` via `NispahWriteLogs` (`SourceKind="VoicenterCall"`, `SourceItemId` = hashed CallID)
 11. Writes annex via `IOdcanitWriter.AppendNispahAsync`
@@ -420,15 +463,33 @@ When a phone call is made to a client or witness and the AI generates a summary 
 
 **Stale worker detection:** If no successful cycle occurs within `StaleWorkerThresholdHours` (default 18h), an alert email is sent.
 
-**Test mode:** When `TestMode=true` and `TestCallId` is set, only that single call is processed (with diagnostic logging).
+**Test mode:** When `TestMode=true` and `TestCallId` is set, only that single call is processed with diagnostic logging. This mode calls the detail endpoint and can write live Odcanit annexes; only `VoicenterBackfill:DryRun=true` suppresses writes.
 
 **Weekly quota tracking (May 2026):** Voicenter enforces a weekly usage limit (currently 400/week for User 203570) on the `Call/History/{CallID}` endpoint. ODMON now records every API request in `VoicenterApiRequestLogs` separated by `EndpointType` (`CdrList` vs `CallHistoryDetail`), counts the current ISO week, and queues a warning email once per week when usage reaches `WeeklyUsageWarningThreshold` (default 350). When Voicenter returns HTTP 401 or a body containing "weekly usage limit" / "usage limit" / "quota" / "limit reached", `VoicenterApiClient` throws `VoicenterQuotaExceededException`; the service stops issuing further detail requests for the cycle and counts remaining CDR rows as `SkippedDueToQuotaExceeded`.
 
-**Local processing-state cache:** `VoicenterCallProcessingStates` stores per-CallID terminal status (`Written`, `NoAI`, `NoMatch`, `Duplicate`, `Failed`, `QuotaExceeded`). The worker checks this cache **before** issuing a `CallHistoryDetail` request, so already-resolved CallIDs do not consume quota. `NispahWriteLogs` is also checked as a second proof of prior write.
+**Local processing-state cache:** `VoicenterCallProcessingStates` stores per-CallID status (`Written`, `NoAI`, `NoMatch`, `Duplicate`, `Failed`, `QuotaExceeded`). `Written` and `Duplicate` are always skipped. Recent `QuotaExceeded` and, when configured, `NoMatch` rows can be retried within their lookback windows, capped by `MaxDeferredReprocessCallsPerRun`. `NispahWriteLogs` is checked before detail retrieval and again per matched case.
 
 **Manual backfill mode:** `VoicenterBackfill` config block enables a one-shot wider date range (e.g. recovering all calls since 2026-04-27 after a quota outage). Defaults to `DryRun=true` for safe preview. See `docs/VOICENTER_QUOTA_RUNBOOK.md`.
 
 **Key tables:** `NispahWriteLogs`, `VoicenterApiRequestLogs`, `VoicenterQuotaWarningStates`, `VoicenterCallProcessingStates`
+
+### 4.10 NetCourt Decision Alerts
+
+`NetCourtDecisionAlertWorker` reads `vwNetCourtDocs` rows where `DocType IN (2,3)` and `DocDate >= NetCourtDecisionAlerts:StartFromDocDate`. Durable identity priority is `CourtDocumentID`, `ODDocID`, `DecisionID`, then source `Counter`; tracked identities are removed before `MaxBatchSize` is applied.
+
+Cases are resolved through Odcanit, and client routing is configured in `ClientNumberToRecipientEmail`. Test mode sends only to `TestRecipient`; live mode sends to the routed employee. `BccRecipients` is NetCourt-specific. Missing routing with fallback disabled records `MissingRouting` and sends no email.
+
+When enabled, the PDF path is obtained positionally through `dbo.procDocumentsGroup_BuildDocPath` using `ODDocID` and `.pdf`. The path must be under `AttachmentAllowedRoots`, exist, have a `.pdf` extension and `%PDF` signature, and remain within `MaxAttachmentBytes`. Attachment failure is best effort: the alert is still queued without the PDF. See [NETCOURT_DECISION_ALERTS.md](NETCOURT_DECISION_ALERTS.md).
+
+### 4.11 Email Automation
+
+`EmailAutomationWorker` uses Microsoft Graph application credentials and message delta queries (`changeType=created`) for each configured mailbox/folder. A new mailbox starts from `StartProcessingFromUtc` or the initialization time, so historical mail is not processed by default. Delta state advances only after the complete page sequence succeeds; throttling or cycle limits leave it unchanged for retry.
+
+Rules detect a court proceeding number in the subject, resolve it from Hozlap/UserData to an Odcanit case, parse the client number, and route to Amir (`5,8,23,253,101,3`), Yonatan (`2,15`), or Eden (other clients). Dry-run logs `DryRunWouldForward`. Test forwarding is restricted to `odmon@ezer-law.com`. Real forwarding requires `RealForwardEnabled=true`, `DryRun=false`, and applies loop guards for mailbox owner, existing To/Cc recipient, reply/forward subject, sender, and automation-generated mail.
+
+Messages that have no case number, resolve to no case, or resolve ambiguously are not persisted by ODMON, and identifying message values are not written to application logs. For a matched message, `EmailAutomationLogs` retains only the operational mailbox, keyed HMAC fingerprints, resolved `TikCounter`, resolved target employee, action/result, sanitized error category, and processing timestamps. Subject, sender, recipients, raw Graph/Internet message IDs, detected case number, body, attachment metadata, and `TikNumber` are not retained.
+
+Forwarding reserves a purpose-scoped HMAC-SHA-256 idempotency key before the Graph side effect. The stable secret is supplied through `EmailAutomation:FingerprintKey`; the forward fingerprint inputs are the Internet message ID (or Graph ID fallback), rule name, and target employee. A separate message fingerprint uses the source identifier and mailbox. Neither fingerprint includes subject, sender, body, recipients, or attachment details. The original message—including its attachments—is forwarded inside Microsoft 365 without being downloaded or saved by ODMON. ODMON does not delete, move, archive, or otherwise modify the source message, does not create Odcanit document records, and does not file incoming attachments.
 
 ---
 
@@ -530,12 +591,16 @@ The Integration Database is ODMON's own working memory — it tracks what has be
 | `NispahDeduplications` | Content-hash dedup for nispah writes |
 | `CaseAnnexWriteStates` | Per-case idempotency flags (e.g. accident story written) |
 | `AllowedTiks` | Allowlist of TikCounters for controlled loading |
-| `EmailAlertDedups` | Email alert deduplication and rate limiting |
+| `EmailAlertDedups` | Schema retained for durable alert fingerprints; the current `EmailNotifier` uses an in-memory suppression cache |
 | `VoicenterApiRequestLogs` | Audit row per outbound Voicenter API request, separated by endpoint type (for quota tracking) |
 | `VoicenterQuotaWarningStates` | One row per (week, endpoint type) when a weekly quota warning email is queued — prevents weekly warning spam |
 | `VoicenterCallProcessingStates` | Per-CallID terminal status cache; stops the worker from re-fetching details for already-resolved calls |
+| `NetCourtDecisionAlerts` | Durable decision identity, routing result, email mode, and queue status |
+| `NetCourtDecisionAlertStates` | Retained NetCourt initialization/watermark diagnostics state |
+| `EmailAutomationMailboxStates` | Per mailbox/folder Graph delta link and processing baseline |
+| `EmailAutomationLogs` | Privacy-minimized matched-message audit: mailbox, keyed fingerprints, `TikCounter`, resolved employee, action/result, sanitized error category, and timestamps; unmatched messages create no row |
 
-**Indexes on `MondayItemMappings`:** Unique indexes on `TikCounter`, `(TikNumber, BoardId)`, and `MondayItemId` for efficient lookups and constraint enforcement.
+**Indexes on `MondayItemMappings`:** `TikCounter` is unique and constrained to positive values. `(TikNumber, BoardId)` and `MondayItemId` are non-unique lookup indexes. A covering `(BoardId, TikCounter)` index supports mapping reads. Candidate-scoped reads use `WITH (NOLOCK)` in batches; candidates still unresolved after progressive retries are deferred, never treated as unmapped.
 
 ### 6.2 Odcanit Database
 
@@ -629,9 +694,11 @@ Every morning, the system sends an email summarizing yesterday's activity — ho
 2. **Hearings Synced** — Count of hearing updates pushed to Monday
 3. **Items Updated** — Total Monday items updated
 4. **Sync Failures** — Grouped by case and root cause, with counts
-5. **Document Ingestion Failures** — Failed `MondayDocumentImports` with TikNumber, column, error, timestamps
-6. **Voicenter Call Summaries** — CDR entries fetched, call details fetched, annexes written, skipped counts, failed writes with sample CallIDs
-7. **System Notes** — Circuit breaker alerts, unusually high failure counts
+5. **Document Ingestion** — Success count plus grouped failures split into actionable, stale timeout, invalid user file, external transient, known blocked, and known data issue categories
+6. **Voicenter Call Summaries** — Last-run CDR/detail/skip metrics, annex writes and failures, weekly `CallHistoryDetail` usage, and quota state
+7. **System Status and Anomalies** — Circuit breaker, high failure volume, real failures, document-ingestion anomalies, and Voicenter quota/detail failures
+
+`FailureClassifier` uses explicit `ErrorType` and `Operation` values to separate real critical/operational failures from known data issues and expected skips. Expected inactive-item, missing-routing, oversized-attachment, and duplicate-idempotency events are not reported as real failures.
 
 **Data sources:**
 - `MondayItemMappings` (created in window)
@@ -656,7 +723,7 @@ The system sends immediate email alerts when something goes seriously wrong, lik
 **Rate limiting:**
 - `Email:MaxEmailsPerHour` (default 10)
 - `Email:DedupWindowMinutes` (default 60)
-- Per-alert fingerprinting via `EmailAlertDedups` table
+- Per-alert fingerprints and suppressed counts are held in process memory and reset on restart; `EmailAlertDedups` is not used by the current `EmailNotifier`
 - Voicenter-specific: `FailureAlertCooldownMinutes` (default 60) for worker-level alerts
 
 **Alert sources:**
@@ -671,7 +738,7 @@ The system sends immediate email alerts when something goes seriously wrong, lik
 
 ### Periodic Digest
 
-`EmailBackgroundService` aggregates non-critical alerts into a periodic digest (interval configurable via `Email:DigestIntervalMinutes`), preventing alert storms for repeated low-severity issues.
+`EmailBackgroundService` sends a periodic digest (interval configurable via `Email:DigestIntervalMinutes`) only when the in-memory alert cache contains dedup- or rate-limit-suppressed occurrences.
 
 ### Structured Logging
 
@@ -712,6 +779,8 @@ Configuration values are resolved in this order (later overrides earlier):
 | `VoicenterBackfill` | One-shot Voicenter call summary backfill (recover missed calls after quota outage) | `Enable`, `FromUtc`, `ToUtc`, `MaxCalls`, `ForceRecheck`, `DryRun` |
 | `Email` | SMTP and alerting | `Enabled`, `SmtpHost`, `SmtpPort`, `UseTls`, `Username`, `Recipients[]`, `MaxEmailsPerHour`, `DedupWindowMinutes`, `DigestIntervalMinutes`, `DailySummaryTimeIsrael` |
 | `NetCourtDecisionAlerts` | NetCourt decision email worker | `Enabled`, `StartFromDocDate`, `EmailMode`, `TestRecipient`, `BccRecipients[]`, routing map, attachment size and allowed roots |
+| `EmailAutomation` | Microsoft Graph mailbox routing/forwarding | `Enabled`, `DryRun`, `RealForwardEnabled`, interval/limits, app credentials, secret `FingerprintKey`, baseline, mailboxes and rules |
+| `HearingNearestSchedule` | Independent fixed-time nearest-hearing reconciliation | `Enabled`, `BoardId`, `TimesIsrael[]` |
 | `HearingBackfill` | Bulk hearing import | `Enable`, `SourceTable`, `BoardId`, `BatchSize` |
 | `HearingApprovalBackfill` | Historical approval backfill | `Enable`, `DryRun`, `MaxItems`, `OnlyTikCounters`, `ThrottleMs` |
 | `Testing` | Test case source | `Enable`, `Source`, `TikCounters[]`, `TableName` |
@@ -780,12 +849,12 @@ The system has built-in safety modes for testing — you can run it against fake
 - `TestSafetyPolicy` restricts sync to allowlisted TikCounters/TikNumbers/name prefixes
 - `GuardOdcanitReader` wraps the real reader and throws on all calls when testing mode blocks Odcanit access
 - `Safety:AllowedTikNumberPrefixes` (e.g. `["9/999"]`) prevents accidental writes to production cases
-- `OdcanitWrites:DryRun` disables all Odcanit stored procedure calls
+- `OdcanitWrites:DryRun` controls hearing approval and nearest-hearing write paths; it does not disable Monday document ingestion
 - `Sync:DryRun` disables Monday API mutations
 
 ### Voicenter Test Mode
 
-When `VoicenterCallSummaries:TestMode=true` and `TestCallId` is set, only that single call is processed with enhanced diagnostic logging (summary presence, summary length).
+When `VoicenterCallSummaries:TestMode=true` and `TestCallId` is set, only that single call is processed with enhanced diagnostic logging. This is a live single-call filter, not write suppression. Use `VoicenterBackfill:DryRun=true` for a no-write Voicenter preview.
 
 ---
 

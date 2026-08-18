@@ -51,7 +51,7 @@ namespace Odmon.Worker.Services
             await AddAuthorizationAsync(request, cancellationToken);
 
             using var response = await _httpClient.SendAsync(request, cancellationToken);
-            await ThrowIfUnsuccessfulAsync(response, cancellationToken);
+            ThrowIfUnsuccessful(response);
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
@@ -106,7 +106,7 @@ namespace Odmon.Worker.Services
             await AddAuthorizationAsync(request, cancellationToken);
 
             using var response = await _httpClient.SendAsync(request, cancellationToken);
-            await ThrowIfUnsuccessfulAsync(response, cancellationToken);
+            ThrowIfUnsuccessful(response);
         }
 
         private async Task AddAuthorizationAsync(
@@ -119,9 +119,7 @@ namespace Odmon.Worker.Services
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
         }
 
-        private static async Task ThrowIfUnsuccessfulAsync(
-            HttpResponseMessage response,
-            CancellationToken cancellationToken)
+        private static void ThrowIfUnsuccessful(HttpResponseMessage response)
         {
             if (response.StatusCode == HttpStatusCode.TooManyRequests)
             {
@@ -140,9 +138,8 @@ namespace Odmon.Worker.Services
                 return;
             }
 
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
             throw new HttpRequestException(
-                $"Microsoft Graph returned {(int)response.StatusCode} ({response.ReasonPhrase}). {body}",
+                $"Microsoft Graph returned HTTP {(int)response.StatusCode}.",
                 null,
                 response.StatusCode);
         }

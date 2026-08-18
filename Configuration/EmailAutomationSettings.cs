@@ -11,6 +11,7 @@ namespace Odmon.Worker.Configuration
         public string TenantId { get; set; } = string.Empty;
         public string ClientId { get; set; } = string.Empty;
         public string ClientSecret { get; set; } = string.Empty;
+        public string FingerprintKey { get; set; } = string.Empty;
         public DateTime? StartProcessingFromUtc { get; set; }
         public List<EmailAutomationMailboxSettings> Mailboxes { get; set; } = [];
     }

@@ -78,7 +78,9 @@ namespace Odmon.Worker.Workers
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "EMAILAUTOMATION cycle failed.");
+                    _logger.LogError(
+                        "EMAILAUTOMATION cycle failed. ErrorCategory={ErrorCategory}",
+                        ex.GetType().Name);
                 }
             }
 
@@ -89,10 +91,11 @@ namespace Odmon.Worker.Workers
         {
             if (string.IsNullOrWhiteSpace(_settings.TenantId) ||
                 string.IsNullOrWhiteSpace(_settings.ClientId) ||
-                string.IsNullOrWhiteSpace(_settings.ClientSecret))
+                string.IsNullOrWhiteSpace(_settings.ClientSecret) ||
+                string.IsNullOrWhiteSpace(_settings.FingerprintKey))
             {
                 throw new InvalidOperationException(
-                    "EMAILAUTOMATION TenantId, ClientId, and ClientSecret are required when enabled.");
+                    "EMAILAUTOMATION TenantId, ClientId, ClientSecret, and FingerprintKey are required when enabled.");
             }
 
             if (_settings.Mailboxes.Count == 0)

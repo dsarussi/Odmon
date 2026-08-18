@@ -14,7 +14,8 @@ namespace Odmon.Worker.OdcanitAccess
     public sealed record EmailAutomationCaseMatch(
         int TikCounter,
         string? TikNumber,
-        string? ClientVisualId);
+        string? ClientVisualId,
+        bool IsAmbiguous = false);
 
     public sealed class EmailAutomationCaseResolver : IEmailAutomationCaseResolver
     {
@@ -75,9 +76,9 @@ namespace Odmon.Worker.OdcanitAccess
             if (exactTikCounters.Length > 1)
             {
                 _logger.LogWarning(
-                    "EMAILAUTOMATION multiple Odcanit cases matched court proceeding {CourtCaseNumber}. Using the lowest TikCounter. TikCounters={TikCounters}",
-                    normalized,
-                    string.Join(",", exactTikCounters.OrderBy(x => x)));
+                    "EMAILAUTOMATION ambiguous case resolution skipped. MatchCount={MatchCount}",
+                    exactTikCounters.Length);
+                return new EmailAutomationCaseMatch(0, null, null, IsAmbiguous: true);
             }
 
             var match = await _db.Cases
@@ -87,7 +88,8 @@ namespace Odmon.Worker.OdcanitAccess
                 .Select(x => new EmailAutomationCaseMatch(
                     x.TikCounter,
                     x.TikNumber,
-                    x.ClientVisualID))
+                    x.ClientVisualID,
+                    false))
                 .FirstOrDefaultAsync(cancellationToken);
 
             return match;
