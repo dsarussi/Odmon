@@ -5,10 +5,11 @@ namespace Odmon.Worker.Services
     public sealed class DemandFormParser
     {
         private static readonly string[] ExplicitClaimNumberLabels =
-            ["מספר תביעה", "מס' תביעה", "מס׳ תביעה"];
+            ["מספר תביעה", "מספר:תביעה", "מס' תביעה", "מס׳ תביעה"];
         private static readonly string[] OurClaimNumberLabels =
             ["תביעתנו מספר", "תביעתנו מס'", "תביעתנו מס׳", "תביעתנו"];
-        private static readonly string[] EventDateLabels = ["תאריך אירוע"];
+        private static readonly string[] EventDateLabels =
+            ["תאריך אירוע", "תאונת דרכים מיום"];
         private static readonly string[] PolicyNumberLabels =
             ["מספר פוליסה", "מס' פוליסה", "מס׳ פוליסה"];
         private static readonly string[] PolicyHolderNameLabels =

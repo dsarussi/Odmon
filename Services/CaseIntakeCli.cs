@@ -204,6 +204,7 @@ namespace Odmon.Worker.Services
                     services.AddScoped<ICaseIntakeDocumentReader, SqlCaseIntakeDocumentReader>();
                     services.AddScoped<CaseIntakeReadService>();
                     services.AddSingleton<IPdfTextExtractor, PdfTextExtractor>();
+                    services.AddSingleton<HebrewPdfTextNormalizer>();
                     services.AddSingleton<DigitalNotificationFormParser>();
                     services.AddSingleton<DemandFormParser>();
                     services.AddSingleton<CaseIntakeResultMerger>();

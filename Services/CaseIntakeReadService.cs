@@ -8,6 +8,7 @@ namespace Odmon.Worker.Services
     {
         private readonly ICaseIntakeDocumentReader _documentReader;
         private readonly IPdfTextExtractor _pdfTextExtractor;
+        private readonly HebrewPdfTextNormalizer _textNormalizer;
         private readonly DigitalNotificationFormParser _notificationFormParser;
         private readonly DemandFormParser _demandFormParser;
         private readonly CaseIntakeResultMerger _resultMerger;
@@ -16,6 +17,7 @@ namespace Odmon.Worker.Services
         public CaseIntakeReadService(
             ICaseIntakeDocumentReader documentReader,
             IPdfTextExtractor pdfTextExtractor,
+            HebrewPdfTextNormalizer textNormalizer,
             DigitalNotificationFormParser notificationFormParser,
             DemandFormParser demandFormParser,
             CaseIntakeResultMerger resultMerger,
@@ -23,6 +25,7 @@ namespace Odmon.Worker.Services
         {
             _documentReader = documentReader;
             _pdfTextExtractor = pdfTextExtractor;
+            _textNormalizer = textNormalizer;
             _notificationFormParser = notificationFormParser;
             _demandFormParser = demandFormParser;
             _resultMerger = resultMerger;
@@ -53,10 +56,11 @@ namespace Odmon.Worker.Services
                 ct.ThrowIfCancellationRequested();
                 try
                 {
-                    var text = await _pdfTextExtractor.ExtractTextAsync(
+                    var rawText = await _pdfTextExtractor.ExtractTextAsync(
                         document.Source.Path ?? string.Empty,
                         ct);
-                    var fields = _notificationFormParser.Parse(text, document.Source);
+                    var normalizedText = _textNormalizer.Normalize(rawText);
+                    var fields = _notificationFormParser.Parse(normalizedText, document.Source);
                     notificationResults.Add(new(
                         document,
                         CaseIntakeDocumentReadStatus.Parsed,
@@ -99,10 +103,11 @@ namespace Odmon.Worker.Services
                 ct.ThrowIfCancellationRequested();
                 try
                 {
-                    var text = await _pdfTextExtractor.ExtractTextAsync(
+                    var rawText = await _pdfTextExtractor.ExtractTextAsync(
                         document.Source.Path ?? string.Empty,
                         ct);
-                    var fields = _demandFormParser.Parse(text, document.Source);
+                    var normalizedText = _textNormalizer.Normalize(rawText);
+                    var fields = _demandFormParser.Parse(normalizedText, document.Source);
                     demandResults.Add(new(
                         document,
                         CaseIntakeDocumentReadStatus.Parsed,

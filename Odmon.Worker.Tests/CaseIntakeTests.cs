@@ -54,6 +54,33 @@ namespace Odmon.Worker.Tests
                 out _));
         }
 
+        [Theory]
+        [InlineData("תירבע", "עברית")]
+        [InlineData("םוימ םיכרד תנואת", "תאונת דרכים מיום")]
+        [InlineData("רפסמ:העיבת", "מספר:תביעה")]
+        [InlineData("רפסמ:העיבת2144533", "מספר:תביעה 2144533")]
+        [InlineData("21/07/2025", "21/07/2025")]
+        [InlineData("תואמש ימד464.0₪", "דמי שמאות 464.0₪")]
+        [InlineData("claims@example.com", "claims@example.com")]
+        [InlineData("תירבע English טסקט", "עברית English טקסט")]
+        public void HebrewPdfTextNormalizer_NormalizesKnownPdfPigVisualOrder(
+            string extracted,
+            string expected)
+        {
+            var normalized = new HebrewPdfTextNormalizer().Normalize(extracted);
+
+            Assert.Equal(expected, normalized);
+        }
+
+        [Fact]
+        public void HebrewPdfTextNormalizer_PreservesPolicyPunctuationAndNumber()
+        {
+            var normalized = new HebrewPdfTextNormalizer().Normalize(
+                ":הסילופ 'סמ1541786303");
+
+            Assert.Equal(":מס' פוליסה 1541786303", normalized);
+        }
+
         [Fact]
         public void Parser_ReportNumberBecomesClaimNumber_WhenExplicitClaimNumberIsMissing()
         {
@@ -503,12 +530,13 @@ namespace Odmon.Worker.Tests
             var reader = new FakeDocumentReader([unrelated, notification, demand]);
             var extractor = new FakePdfTextExtractor(new Dictionary<string, string>
             {
-                [notification.Path!] = "מס' דיווח: 12345",
-                [demand.Path!] = "תביעתנו: 12345"
+                [notification.Path!] = "חוויד 'סמ: 12345",
+                [demand.Path!] = "ונתעיבת: 12345"
             });
             var service = new CaseIntakeReadService(
                 reader,
                 extractor,
+                new HebrewPdfTextNormalizer(),
                 CreateParser(),
                 CreateDemandParser(),
                 CreateMerger(),
@@ -528,6 +556,50 @@ namespace Odmon.Worker.Tests
                 item => item.Source.Id == demand.Id &&
                         item.BusinessType == CaseIntakeDocumentType.DemandForm &&
                         item.SourceStrength == CaseIntakeSourceStrength.Fallback);
+        }
+
+        [Fact]
+        public async Task ReadService_NormalizesRealDemandPatternBeforeParsing()
+        {
+            var demand = CreateDemandDocument(
+                40514,
+                CaseIntakeDocumentClassifier.PrivatePartyDemandLetterName);
+            var rawPdfText = """
+רפסמ:העיבת2144533
+םוימ םיכרד תנואת21/07/2025
+:הסילופ 'סמ1541786303
+הסילופה לעב םש:ו'גנאיוב הנד
+חטובמה בכר יושיר רפסמ1763339
+'ג דצ בכר יושיר רפסמ4193779
+תואמש ימד464.0₪
+ךרע תדירי938.0₪
+""";
+            var reader = new FakeDocumentReader([demand]);
+            var extractor = new FakePdfTextExtractor(new Dictionary<string, string>
+            {
+                [demand.Path!] = rawPdfText
+            });
+            var service = new CaseIntakeReadService(
+                reader,
+                extractor,
+                new HebrewPdfTextNormalizer(),
+                CreateParser(),
+                CreateDemandParser(),
+                CreateMerger(),
+                NullLogger<CaseIntakeReadService>.Instance);
+
+            var result = await service.ReadAsync(40514, CancellationToken.None);
+
+            var fields = Assert.Single(result.DemandForms).Fields!;
+            Assert.Equal("2144533", fields.ClaimNumber.Value);
+            Assert.Equal(new DateOnly(2025, 7, 21), fields.EventDate.Value);
+            Assert.Equal("1541786303", fields.PolicyNumber.Value);
+            Assert.Equal("דנה בויאנג'ו", fields.PolicyHolderName.Value);
+            Assert.Equal("1763339", fields.MainCarNumber.Value);
+            Assert.Equal("4193779", fields.ThirdPartyCarNumber.Value);
+            Assert.Equal(464.0m, fields.AppraiserFeeAmount.Value);
+            Assert.Equal(938.0m, fields.LossOfValueAmount.Value);
+            Assert.Equal(CaseIntakeFieldStatus.Missing, fields.PolicyHolderId.Status);
         }
 
         [Fact]
