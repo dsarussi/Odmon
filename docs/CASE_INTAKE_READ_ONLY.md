@@ -28,8 +28,9 @@ dotnet run --project Odmon.Worker.csproj -- --case-intake-tik-counter 40514
 
 Replace `40514` with another specific positive `TikCounter` when needed. This one-shot mode resolves
 only the scoped read service, prints an indented structured JSON result, and exits
-before hosted workers, Integration DB startup checks, Monday mapping checks, or any
-write service can run. The JSON can contain personal data extracted from the source
+before the production host builder is created. Its isolated service container has no
+`IHostedService`, Integration DB, Monday client, or Odcanit writer registrations. The
+JSON can contain personal data extracted from the source
 document, so its console/output should be handled accordingly.
 
 The flow performs a parameterized `SELECT`, reads only the returned PDF UNC path,

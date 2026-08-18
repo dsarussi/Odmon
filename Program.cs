@@ -1,9 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Azure.Extensions.AspNetCore.Configuration.Secrets;
@@ -24,7 +21,11 @@ using Odmon.Worker.Voicenter;
 using Odmon.Worker.Workers;
 using Serilog;
 
-var caseIntakeTikCounter = ParseCaseIntakeTikCounter(args);
+if (CaseIntakeCli.TryParse(args, out var caseIntakeRequest))
+{
+    await CaseIntakeCli.RunAsync(args, caseIntakeRequest, CancellationToken.None);
+    return;
+}
 
 var hostBuilder = Host.CreateDefaultBuilder(args)
     .UseWindowsService()
@@ -233,12 +234,6 @@ hostBuilder.ConfigureServices((context, services) =>
 
 var host = hostBuilder.Build();
 
-if (caseIntakeTikCounter.HasValue)
-{
-    await RunCaseIntakeReadAsync(host.Services, caseIntakeTikCounter.Value);
-    return;
-}
-
 var appConfig = host.Services.GetRequiredService<IConfiguration>();
 if (IsKeyVaultEnabled(appConfig))
 {
@@ -249,62 +244,6 @@ await VerifyIntegrationDbConnectionAsync(host.Services);
 await VerifyMondayItemMappingIntegrityAsync(host.Services);
 
 await host.RunAsync();
-
-static int? ParseCaseIntakeTikCounter(string[] arguments)
-{
-    const string optionName = "--case-intake-tik-counter";
-    string? rawValue = null;
-
-    for (var index = 0; index < arguments.Length; index++)
-    {
-        var argument = arguments[index];
-        if (string.Equals(argument, optionName, StringComparison.OrdinalIgnoreCase))
-        {
-            if (index + 1 >= arguments.Length || arguments[index + 1].StartsWith("--", StringComparison.Ordinal))
-            {
-                throw new ArgumentException($"{optionName} requires a positive integer value.");
-            }
-
-            rawValue = arguments[++index];
-        }
-        else if (argument.StartsWith(optionName + "=", StringComparison.OrdinalIgnoreCase))
-        {
-            rawValue = argument[(optionName.Length + 1)..];
-        }
-    }
-
-    if (rawValue == null)
-    {
-        return null;
-    }
-
-    if (!int.TryParse(
-            rawValue,
-            System.Globalization.NumberStyles.None,
-            System.Globalization.CultureInfo.InvariantCulture,
-            out var tikCounter) ||
-        tikCounter <= 0)
-    {
-        throw new ArgumentException($"{optionName} requires a positive integer value.");
-    }
-
-    return tikCounter;
-}
-
-static async Task RunCaseIntakeReadAsync(IServiceProvider services, int tikCounter)
-{
-    await using var scope = services.CreateAsyncScope();
-    var intakeReader = scope.ServiceProvider.GetRequiredService<CaseIntakeReadService>();
-    var result = await intakeReader.ReadAsync(tikCounter, CancellationToken.None);
-
-    Console.OutputEncoding = Encoding.UTF8;
-    var options = new JsonSerializerOptions
-    {
-        WriteIndented = true
-    };
-    options.Converters.Add(new JsonStringEnumConverter());
-    Console.WriteLine(JsonSerializer.Serialize(result, options));
-}
 
 static string ResolveConnectionString(IServiceProvider serviceProvider, string secretKey, string connectionName, bool required)
 {
