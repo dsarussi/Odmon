@@ -78,12 +78,9 @@ namespace Odmon.Worker.Services
                     TextExtractor.Extract(lines, ExplicitClaimNumberLabels),
                     TextExtractor.Extract(lines, OurClaimNumberLabels)),
                 EventDate: CaseIntakeFieldFactory.Build(
-                    CombineExtractions(
-                        TextExtractor.Extract(lines, EventDateLabels),
-                        ExtractContextValues(
-                            AccidentDateRegex(),
-                            searchableText,
-                            "תאונת דרכים מיום")),
+                    PreferContext(
+                        ExtractAccidentDates(lines),
+                        TextExtractor.Extract(lines, EventDateLabels)),
                     document,
                     CaseIntakeFieldValidators.ValidateDate),
                 PolicyNumber: CaseIntakeFieldFactory.Build(
@@ -96,6 +93,10 @@ namespace Odmon.Worker.Services
                         ExtractContextValues(
                             PolicyHolderNameRegex(),
                             searchableText,
+                            "לפקודת מבוטחנו"),
+                        ExtractContextValues(
+                            PolicyHolderNameBeforeAnchorRegex(),
+                            searchableText,
                             "לפקודת מבוטחנו")),
                     document,
                     CaseIntakeFieldValidators.ValidateName),
@@ -106,19 +107,21 @@ namespace Odmon.Worker.Services
                 MainCarNumber: CaseIntakeFieldFactory.Build(
                     CombineExtractions(
                         TextExtractor.Extract(lines, MainCarNumberLabels),
-                        ExtractContextValues(
-                            InsuredVehicleRegex(),
+                        ExtractVehicleAfterAnchor(
                             searchableText,
-                            "הרכב המבוטח בחברתנו ... מספר רישוי")),
+                            "הרכב המבוטח בחברתנו",
+                            "הרכב שבבעלותך",
+                            "הרכב המבוטח בחברתנו")),
                     document,
                     CaseIntakeFieldValidators.ValidateVehicleNumber),
                 ThirdPartyCarNumber: CaseIntakeFieldFactory.Build(
                     CombineExtractions(
                         TextExtractor.Extract(lines, ThirdPartyCarNumberLabels),
-                        ExtractContextValues(
-                            OtherVehicleRegex(),
+                        ExtractVehicleAfterAnchor(
                             searchableText,
-                            "הרכב שבבעלותך ... מספר רישוי")),
+                            "הרכב שבבעלותך",
+                            null,
+                            "הרכב שבבעלותך")),
                     document,
                     CaseIntakeFieldValidators.ValidateVehicleNumber),
                 AppraiserFeeAmount: CaseIntakeFieldFactory.Build(
@@ -143,8 +146,108 @@ namespace Odmon.Worker.Services
                     searchableText,
                     "ירידת ערך הרכב"));
             return exact.Status == RawFieldExtractionStatus.Missing
-                ? TextExtractor.Extract(lines, FallbackLossOfValueLabels)
+                ? TextExtractor.Extract(
+                    lines.Where(line =>
+                            !line.Contains("השתתפות עצמית", StringComparison.Ordinal) &&
+                            !line.Contains("לירידת ערך", StringComparison.Ordinal))
+                        .ToArray(),
+                    FallbackLossOfValueLabels)
                 : exact;
+        }
+
+        private static RawFieldExtraction ExtractAccidentDates(
+            IReadOnlyList<string> lines)
+        {
+            var matches = new List<RawFieldMatch>();
+            for (var lineIndex = 0; lineIndex < lines.Count; lineIndex++)
+            {
+                var window = lineIndex + 1 < lines.Count
+                    ? $"{lines[lineIndex]}\n{lines[lineIndex + 1]}"
+                    : lines[lineIndex];
+                var accidentIndex = window.IndexOf("תאונת דרכים", StringComparison.Ordinal);
+                var fromDateIndex = window.IndexOf("מיום", StringComparison.Ordinal);
+                if (accidentIndex < 0 || fromDateIndex < 0)
+                {
+                    continue;
+                }
+
+                var printDateIndex = window.IndexOf("תאריך הדפסה", StringComparison.Ordinal);
+                var candidate = DateTokenRegex().Matches(window)
+                    .Select(match => new
+                    {
+                        Match = match,
+                        Validation = CaseIntakeFieldValidators.ValidateDate(match.Value)
+                    })
+                    .Where(item =>
+                        item.Validation.Status == CaseIntakeFieldStatus.Valid &&
+                        (printDateIndex < 0 ||
+                         Math.Abs(item.Match.Index - fromDateIndex) <
+                         Math.Abs(item.Match.Index - printDateIndex)))
+                    .OrderBy(item => Math.Abs(item.Match.Index - fromDateIndex))
+                    .FirstOrDefault();
+                if (candidate != null)
+                {
+                    matches.Add(new RawFieldMatch("תאונת דרכים ... מיום", candidate.Match.Value));
+                }
+            }
+
+            return CreateExtraction(
+                matches
+                    .GroupBy(match => match.Value, StringComparer.Ordinal)
+                    .Select(group => group.First())
+                    .ToArray());
+        }
+
+        private static RawFieldExtraction ExtractVehicleAfterAnchor(
+            string text,
+            string anchor,
+            string? stopAnchor,
+            string sourceLabel)
+        {
+            const int maximumWindowLength = 240;
+            var matches = new List<RawFieldMatch>();
+            var searchStart = 0;
+            while (searchStart < text.Length)
+            {
+                var anchorIndex = text.IndexOf(anchor, searchStart, StringComparison.Ordinal);
+                if (anchorIndex < 0)
+                {
+                    break;
+                }
+
+                var windowStart = anchorIndex + anchor.Length;
+                var windowEnd = Math.Min(text.Length, windowStart + maximumWindowLength);
+                if (stopAnchor != null)
+                {
+                    var stopIndex = text.IndexOf(stopAnchor, windowStart, StringComparison.Ordinal);
+                    if (stopIndex >= 0 && stopIndex < windowEnd)
+                    {
+                        windowEnd = stopIndex;
+                    }
+                }
+
+                var vehicleMatch = VehicleNumberRegex().Matches(
+                        text[windowStart..windowEnd])
+                    .Select(match => new
+                    {
+                        Match = match,
+                        Validation = CaseIntakeFieldValidators.ValidateVehicleNumber(match.Value)
+                    })
+                    .FirstOrDefault(item =>
+                        item.Validation.Status == CaseIntakeFieldStatus.Valid);
+                if (vehicleMatch != null)
+                {
+                    matches.Add(new RawFieldMatch(sourceLabel, vehicleMatch.Match.Value));
+                }
+
+                searchStart = anchorIndex + anchor.Length;
+            }
+
+            return CreateExtraction(
+                matches
+                    .GroupBy(match => match.Value, StringComparer.Ordinal)
+                    .Select(group => group.First())
+                    .ToArray());
         }
 
         private static RawFieldExtraction ExtractContextValues(
@@ -173,6 +276,13 @@ namespace Odmon.Worker.Services
             return CreateExtraction(matches);
         }
 
+        private static RawFieldExtraction PreferContext(
+            RawFieldExtraction contextual,
+            RawFieldExtraction fallback)
+            => contextual.Status == RawFieldExtractionStatus.Missing
+                ? fallback
+                : contextual;
+
         private static RawFieldExtraction CreateExtraction(
             IReadOnlyList<RawFieldMatch> matches)
             => matches.Count switch
@@ -195,9 +305,9 @@ namespace Odmon.Worker.Services
             };
 
         [GeneratedRegex(
-            @"(?:הנדון\s*:\s*)?תאונת\s+דרכים\s+מיום\s*:?\s*(?<value>\d{1,2}[./-]\d{1,2}[./-]\d{4})(?!\d)",
+            @"(?<!\d)(?:\d{1,2}[./-]\d{1,2}[./-]\d{4}|\d{4}-\d{1,2}-\d{1,2})(?!\d)",
             RegexOptions.CultureInvariant)]
-        private static partial Regex AccidentDateRegex();
+        private static partial Regex DateTokenRegex();
 
         [GeneratedRegex(
             @"לפקודת\s+מבוטחנו\s+(?<value>[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*(?:\s+[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*){1,3})(?=\s*[.,;:\r\n]|$)",
@@ -205,18 +315,18 @@ namespace Odmon.Worker.Services
         private static partial Regex PolicyHolderNameRegex();
 
         [GeneratedRegex(
-            @"הרכב\s+המבוטח\s+בחברתנו(?:(?!הרכב\s+(?:המבוטח\s+בחברתנו|שבבעלותך)).){0,160}?מספר\s+רישוי\s*:?\s*(?<value>\p{Nd}(?:[ .-]?\p{Nd}){6,7})(?!\p{Nd})",
+            @"(?:^|[:.])\s*(?<value>[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*(?:\s+[\u0590-\u05FF][\u0590-\u05FF'׳״""-]*){1,3}?)יש\s+להעביר(?=[^\r\n]{0,200}לפקודת\s+מבוטחנו)",
             RegexOptions.CultureInvariant | RegexOptions.Singleline)]
-        private static partial Regex InsuredVehicleRegex();
+        private static partial Regex PolicyHolderNameBeforeAnchorRegex();
 
         [GeneratedRegex(
-            @"הרכב\s+שבבעלותך(?:(?!הרכב\s+(?:המבוטח\s+בחברתנו|שבבעלותך)).){0,160}?מספר\s+רישוי\s*:?\s*(?<value>\p{Nd}(?:[ .-]?\p{Nd}){6,7})(?!\p{Nd})",
-            RegexOptions.CultureInvariant | RegexOptions.Singleline)]
-        private static partial Regex OtherVehicleRegex();
-
-        [GeneratedRegex(
-            @"ירידת\s+ערך\s+הרכב\s*:?\s*(?<value>[-+]?\p{Nd}[\p{Nd},.]*[-+]?\s*₪?)",
+            @"(?<!\p{Nd})\p{Nd}(?:[ .-]?\p{Nd}){6,7}(?!\p{Nd})",
             RegexOptions.CultureInvariant)]
+        private static partial Regex VehicleNumberRegex();
+
+        [GeneratedRegex(
+            @"(?:^|[^\p{L}])(?:הרכב[ \t]*)?ירידת[ \t]+ערך(?:[ \t]*הרכב)?[ \t]*:?[ \t]*(?<value>[-+]?\p{Nd}[\p{Nd},.]*[-+]?[ \t]*₪?)",
+            RegexOptions.CultureInvariant | RegexOptions.Multiline)]
         private static partial Regex LossOfValueAmountRegex();
 
         private static IReadOnlyList<DemandFinancialCandidate> ExtractFinancialCandidates(

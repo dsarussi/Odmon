@@ -388,16 +388,17 @@ namespace Odmon.Worker.Tests
         public void DemandParser_UsesRealDocumentSemanticContexts()
         {
             var text = """
-14/09/2025
-הנדון: תאונת דרכים מיום 21/07/2025
+תאריך הדפסה 14/09/2025
+תאונת דרכים מיוםהנדון 21/07/2025
 מספר:תביעה 2144533
 מס' פוליסה 1541786303
-התאונה אירעה בין הרכב המבוטח בחברתנו מספר רישוי 1763339 ובין הרכב שבבעלותך מספר רישוי 4193779.
-נא להעביר המחאה על הסך הנ"ל לפקודת מבוטחנו דנה בויאנג'ו.
+הרכב המבוטח בחברתנו מספר רישויבתאריך שבנדון ארעה תאונת דרכים, בין 1763339 ובין הרכב שבבעלותך, מספר רישוי
+4193779.
+:.דנה בויאנג'ויש להעביר אלינו המחאה על סך הנ"ל לפקודת מבוטחנו
 נזק לרכב עפ"י דו"ח שמאי 11797.0₪
 דמי שמאות 464.0₪
-ירידת ערך הרכב 938.0₪
-השתתפות עצמית בגין ירידת ערך 704.0-₪
+הרכבירידת ערך 938.0₪
+השתתפות עצמית לירידת ערך 704.0-₪
 """;
 
             var fields = CreateDemandParser().Parse(
@@ -421,6 +422,11 @@ namespace Odmon.Worker.Tests
                 candidate =>
                     candidate.CandidateType == DemandFinancialCandidateType.VehicleDamageAmount &&
                     candidate.Amount.Value == 11797.0m);
+            Assert.Contains(
+                fields.FinancialCandidates,
+                candidate =>
+                    candidate.CandidateType == DemandFinancialCandidateType.DeductibleRelatedAmount &&
+                    candidate.Amount.Value == -704.0m);
         }
 
         [Fact]
