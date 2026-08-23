@@ -18,6 +18,7 @@ namespace Odmon.Worker.OdcanitAccess
         private readonly ILogger<SqlOdcanitReader> _logger;
         private readonly bool _isTestMode;
         private const string LegalUserDataPageName = "פרטי תיק נזיקין מליגל";
+        internal const int TikNumberResolutionBatchSize = 1000;
         private static readonly StringComparer HebrewComparer = StringComparer.Ordinal;
         private static readonly Dictionary<string, Action<OdcanitCase, OdcanitUserData>> UserDataFieldHandlers = BuildUserDataFieldHandlers();
 
@@ -153,11 +154,7 @@ namespace Odmon.Worker.OdcanitAccess
 
         public async Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(IEnumerable<string> tikNumbers, CancellationToken ct)
         {
-            var tikNumbersList = tikNumbers?
-                .Where(tn => !string.IsNullOrWhiteSpace(tn))
-                .Select(tn => tn.Trim())
-                .Distinct(StringComparer.Ordinal)
-                .ToList() ?? new List<string>();
+            var tikNumbersList = NormalizeTikNumbers(tikNumbers);
             
             if (!tikNumbersList.Any())
             {
@@ -169,21 +166,6 @@ namespace Odmon.Worker.OdcanitAccess
                 tikNumbersList.Count,
                 string.Join(", ", tikNumbersList));
 
-            var resolved = new Dictionary<string, int>(StringComparer.Ordinal);
-
-            // Build parameterized SQL with explicit @p0, @p1, ... parameters
-            var paramNames = new List<string>();
-            var parameters = new List<Microsoft.Data.SqlClient.SqlParameter>();
-            
-            for (int i = 0; i < tikNumbersList.Count; i++)
-            {
-                var paramName = $"@p{i}";
-                paramNames.Add(paramName);
-                parameters.Add(new Microsoft.Data.SqlClient.SqlParameter(paramName, tikNumbersList[i]));
-            }
-
-            var sql = $"SELECT TikNumber, TikCounter FROM dbo.vwExportToOuterSystems_Files WHERE TikNumber IN ({string.Join(", ", paramNames)})";
-
             var connection = _db.Database.GetDbConnection();
             var wasOpen = connection.State == ConnectionState.Open;
             if (!wasOpen)
@@ -193,30 +175,29 @@ namespace Odmon.Worker.OdcanitAccess
 
             try
             {
-                using var command = connection.CreateCommand();
-                command.CommandText = sql;
-                command.CommandType = CommandType.Text;
-                
-                foreach (var param in parameters)
-                {
-                    command.Parameters.Add(param);
-                }
+                var resolved = await ResolveTikNumbersInBatchesAsync(
+                    tikNumbersList,
+                    TikNumberResolutionBatchSize,
+                    (batch, token) => ResolveTikNumberBatchAsync(connection, batch, token),
+                    ct);
 
-                using var reader = await command.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
+                // Log unresolved TikNumbers
+                foreach (var tikNumber in tikNumbersList)
                 {
-                    var tikNumber = reader.GetString(0);
-                    var tikCounter = reader.GetInt32(1);
-                    
-                    if (!string.IsNullOrWhiteSpace(tikNumber))
+                    if (!resolved.ContainsKey(tikNumber))
                     {
-                        resolved[tikNumber] = tikCounter;
-                        _logger.LogDebug(
-                            "Resolved TikNumber '{TikNumber}' -> TikCounter {TikCounter}",
-                            tikNumber,
-                            tikCounter);
+                        _logger.LogWarning(
+                            "TikNumber '{TikNumber}' could not be resolved to a TikCounter in Odcanit DB",
+                            tikNumber);
                     }
                 }
+
+                _logger.LogInformation(
+                    "Resolved {ResolvedCount} of {TotalCount} TikNumbers",
+                    resolved.Count,
+                    tikNumbersList.Count);
+
+                return resolved;
             }
             finally
             {
@@ -225,22 +206,76 @@ namespace Odmon.Worker.OdcanitAccess
                     await connection.CloseAsync();
                 }
             }
+        }
 
-            // Log unresolved TikNumbers
-            foreach (var tikNumber in tikNumbersList)
+        internal static List<string> NormalizeTikNumbers(IEnumerable<string>? tikNumbers)
+        {
+            return tikNumbers?
+                .Where(tn => !string.IsNullOrWhiteSpace(tn))
+                .Select(tn => tn.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToList() ?? new List<string>();
+        }
+
+        internal static async Task<Dictionary<string, int>> ResolveTikNumbersInBatchesAsync(
+            IReadOnlyList<string> tikNumbers,
+            int batchSize,
+            Func<IReadOnlyList<string>, CancellationToken, Task<Dictionary<string, int>>> resolveBatchAsync,
+            CancellationToken ct)
+        {
+            if (batchSize <= 0)
             {
-                if (!resolved.ContainsKey(tikNumber))
+                throw new ArgumentOutOfRangeException(nameof(batchSize));
+            }
+
+            var resolved = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var batch in tikNumbers.Chunk(batchSize))
+            {
+                ct.ThrowIfCancellationRequested();
+                var batchResolved = await resolveBatchAsync(batch, ct);
+                foreach (var pair in batchResolved)
                 {
-                    _logger.LogWarning(
-                        "TikNumber '{TikNumber}' could not be resolved to a TikCounter in Odcanit DB",
-                        tikNumber);
+                    resolved[pair.Key] = pair.Value;
                 }
             }
 
-            _logger.LogInformation(
-                "Resolved {ResolvedCount} of {TotalCount} TikNumbers",
-                resolved.Count,
-                tikNumbersList.Count);
+            return resolved;
+        }
+
+        private async Task<Dictionary<string, int>> ResolveTikNumberBatchAsync(
+            System.Data.Common.DbConnection connection,
+            IReadOnlyList<string> tikNumbers,
+            CancellationToken ct)
+        {
+            var paramNames = new List<string>(tikNumbers.Count);
+            using var command = connection.CreateCommand();
+            command.CommandType = CommandType.Text;
+
+            for (int i = 0; i < tikNumbers.Count; i++)
+            {
+                var paramName = $"@p{i}";
+                paramNames.Add(paramName);
+                command.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter(paramName, tikNumbers[i]));
+            }
+
+            command.CommandText = $"SELECT TikNumber, TikCounter FROM dbo.vwExportToOuterSystems_Files WHERE TikNumber IN ({string.Join(", ", paramNames)})";
+
+            var resolved = new Dictionary<string, int>(StringComparer.Ordinal);
+            using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var tikNumber = reader.GetString(0);
+                var tikCounter = reader.GetInt32(1);
+
+                if (!string.IsNullOrWhiteSpace(tikNumber))
+                {
+                    resolved[tikNumber] = tikCounter;
+                    _logger.LogDebug(
+                        "Resolved TikNumber '{TikNumber}' -> TikCounter {TikCounter}",
+                        tikNumber,
+                        tikCounter);
+                }
+            }
 
             return resolved;
         }
