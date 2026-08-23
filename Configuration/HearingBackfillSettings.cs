@@ -11,7 +11,7 @@ namespace Odmon.Worker.Configuration
         public string SourceTable { get; set; } = "dbo.HearingBackfill_May2026";
 
         public long BoardId { get; set; } = 5035534500;
-        public string StatusColumnId { get; set; } = "color_mm12y7zr";
+        public string StatusColumnId { get; set; } = "color_mkwefnbx";
         public int ImportedStatusIndex { get; set; } = 1;
         public int BatchSize { get; set; } = 50;
 

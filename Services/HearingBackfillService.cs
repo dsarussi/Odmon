@@ -30,7 +30,7 @@ namespace Odmon.Worker.Services
         private readonly MondayMappingReadService _mappingReader;
         private readonly IOdcanitReader _odcanitReader;
 
-        private const string StatusLabel = "תיק נמצא באמצע תהליך";
+        private const string StatusLabel = "באמצע תהליך";
 
         private const string DateColumnId = "date_mkwjwmzq";
         private const string HourColumnId = "hour_mkwjbwr";
