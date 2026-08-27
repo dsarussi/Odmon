@@ -79,6 +79,17 @@ namespace Odmon.Worker.Workers
                 {
                     break;
                 }
+                catch (InvalidDataException ex) when (
+                    MicrosoftGraphEmailAutomationClient.TryGetCursorValidationReason(ex, out _))
+                {
+                    _ = MicrosoftGraphEmailAutomationClient.TryGetCursorValidationReason(
+                        ex,
+                        out var reason);
+                    _logger.LogError(
+                        "EMAILFILING cycle failed. Filing delta state was not advanced. ErrorCategory={ErrorCategory}, CursorValidationReason={CursorValidationReason}",
+                        nameof(InvalidDataException),
+                        reason);
+                }
                 catch (Exception ex)
                 {
                     _logger.LogError(

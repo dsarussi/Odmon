@@ -87,35 +87,53 @@ namespace Odmon.Worker.Tests
             Assert.DoesNotContain("$expand", filingSelect, StringComparison.OrdinalIgnoreCase);
         }
 
-        [Fact]
-        public void GraphDeltaCursorMustRemainOnConfiguredMailboxFolderAndGraphHost()
+        [Theory]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque")]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox@odmon.example/mailFolders/Inbox/messages/delta?$skiptoken=opaque%2Bvalue%2Fpart%3D")]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?%24deltaToken=opaque%252Fstate")]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox@odmon.example/mailFolders('Inbox')/messages/delta?$deltatoken=opaque")]
+        [InlineData("https://graph.microsoft.com/v1.0/users('mailbox%40odmon.example')/mailfolders('Inbox')/messages/delta?$select=subject&%24skipToken=opaque")]
+        public void GraphDeltaCursorAcceptsLegitimateGraphVariants(string cursor)
         {
             var graphBase = new Uri("https://graph.microsoft.com/v1.0/");
-            const string valid =
-                "https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque";
 
             Assert.Equal(
-                valid,
+                new Uri(cursor).AbsoluteUri,
                 MicrosoftGraphEmailAutomationClient.ValidateDeltaCursorUrl(
-                    valid, graphBase, "mailbox@odmon.example", "Inbox"));
-            Assert.Throws<InvalidDataException>(() =>
+                    cursor, graphBase, "mailbox@odmon.example", "Inbox"));
+        }
+
+        [Theory]
+        [InlineData("http://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque", GraphDeltaCursorValidationReason.InvalidScheme)]
+        [InlineData("https://untrusted.example/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque", GraphDeltaCursorValidationReason.OriginMismatch)]
+        [InlineData("https://graph.microsoft.com/v1.0/users/other%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque", GraphDeltaCursorValidationReason.MailboxMismatch)]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Archive/messages/delta?$deltatoken=opaque", GraphDeltaCursorValidationReason.FolderMismatch)]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/other?$deltatoken=opaque", GraphDeltaCursorValidationReason.ResourcePathMismatch)]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta/%2E%2E/other?$deltatoken=opaque", GraphDeltaCursorValidationReason.ResourcePathMismatch)]
+        [InlineData("https://untrusted.example@graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque", GraphDeltaCursorValidationReason.UserInfoNotAllowed)]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta", GraphDeltaCursorValidationReason.MissingOpaqueToken)]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=", GraphDeltaCursorValidationReason.MissingOpaqueToken)]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=%20", GraphDeltaCursorValidationReason.MissingOpaqueToken)]
+        [InlineData("https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?return=$deltatoken=opaque", GraphDeltaCursorValidationReason.MissingOpaqueToken)]
+        [InlineData("not-an-absolute-url", GraphDeltaCursorValidationReason.MalformedUrl)]
+        public void GraphDeltaCursorRejectsUnsafeOrMalformedScope(
+            string cursor,
+            GraphDeltaCursorValidationReason expectedReason)
+        {
+            var exception = Assert.Throws<InvalidDataException>(() =>
                 MicrosoftGraphEmailAutomationClient.ValidateDeltaCursorUrl(
-                    "https://untrusted.example/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque",
-                    graphBase,
+                    cursor,
+                    new Uri("https://graph.microsoft.com/v1.0/"),
                     "mailbox@odmon.example",
                     "Inbox"));
-            Assert.Throws<InvalidDataException>(() =>
-                MicrosoftGraphEmailAutomationClient.ValidateDeltaCursorUrl(
-                    "https://graph.microsoft.com/v1.0/users/other%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque",
-                    graphBase,
-                    "mailbox@odmon.example",
-                    "Inbox"));
-            Assert.Throws<InvalidDataException>(() =>
-                MicrosoftGraphEmailAutomationClient.ValidateDeltaCursorUrl(
-                    "https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta",
-                    graphBase,
-                    "mailbox@odmon.example",
-                    "Inbox"));
+
+            Assert.True(
+                MicrosoftGraphEmailAutomationClient.TryGetCursorValidationReason(
+                    exception,
+                    out var actualReason));
+            Assert.Equal(expectedReason, actualReason);
+            Assert.Equal("Microsoft Graph delta cursor validation failed.", exception.Message);
+            Assert.DoesNotContain("opaque", exception.Message, StringComparison.Ordinal);
         }
 
         [Fact]

@@ -13,6 +13,7 @@ namespace Odmon.Worker.Services
         IEmailAutomationGraphClient,
         IEmailFilingGraphClient
     {
+        private const string CursorValidationReasonDataKey = "GraphDeltaCursorValidationReason";
         private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
         private readonly HttpClient _httpClient;
         private readonly EmailAutomationSettings _settings;
@@ -180,44 +181,154 @@ namespace Odmon.Worker.Services
             string mailbox,
             string folderId)
         {
-            if (graphBaseAddress == null ||
-                !graphBaseAddress.IsAbsoluteUri ||
-                !Uri.TryCreate(cursor, UriKind.Absolute, out var cursorUri) ||
-                !string.Equals(cursorUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(cursorUri.Scheme, graphBaseAddress.Scheme, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(cursorUri.Host, graphBaseAddress.Host, StringComparison.OrdinalIgnoreCase) ||
-                cursorUri.Port != graphBaseAddress.Port ||
-                !string.IsNullOrEmpty(cursorUri.UserInfo) ||
-                !string.IsNullOrEmpty(cursorUri.Fragment))
+            if (graphBaseAddress == null || !graphBaseAddress.IsAbsoluteUri)
+                throw CursorValidationFailure(GraphDeltaCursorValidationReason.InvalidGraphBaseAddress);
+            if (!Uri.TryCreate(cursor, UriKind.Absolute, out var cursorUri))
+                throw CursorValidationFailure(GraphDeltaCursorValidationReason.MalformedUrl);
+            if (!string.Equals(cursorUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(cursorUri.Scheme, graphBaseAddress.Scheme, StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidDataException(
-                    "Email Graph cursor is invalid or outside the configured Graph endpoint.");
+                throw CursorValidationFailure(GraphDeltaCursorValidationReason.InvalidScheme);
             }
+            if (!string.Equals(cursorUri.Host, graphBaseAddress.Host, StringComparison.OrdinalIgnoreCase) ||
+                cursorUri.Port != graphBaseAddress.Port)
+            {
+                throw CursorValidationFailure(GraphDeltaCursorValidationReason.OriginMismatch);
+            }
+            if (!string.IsNullOrEmpty(cursorUri.UserInfo))
+                throw CursorValidationFailure(GraphDeltaCursorValidationReason.UserInfoNotAllowed);
+            if (!string.IsNullOrEmpty(cursorUri.Fragment))
+                throw CursorValidationFailure(GraphDeltaCursorValidationReason.FragmentNotAllowed);
 
-            var basePath = graphBaseAddress
-                .GetComponents(UriComponents.Path, UriFormat.UriEscaped)
-                .TrimEnd('/');
-            var expectedPath = string.Join(
-                '/',
-                basePath,
-                "users",
-                Uri.EscapeDataString(mailbox),
-                "mailFolders",
-                Uri.EscapeDataString(folderId),
-                "messages",
-                "delta").TrimStart('/');
-            var actualPath = cursorUri.GetComponents(UriComponents.Path, UriFormat.UriEscaped);
-            var query = Uri.UnescapeDataString(cursorUri.Query);
-            var hasOpaqueToken = query.Contains("$deltatoken=", StringComparison.OrdinalIgnoreCase) ||
-                                 query.Contains("$skiptoken=", StringComparison.OrdinalIgnoreCase);
-            if (!string.Equals(actualPath, expectedPath, StringComparison.OrdinalIgnoreCase) ||
-                !hasOpaqueToken)
-            {
-                throw new InvalidDataException(
-                    "Email Graph cursor does not match the configured mailbox/folder delta scope.");
-            }
+            var pathFailure = ValidateDeltaCursorPath(
+                cursorUri,
+                graphBaseAddress,
+                mailbox,
+                folderId);
+            if (pathFailure.HasValue)
+                throw CursorValidationFailure(pathFailure.Value);
+
+            if (!HasOpaqueDeltaToken(cursorUri.Query))
+                throw CursorValidationFailure(GraphDeltaCursorValidationReason.MissingOpaqueToken);
 
             return cursorUri.AbsoluteUri;
+        }
+
+        private static GraphDeltaCursorValidationReason? ValidateDeltaCursorPath(
+            Uri cursorUri,
+            Uri graphBaseAddress,
+            string mailbox,
+            string folderId)
+        {
+            var baseSegments = GetDecodedPathSegments(graphBaseAddress);
+            var cursorSegments = GetDecodedPathSegments(cursorUri);
+            if (cursorSegments.Count < baseSegments.Count ||
+                !cursorSegments.Take(baseSegments.Count).SequenceEqual(
+                    baseSegments,
+                    StringComparer.OrdinalIgnoreCase))
+            {
+                return GraphDeltaCursorValidationReason.BasePathMismatch;
+            }
+
+            var index = baseSegments.Count;
+            if (!TryReadCollectionKey(cursorSegments, ref index, "users", out var actualMailbox))
+                return GraphDeltaCursorValidationReason.ResourcePathMismatch;
+            if (!string.Equals(actualMailbox, mailbox, StringComparison.OrdinalIgnoreCase))
+                return GraphDeltaCursorValidationReason.MailboxMismatch;
+
+            if (!TryReadCollectionKey(cursorSegments, ref index, "mailFolders", out var actualFolder))
+                return GraphDeltaCursorValidationReason.ResourcePathMismatch;
+            if (!string.Equals(actualFolder, folderId, StringComparison.OrdinalIgnoreCase))
+                return GraphDeltaCursorValidationReason.FolderMismatch;
+
+            return index + 2 == cursorSegments.Count &&
+                   string.Equals(cursorSegments[index], "messages", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(cursorSegments[index + 1], "delta", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : GraphDeltaCursorValidationReason.ResourcePathMismatch;
+        }
+
+        private static IReadOnlyList<string> GetDecodedPathSegments(Uri uri)
+            => uri.GetComponents(UriComponents.Path, UriFormat.UriEscaped)
+                .Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .Select(Uri.UnescapeDataString)
+                .ToArray();
+
+        private static bool TryReadCollectionKey(
+            IReadOnlyList<string> segments,
+            ref int index,
+            string collectionName,
+            out string key)
+        {
+            key = string.Empty;
+            if (index >= segments.Count)
+                return false;
+
+            var segment = segments[index];
+            if (string.Equals(segment, collectionName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (++index >= segments.Count || string.IsNullOrEmpty(segments[index]))
+                    return false;
+                key = segments[index++];
+                return true;
+            }
+
+            var prefix = collectionName + "('";
+            if (!segment.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                !segment.EndsWith("')", StringComparison.Ordinal) ||
+                segment.Length <= prefix.Length + 2)
+            {
+                return false;
+            }
+
+            key = segment[prefix.Length..^2].Replace("''", "'", StringComparison.Ordinal);
+            index++;
+            return key.Length > 0;
+        }
+
+        private static bool HasOpaqueDeltaToken(string query)
+        {
+            foreach (var parameter in query.TrimStart('?')
+                         .Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var separator = parameter.IndexOf('=');
+                if (separator <= 0 || separator == parameter.Length - 1)
+                    continue;
+
+                var name = Uri.UnescapeDataString(parameter[..separator]);
+                var value = Uri.UnescapeDataString(parameter[(separator + 1)..]);
+                if (!string.IsNullOrWhiteSpace(value) &&
+                    (string.Equals(name, "$deltatoken", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(name, "$skiptoken", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static InvalidDataException CursorValidationFailure(
+            GraphDeltaCursorValidationReason reason)
+        {
+            var exception = new InvalidDataException(
+                "Microsoft Graph delta cursor validation failed.");
+            exception.Data[CursorValidationReasonDataKey] = reason;
+            return exception;
+        }
+
+        internal static bool TryGetCursorValidationReason(
+            InvalidDataException exception,
+            out GraphDeltaCursorValidationReason reason)
+        {
+            if (exception.Data[CursorValidationReasonDataKey] is GraphDeltaCursorValidationReason value)
+            {
+                reason = value;
+                return true;
+            }
+
+            reason = default;
+            return false;
         }
 
         internal static async Task<byte[]> ReadBoundedContentAsync(
@@ -374,4 +485,20 @@ namespace Odmon.Worker.Services
                 ? "id,internetMessageId,subject,from,sender,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,body"
                 : "id,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime";
     }
+
+    public enum GraphDeltaCursorValidationReason
+    {
+        InvalidGraphBaseAddress,
+        MalformedUrl,
+        InvalidScheme,
+        OriginMismatch,
+        UserInfoNotAllowed,
+        FragmentNotAllowed,
+        BasePathMismatch,
+        ResourcePathMismatch,
+        MailboxMismatch,
+        FolderMismatch,
+        MissingOpaqueToken
+    }
+
 }
