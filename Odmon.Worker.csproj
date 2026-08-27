@@ -35,6 +35,8 @@
     <PackageReference Include="Serilog.Sinks.Console" Version="6.1.1" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
     <PackageReference Include="PdfPig" Version="0.1.15" />
+    <PackageReference Include="MimeKit" Version="4.17.0" />
+    <PackageReference Include="MsgKit" Version="3.0.5" />
   </ItemGroup>
 
 </Project>

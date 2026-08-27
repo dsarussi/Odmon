@@ -31,6 +31,11 @@ namespace Odmon.Worker.Data
         public DbSet<NetCourtDecisionAlertState> NetCourtDecisionAlertStates => Set<NetCourtDecisionAlertState>();
         public DbSet<EmailAutomationMailboxState> EmailAutomationMailboxStates => Set<EmailAutomationMailboxState>();
         public DbSet<EmailAutomationLog> EmailAutomationLogs => Set<EmailAutomationLog>();
+        public DbSet<EmailFilingMailboxState> EmailFilingMailboxStates => Set<EmailFilingMailboxState>();
+        public DbSet<EmailFilingDiagnostic> EmailFilingDiagnostics => Set<EmailFilingDiagnostic>();
+        public DbSet<EmailFilingCandidateDiagnostic> EmailFilingCandidateDiagnostics => Set<EmailFilingCandidateDiagnostic>();
+        public DbSet<EmailFilingTargetDiagnostic> EmailFilingTargetDiagnostics => Set<EmailFilingTargetDiagnostic>();
+        public DbSet<EmailFilingDedup> EmailFilingDedups => Set<EmailFilingDedup>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -306,6 +311,73 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.Action).HasMaxLength(64).IsRequired();
                 b.Property(x => x.IdempotencyKey).HasMaxLength(64);
                 b.Property(x => x.ErrorMessage).HasMaxLength(2000);
+            });
+
+            modelBuilder.Entity<EmailFilingDiagnostic>(b =>
+            {
+                b.ToTable("EmailFilingDiagnostics");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => x.MessageFingerprint);
+                b.HasIndex(x => x.CreatedAtUtc);
+                b.HasIndex(x => x.FinalDecision);
+                b.Property(x => x.Mailbox).HasMaxLength(320).IsRequired();
+                b.Property(x => x.MessageFingerprint).HasMaxLength(64).IsRequired();
+                b.Property(x => x.ObserverClassifications).HasMaxLength(256).IsRequired();
+                b.Property(x => x.FinalDecision).HasMaxLength(64).IsRequired();
+            });
+
+            modelBuilder.Entity<EmailFilingMailboxState>(b =>
+            {
+                b.ToTable("EmailFilingMailboxStates");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.Mailbox, x.FolderId }).IsUnique();
+                b.Property(x => x.Mailbox).HasMaxLength(320).IsRequired();
+                b.Property(x => x.FolderId).HasMaxLength(256).IsRequired();
+                b.Property(x => x.DeltaLink).HasColumnType("nvarchar(max)");
+            });
+
+            modelBuilder.Entity<EmailFilingCandidateDiagnostic>(b =>
+            {
+                b.ToTable("EmailFilingCandidateDiagnostics");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.CandidateType, x.ResolutionStatus });
+                b.Property(x => x.CandidateType).HasMaxLength(16).IsRequired();
+                b.Property(x => x.Source).HasMaxLength(16).IsRequired();
+                b.Property(x => x.Candidate).IsRequired();
+                b.Property(x => x.ResolutionStatus).HasMaxLength(32).IsRequired();
+                b.Property(x => x.ResolvedTikNumber).HasMaxLength(64);
+                b.HasOne(x => x.EmailFilingDiagnostic)
+                    .WithMany(x => x.Candidates)
+                    .HasForeignKey(x => x.EmailFilingDiagnosticId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<EmailFilingTargetDiagnostic>(b =>
+            {
+                b.ToTable("EmailFilingTargetDiagnostics");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => x.TikCounter);
+                b.HasIndex(x => x.Decision);
+                b.Property(x => x.TikNumber).HasMaxLength(64).IsRequired();
+                b.Property(x => x.DedupResult).HasMaxLength(32).IsRequired();
+                b.Property(x => x.Decision).HasMaxLength(64).IsRequired();
+                b.HasOne(x => x.EmailFilingDiagnostic)
+                    .WithMany(x => x.Targets)
+                    .HasForeignKey(x => x.EmailFilingDiagnosticId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<EmailFilingDedup>(b =>
+            {
+                b.ToTable("EmailFilingDedups");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.MessageFingerprint, x.TikCounter }).IsUnique();
+                b.Property(x => x.MessageFingerprint).HasMaxLength(64).IsRequired();
+                b.Property(x => x.TikNumber).HasMaxLength(64).IsRequired();
+                b.Property(x => x.Status).HasMaxLength(32).IsRequired();
+                b.Property(x => x.OdcanitDestPath).HasMaxLength(1024);
+                b.Property(x => x.LastErrorCategory).HasMaxLength(128);
+                b.Property(x => x.RowVersion).IsRowVersion();
             });
 
             base.OnModelCreating(modelBuilder);

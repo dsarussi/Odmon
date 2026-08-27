@@ -175,6 +175,7 @@ hostBuilder.ConfigureServices((context, services) =>
     services.Configure<VoicenterBackfillSettings>(config.GetSection("VoicenterBackfill"));
     services.Configure<NetCourtDecisionAlertSettings>(config.GetSection("NetCourtDecisionAlerts"));
     services.Configure<EmailAutomationSettings>(config.GetSection("EmailAutomation"));
+    services.Configure<EmailFilingSettings>(config.GetSection("EmailFiling"));
 
     services.AddHttpClient<IMondayClient, MondayClient>(client =>
     {
@@ -228,9 +229,19 @@ hostBuilder.ConfigureServices((context, services) =>
         client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
         client.Timeout = TimeSpan.FromSeconds(60);
     });
+    services.AddHttpClient<IEmailFilingGraphClient, MicrosoftGraphEmailAutomationClient>(client =>
+    {
+        client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
+        client.Timeout = TimeSpan.FromSeconds(60);
+    });
     services.AddScoped<EmailAutomationService>();
+    services.AddScoped<IEmailMsgGenerator, EmailMsgGenerator>();
+    services.AddScoped<IEmailFilingDocumentWriter, EmailFilingDocumentWriter>();
+    services.AddScoped<EmailFilingService>();
+    services.AddScoped<EmailFilingPollingService>();
     services.AddScoped<IEmailAutomationCaseResolver, EmailAutomationCaseResolver>();
     services.AddHostedService<EmailAutomationWorker>();
+    services.AddHostedService<EmailFilingWorker>();
 });
 
 var host = hostBuilder.Build();

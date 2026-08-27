@@ -41,6 +41,23 @@ namespace Odmon.Worker.Services
             string fileName,
             string sourceFilePath,
             CancellationToken ct)
+            => await CreateDocumentRowAsync(
+                tikCounter,
+                fileName,
+                sourceFilePath,
+                DateTime.Now,
+                ct);
+
+        /// <summary>
+        /// Email-aware overload that retains the existing document contract while
+        /// allowing CreateDate to represent the source email timestamp.
+        /// </summary>
+        public async Task<DocumentCreateResult> CreateDocumentRowAsync(
+            int tikCounter,
+            string fileName,
+            string sourceFilePath,
+            DateTime createDate,
+            CancellationToken ct)
         {
             var connection = _odcanitDb.Database.GetDbConnection();
             var wasClosed = connection.State == ConnectionState.Closed;
@@ -64,7 +81,7 @@ namespace Odmon.Worker.Services
                 command.Parameters.Add(new SqlParameter("@CategoryCounter", SqlDbType.Int) { Value = _settings.CategoryCounter });
                 command.Parameters.Add(new SqlParameter("@SubCategoryCounter", SqlDbType.Int) { Value = _settings.SubCategoryCounter });
                 command.Parameters.Add(new SqlParameter("@DocStatus", SqlDbType.Int) { Value = _settings.DocStatus });
-                command.Parameters.Add(new SqlParameter("@CreateDate", SqlDbType.DateTime) { Value = DateTime.Now });
+                command.Parameters.Add(new SqlParameter("@CreateDate", SqlDbType.DateTime) { Value = createDate });
                 command.Parameters.Add(new SqlParameter("@WriterID", SqlDbType.Int) { Value = _settings.WriterCounter });
                 command.Parameters.Add(new SqlParameter("@OwnerID", SqlDbType.Int) { Value = _settings.OwnerCounter });
                 command.Parameters.Add(new SqlParameter("@DocType", SqlDbType.Int) { Value = _settings.DocType });
