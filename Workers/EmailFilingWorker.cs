@@ -106,6 +106,30 @@ namespace Odmon.Worker.Workers
                 throw new InvalidOperationException(
                     "EmailAutomation must configure at least one mailbox when EmailFiling is enabled.");
             }
+
+            if (_settings.MaxMimeMessageBytes <= 0 ||
+                _settings.MaxDeltaPageBytes <= 0 ||
+                _settings.MaxMimeAttachmentCount <= 0 ||
+                _settings.MaxIdentifierCandidates <= 0)
+            {
+                throw new InvalidOperationException(
+                    "EmailFiling MIME/page size, attachment-count, and identifier-count limits must be positive.");
+            }
+
+            if (!_settings.DryRun && _settings.RealWriteEnabled)
+            {
+                if (!_settings.IsRealWriteAllowlistConfigurationValid())
+                {
+                    throw new InvalidOperationException(
+                        "EmailFiling real-write allowlist is empty or invalid.");
+                }
+
+                if (!_settings.IsDestinationRootConfigurationValid())
+                {
+                    throw new InvalidOperationException(
+                        "EmailFiling allowed destination roots are empty or invalid.");
+                }
+            }
         }
     }
 }

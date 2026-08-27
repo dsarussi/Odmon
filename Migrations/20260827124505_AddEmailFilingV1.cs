@@ -22,7 +22,6 @@ namespace Odmon.Worker.Migrations
                     TikNumber = table.Column<string>(type: "nvarchar(64)", maxLength: 64, nullable: false),
                     Status = table.Column<string>(type: "nvarchar(32)", maxLength: 32, nullable: false),
                     OdcanitDocCounter = table.Column<int>(type: "int", nullable: true),
-                    OdcanitDestPath = table.Column<string>(type: "nvarchar(1024)", maxLength: 1024, nullable: true),
                     ExpectedFileLength = table.Column<long>(type: "bigint", nullable: false),
                     LastErrorCategory = table.Column<string>(type: "nvarchar(128)", maxLength: 128, nullable: true),
                     CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false),
@@ -88,7 +87,7 @@ namespace Odmon.Worker.Migrations
                     EmailFilingDiagnosticId = table.Column<long>(type: "bigint", nullable: false),
                     CandidateType = table.Column<string>(type: "nvarchar(16)", maxLength: 16, nullable: false),
                     Source = table.Column<string>(type: "nvarchar(16)", maxLength: 16, nullable: false),
-                    Candidate = table.Column<string>(type: "nvarchar(max)", nullable: false),
+                    Candidate = table.Column<string>(type: "nvarchar(64)", maxLength: 64, nullable: false),
                     ResolutionStatus = table.Column<string>(type: "nvarchar(32)", maxLength: 32, nullable: false),
                     ResolvedTikCounter = table.Column<int>(type: "int", nullable: true),
                     ResolvedTikNumber = table.Column<string>(type: "nvarchar(64)", maxLength: 64, nullable: true)
@@ -127,11 +126,6 @@ namespace Odmon.Worker.Migrations
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
-
-            migrationBuilder.AddCheckConstraint(
-                name: "CK_MondayItemMappings_TikCounter_Positive",
-                table: "MondayItemMappings",
-                sql: "[TikCounter] > 0");
 
             migrationBuilder.CreateIndex(
                 name: "IX_EmailFilingCandidateDiagnostics_CandidateType_ResolutionStatus",
@@ -204,9 +198,6 @@ namespace Odmon.Worker.Migrations
             migrationBuilder.DropTable(
                 name: "EmailFilingDiagnostics");
 
-            migrationBuilder.DropCheckConstraint(
-                name: "CK_MondayItemMappings_TikCounter_Positive",
-                table: "MondayItemMappings");
         }
     }
 }

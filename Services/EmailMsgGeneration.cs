@@ -1,4 +1,6 @@
 using MimeKit;
+using Microsoft.Extensions.Options;
+using Odmon.Worker.Configuration;
 using MsgKit.Enums;
 using MsgEmail = MsgKit.Email;
 using MsgSender = MsgKit.Sender;
@@ -34,14 +36,15 @@ namespace Odmon.Worker.Services
     {
         public static async Task<NeutralEmail> ReadAsync(
             byte[] mimeBytes,
+            int maximumAttachmentCount,
             CancellationToken cancellationToken)
         {
             await using var stream = new MemoryStream(mimeBytes, writable: false);
             using var message = await MimeMessage.LoadAsync(stream, cancellationToken);
-            return FromMime(message);
+            return FromMime(message, maximumAttachmentCount);
         }
 
-        internal static NeutralEmail FromMime(MimeMessage message)
+        internal static NeutralEmail FromMime(MimeMessage message, int maximumAttachmentCount)
         {
             var sender = message.Sender ?? message.From.Mailboxes.FirstOrDefault()
                 ?? throw new InvalidDataException("The MIME message has no SMTP sender.");
@@ -55,6 +58,11 @@ namespace Odmon.Worker.Services
                 }
 
                 attachmentNumber++;
+                if (attachmentNumber > maximumAttachmentCount)
+                {
+                    throw new InvalidDataException(
+                        "Email MIME exceeds the configured attachment-count limit.");
+                }
                 using var data = new MemoryStream();
                 part.Content.DecodeTo(data);
                 var contentId = NormalizeContentId(part.ContentId);
@@ -121,7 +129,16 @@ namespace Odmon.Worker.Services
         {
             if (!string.IsNullOrWhiteSpace(part.FileName))
             {
-                return Path.GetFileName(part.FileName);
+                var leafName = Path.GetFileName(part.FileName);
+                var invalidCharacters = Path.GetInvalidFileNameChars();
+                var sanitized = new string(leafName
+                    .Where(character => !invalidCharacters.Contains(character))
+                    .Take(180)
+                    .ToArray())
+                    .Trim()
+                    .TrimEnd('.');
+                if (!string.IsNullOrWhiteSpace(sanitized))
+                    return sanitized;
             }
 
             var extension = part.ContentType.MimeType.ToLowerInvariant() switch
@@ -249,16 +266,33 @@ namespace Odmon.Worker.Services
             CancellationToken cancellationToken);
     }
 
-    public sealed class EmailMsgGenerator : IEmailMsgGenerator
+    public sealed class EmailMsgGenerator(IOptions<EmailFilingSettings> options) : IEmailMsgGenerator
     {
         private const string TempDirectoryName = "odmon-email-filing";
+        private readonly EmailFilingSettings _settings = options.Value;
 
         public async Task<IEmailMsgArtifact> GenerateAsync(
             byte[] mimeBytes,
             CancellationToken cancellationToken)
         {
-            var neutral = await NeutralEmailMimeReader.ReadAsync(mimeBytes, cancellationToken);
+            if (_settings.MaxMimeMessageBytes <= 0 ||
+                mimeBytes.Length == 0 ||
+                mimeBytes.LongLength > _settings.MaxMimeMessageBytes)
+            {
+                throw new InvalidDataException(
+                    "Email MIME is empty or exceeds the configured size limit.");
+            }
+
+            if (_settings.MaxMimeAttachmentCount <= 0)
+                throw new InvalidOperationException("Email MIME attachment-count limit must be positive.");
+
+            var neutral = await NeutralEmailMimeReader.ReadAsync(
+                mimeBytes,
+                _settings.MaxMimeAttachmentCount,
+                cancellationToken);
             var bytes = OutlookMsgWriter.Generate(neutral);
+            if (bytes.LongLength > _settings.MaxMimeMessageBytes)
+                throw new InvalidDataException("Generated MSG exceeds the configured size limit.");
             var directory = Path.Combine(Path.GetTempPath(), TempDirectoryName);
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, $"{Guid.NewGuid():N}.msg");

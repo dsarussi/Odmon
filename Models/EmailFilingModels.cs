@@ -70,7 +70,6 @@ namespace Odmon.Worker.Models
         public string TikNumber { get; set; } = string.Empty;
         public string Status { get; set; } = EmailFilingWriteStates.Succeeded;
         public int? OdcanitDocCounter { get; set; }
-        public string? OdcanitDestPath { get; set; }
         public long ExpectedFileLength { get; set; }
         public string? LastErrorCategory { get; set; }
         public DateTime CreatedAtUtc { get; set; }

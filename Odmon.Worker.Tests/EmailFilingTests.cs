@@ -41,6 +41,24 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public void ExtractionRejectsOverlongOperationalIdentifier()
+        {
+            var input = $"{new string('1', 32)}/{new string('2', 32)}";
+
+            Assert.Empty(EmailFilingService.ExtractTikNumberCandidates(input, null));
+        }
+
+        [Fact]
+        public void ExtractionFailsClosedWhenCandidateCountExceedsLimit()
+        {
+            Assert.Throws<InvalidDataException>(() =>
+                EmailFilingService.ExtractTikNumberCandidates(
+                    "1/1 2/2 3/3",
+                    null,
+                    maximumCandidates: 2));
+        }
+
+        [Fact]
         public void HtmlNormalizationDoesNotTurnSplitMultiSlashValueIntoPartialTik()
         {
             var normalized = EmailFilingService.NormalizeBodyForDetection(
@@ -67,6 +85,91 @@ namespace Odmon.Worker.Tests
             Assert.Contains("sentDateTime", filingSelect, StringComparison.Ordinal);
             Assert.DoesNotContain("attachment", filingSelect, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("$expand", filingSelect, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void GraphDeltaCursorMustRemainOnConfiguredMailboxFolderAndGraphHost()
+        {
+            var graphBase = new Uri("https://graph.microsoft.com/v1.0/");
+            const string valid =
+                "https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque";
+
+            Assert.Equal(
+                valid,
+                MicrosoftGraphEmailAutomationClient.ValidateDeltaCursorUrl(
+                    valid, graphBase, "mailbox@odmon.example", "Inbox"));
+            Assert.Throws<InvalidDataException>(() =>
+                MicrosoftGraphEmailAutomationClient.ValidateDeltaCursorUrl(
+                    "https://untrusted.example/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque",
+                    graphBase,
+                    "mailbox@odmon.example",
+                    "Inbox"));
+            Assert.Throws<InvalidDataException>(() =>
+                MicrosoftGraphEmailAutomationClient.ValidateDeltaCursorUrl(
+                    "https://graph.microsoft.com/v1.0/users/other%40odmon.example/mailFolders/Inbox/messages/delta?$deltatoken=opaque",
+                    graphBase,
+                    "mailbox@odmon.example",
+                    "Inbox"));
+            Assert.Throws<InvalidDataException>(() =>
+                MicrosoftGraphEmailAutomationClient.ValidateDeltaCursorUrl(
+                    "https://graph.microsoft.com/v1.0/users/mailbox%40odmon.example/mailFolders/Inbox/messages/delta",
+                    graphBase,
+                    "mailbox@odmon.example",
+                    "Inbox"));
+        }
+
+        [Fact]
+        public async Task GraphContentReaderRejectsOversizedPayload()
+        {
+            using var content = new ByteArrayContent([1, 2, 3, 4, 5]);
+
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                MicrosoftGraphEmailAutomationClient.ReadBoundedContentAsync(
+                    content,
+                    maximumBytes: 4,
+                    contentKind: "synthetic payload",
+                    CancellationToken.None));
+        }
+
+        [Fact]
+        public void DedupModelEnforcesDurableIdentityConcurrencyAndPrivacy()
+        {
+            using var db = CreateDb();
+            var entity = db.Model.FindEntityType(typeof(EmailFilingDedup));
+
+            Assert.NotNull(entity);
+            Assert.Contains(
+                entity.GetIndexes(),
+                index => index.IsUnique &&
+                    index.Properties.Select(property => property.Name).SequenceEqual(
+                        [nameof(EmailFilingDedup.MessageFingerprint), nameof(EmailFilingDedup.TikCounter)]));
+            Assert.True(entity.FindProperty(nameof(EmailFilingDedup.RowVersion))!.IsConcurrencyToken);
+            Assert.Null(entity.FindProperty("OdcanitDestPath"));
+
+            var candidate = db.Model.FindEntityType(typeof(EmailFilingCandidateDiagnostic));
+            Assert.Equal(64, candidate!.FindProperty(nameof(EmailFilingCandidateDiagnostic.Candidate))!.GetMaxLength());
+        }
+
+        [Fact]
+        public void OdcanitDestinationMustBeMsgUnderConfiguredProtectedRoot()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "odmon-protected-documents");
+            var valid = Path.Combine(root, "case", "document.msg");
+            var traversal = Path.Combine(root, "..", "outside", "document.msg");
+            var wrongExtension = Path.Combine(root, "case", "document.pdf");
+
+            Assert.True(EmailFilingDocumentWriter.IsAllowedDestinationPath(valid, [root]));
+            Assert.False(EmailFilingDocumentWriter.IsAllowedDestinationPath(traversal, [root]));
+            Assert.False(EmailFilingDocumentWriter.IsAllowedDestinationPath(wrongExtension, [root]));
+            Assert.False(EmailFilingDocumentWriter.IsAllowedDestinationPath(valid, []));
+        }
+
+        [Fact]
+        public void EmailFilingPathLookupReusesVerifiedProtectedPathProcedureContract()
+        {
+            Assert.Equal(
+                SqlNetCourtDocumentFileResolver.BuildDocPathCommandText,
+                OdcanitDocumentWriter.BuildDocPathCommandText);
         }
 
         [Fact]
@@ -586,7 +689,6 @@ namespace Odmon.Worker.Tests
             var failedState = Assert.Single(db.EmailFilingDedups);
             Assert.Equal(EmailFilingWriteStates.CopyFailed, failedState.Status);
             Assert.NotNull(failedState.OdcanitDocCounter);
-            Assert.False(string.IsNullOrWhiteSpace(failedState.OdcanitDestPath));
             Assert.Single(notifier.CriticalAlertBodies);
             Assert.DoesNotContain("9/1984", notifier.CriticalAlertBodies[0]);
             Assert.DoesNotContain("synthetic-1", notifier.CriticalAlertBodies[0]);
@@ -666,7 +768,6 @@ namespace Odmon.Worker.Tests
                 TikCounter = 40514,
                 Status = EmailFilingWriteStates.Copying,
                 OdcanitDocCounter = 140514,
-                OdcanitDestPath = destination,
                 ExpectedFileLength = 4096,
                 CreatedAtUtc = ReceivedUtc,
                 UpdatedAtUtc = ReceivedUtc
@@ -777,6 +878,69 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public async Task CorrectTikNumberWithWrongCounterFailsClosed()
+        {
+            await AssertRealWriteGateClosedAsync(
+                "9/1984",
+                new Dictionary<string, int> { ["9/1984"] = 99999 },
+                [new EmailFilingAllowlistEntry { TikNumber = "9/1984", TikCounter = 40514 }]);
+        }
+
+        [Fact]
+        public async Task WrongTikNumberWithCorrectCounterFailsClosed()
+        {
+            await AssertRealWriteGateClosedAsync(
+                "8/1984",
+                new Dictionary<string, int> { ["8/1984"] = 40514 },
+                [new EmailFilingAllowlistEntry { TikNumber = "9/1984", TikCounter = 40514 }]);
+        }
+
+        [Fact]
+        public async Task EmptyRealWriteAllowlistFailsClosed()
+        {
+            await AssertRealWriteGateClosedAsync(
+                "9/1984",
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                []);
+        }
+
+        [Fact]
+        public async Task MalformedOrInconsistentRealWriteAllowlistFailsClosed()
+        {
+            await AssertRealWriteGateClosedAsync(
+                "9/1984",
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                [
+                    new EmailFilingAllowlistEntry { TikNumber = "9/1984", TikCounter = 40514 },
+                    new EmailFilingAllowlistEntry { TikNumber = "9/1984", TikCounter = 60002 }
+                ]);
+        }
+
+        [Fact]
+        public async Task DryRunStillPreventsWriteWhenRealWriteEnabled()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var writer = new FakeDocumentWriter();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                dryRun: true,
+                realWriteEnabled: true,
+                graphClient: graph,
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example", [], Message("9/1984"), CancellationToken.None);
+
+            Assert.Equal(EmailFilingConstants.DryRunWouldFile, diagnostic!.FinalDecision);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Empty(writer.CreatedTikCounters);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Empty(db.EmailFilingDedups);
+        }
+
+        [Fact]
         public void ObserverClassificationExposesMultiAndPartialOverlap()
         {
             var classifications = EmailFilingService.ClassifyObserverResults(
@@ -797,6 +961,7 @@ namespace Odmon.Worker.Tests
                 Enabled = true,
                 DryRun = true,
                 StartProcessingFromUtc = ReceivedUtc.AddMinutes(-1),
+                AllowHistoricalBackfill = true,
                 MaxMessagesPerCycle = 10
             };
             var mailbox = new EmailAutomationMailboxSettings
@@ -840,6 +1005,208 @@ namespace Odmon.Worker.Tests
             Assert.Equal(EmailFilingConstants.DryRunWouldFile, diagnostic.FinalDecision);
         }
 
+        [Fact]
+        public async Task BrandNewMailboxStartsAtInitializationTimeNotHistory()
+        {
+            await using var db = CreateDb();
+            var now = ReceivedUtc.AddMinutes(5);
+            var graph = new FakeFilingGraphClient();
+            var polling = CreatePollingService(
+                db,
+                graph,
+                new EmailFilingSettings { Enabled = true, DryRun = true },
+                now);
+
+            await polling.RunAsync(CancellationToken.None);
+
+            var state = Assert.Single(db.EmailFilingMailboxStates);
+            Assert.Equal(now, state.ProcessingFromUtc);
+            Assert.Equal(now, graph.LastProcessingFromUtc);
+            Assert.Null(graph.LastRequestedDeltaLink);
+        }
+
+        [Fact]
+        public async Task ExistingCursorResumesWithoutReinitializingBaseline()
+        {
+            await using var db = CreateDb();
+            var baseline = ReceivedUtc.AddDays(-10);
+            db.EmailFilingMailboxStates.Add(new EmailFilingMailboxState
+            {
+                Mailbox = "mailbox@odmon.example",
+                FolderId = "Inbox",
+                DeltaLink = "existing-cursor",
+                ProcessingFromUtc = baseline,
+                CreatedAtUtc = baseline,
+                UpdatedAtUtc = baseline
+            });
+            await db.SaveChangesAsync();
+            var graph = new FakeFilingGraphClient { ReturnedDeltaLink = "next-cursor" };
+            var polling = CreatePollingService(
+                db,
+                graph,
+                new EmailFilingSettings { Enabled = true, DryRun = true },
+                ReceivedUtc);
+
+            await polling.RunAsync(CancellationToken.None);
+
+            Assert.Equal("existing-cursor", graph.LastRequestedDeltaLink);
+            var state = Assert.Single(db.EmailFilingMailboxStates);
+            Assert.Equal(baseline, state.ProcessingFromUtc);
+            Assert.Equal("next-cursor", state.DeltaLink);
+        }
+
+        [Fact]
+        public async Task InvalidExistingCursorFailsClosedWithoutReset()
+        {
+            await using var db = CreateDb();
+            db.EmailFilingMailboxStates.Add(new EmailFilingMailboxState
+            {
+                Mailbox = "mailbox@odmon.example",
+                FolderId = "Inbox",
+                DeltaLink = "corrupt-cursor",
+                ProcessingFromUtc = ReceivedUtc.AddDays(-1),
+                CreatedAtUtc = ReceivedUtc.AddDays(-1),
+                UpdatedAtUtc = ReceivedUtc.AddDays(-1)
+            });
+            await db.SaveChangesAsync();
+            var graph = new FakeFilingGraphClient
+            {
+                DeltaException = new InvalidDataException("Synthetic corrupt cursor.")
+            };
+            var polling = CreatePollingService(
+                db,
+                graph,
+                new EmailFilingSettings { Enabled = true, DryRun = true },
+                ReceivedUtc);
+
+            await Assert.ThrowsAsync<InvalidDataException>(
+                () => polling.RunAsync(CancellationToken.None));
+
+            Assert.Equal("corrupt-cursor", graph.LastRequestedDeltaLink);
+            Assert.Equal("corrupt-cursor", Assert.Single(db.EmailFilingMailboxStates).DeltaLink);
+        }
+
+        [Fact]
+        public async Task ProcessingFailureDoesNotAdvanceCursorAndRestartReplays()
+        {
+            await using var db = CreateDb();
+            var settings = new EmailFilingSettings
+            {
+                Enabled = true,
+                DryRun = false,
+                RealWriteEnabled = true,
+                StartProcessingFromUtc = ReceivedUtc.AddMinutes(-1),
+                AllowHistoricalBackfill = true,
+                RealWriteAllowlist =
+                [
+                    new EmailFilingAllowlistEntry { TikNumber = "9/1984", TikCounter = 40514 }
+                ]
+            };
+            var message = Message("9/1984");
+            var firstGraph = new FakeFilingGraphClient(message);
+            var failingService = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                dryRun: false,
+                realWriteEnabled: true,
+                graphClient: firstGraph,
+                msgGenerator: new FakeMsgGenerator { ThrowOnGenerate = true });
+            var firstPolling = CreatePollingService(
+                db, firstGraph, settings, ReceivedUtc.AddMinutes(1), failingService);
+
+            await Assert.ThrowsAsync<EmailFilingProcessingException>(
+                () => firstPolling.RunAsync(CancellationToken.None));
+            Assert.Null(Assert.Single(db.EmailFilingMailboxStates).DeltaLink);
+
+            var replayGraph = new FakeFilingGraphClient(message);
+            var replayService = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 });
+            var replayPolling = CreatePollingService(
+                db, replayGraph, settings, ReceivedUtc.AddMinutes(2), replayService);
+            await replayPolling.RunAsync(CancellationToken.None);
+
+            Assert.Null(replayGraph.LastRequestedDeltaLink);
+            Assert.Equal("filing-delta-1", Assert.Single(db.EmailFilingMailboxStates).DeltaLink);
+        }
+
+        [Fact]
+        public async Task HistoricalBaselineRequiresExplicitOptIn()
+        {
+            await using var db = CreateDb();
+            var settings = new EmailFilingSettings
+            {
+                Enabled = true,
+                DryRun = true,
+                StartProcessingFromUtc = ReceivedUtc.AddDays(-1),
+                AllowHistoricalBackfill = false
+            };
+            var graph = new FakeFilingGraphClient();
+            var polling = CreatePollingService(db, graph, settings, ReceivedUtc);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => polling.RunAsync(CancellationToken.None));
+
+            Assert.Empty(db.EmailFilingMailboxStates);
+            Assert.Equal(0, graph.DeltaFetchCount);
+        }
+
+        private static EmailFilingPollingService CreatePollingService(
+            IntegrationDbContext db,
+            IEmailFilingGraphClient graphClient,
+            EmailFilingSettings settings,
+            DateTime utcNow,
+            EmailFilingService? filingService = null)
+        {
+            var automationSettings = new EmailAutomationSettings
+            {
+                FingerprintKey = "synthetic-email-filing-test-key",
+                Mailboxes =
+                [
+                    new EmailAutomationMailboxSettings
+                    {
+                        Address = "mailbox@odmon.example",
+                        InboxFolder = "Inbox"
+                    }
+                ]
+            };
+            return new EmailFilingPollingService(
+                db,
+                graphClient,
+                filingService ?? CreateService(db, new Dictionary<string, int>()),
+                Options.Create(settings),
+                Options.Create(automationSettings),
+                NullLogger<EmailFilingPollingService>.Instance,
+                new FixedTimeProvider(utcNow));
+        }
+
+        private static async Task AssertRealWriteGateClosedAsync(
+            string candidate,
+            IReadOnlyDictionary<string, int> resolutions,
+            IReadOnlyList<EmailFilingAllowlistEntry> allowlist)
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var writer = new FakeDocumentWriter();
+            var service = CreateService(
+                db,
+                resolutions,
+                dryRun: false,
+                realWriteEnabled: true,
+                allowlist: allowlist,
+                graphClient: graph,
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example", [], Message(candidate), CancellationToken.None);
+
+            Assert.Equal(EmailFilingConstants.NotAllowlisted, diagnostic!.FinalDecision);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Empty(writer.CreatedTikCounters);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Empty(db.EmailFilingDedups);
+        }
+
         private static EmailFilingService CreateService(
             IntegrationDbContext db,
             IReadOnlyDictionary<string, int> resolvedTikNumbers,
@@ -856,12 +1223,16 @@ namespace Odmon.Worker.Tests
             {
                 Enabled = true,
                 DryRun = dryRun,
-                RealWriteEnabled = realWriteEnabled
+                RealWriteEnabled = realWriteEnabled,
+                RealWriteAllowlist = allowlist?.ToList() ??
+                [
+                    new EmailFilingAllowlistEntry
+                    {
+                        TikNumber = "9/1984",
+                        TikCounter = 40514
+                    }
+                ]
             };
-            if (allowlist != null)
-            {
-                filingSettings.RealWriteAllowlist = allowlist.ToList();
-            }
             var automationSettings = new EmailAutomationSettings
             {
                 FingerprintKey = "synthetic-email-filing-test-key"
@@ -942,7 +1313,12 @@ namespace Odmon.Worker.Tests
             : IEmailFilingGraphClient
         {
             public int MimeFetchCount { get; private set; }
+            public int DeltaFetchCount { get; private set; }
             public byte[] MimeBytes { get; set; } = [1, 2, 3];
+            public string? LastRequestedDeltaLink { get; private set; }
+            public DateTime LastProcessingFromUtc { get; private set; }
+            public string ReturnedDeltaLink { get; set; } = "filing-delta-1";
+            public Exception? DeltaException { get; set; }
 
             public Task<EmailAutomationDeltaPage> GetDeltaPageAsync(
                 string mailbox,
@@ -951,10 +1327,17 @@ namespace Odmon.Worker.Tests
                 DateTime processingFromUtc,
                 int pageSize,
                 CancellationToken cancellationToken)
-                => Task.FromResult(new EmailAutomationDeltaPage(
+            {
+                DeltaFetchCount++;
+                LastRequestedDeltaLink = deltaLink;
+                LastProcessingFromUtc = processingFromUtc;
+                if (DeltaException != null)
+                    throw DeltaException;
+                return Task.FromResult(new EmailAutomationDeltaPage(
                     messages,
                     NextLink: null,
-                    DeltaLink: "filing-delta-1"));
+                    DeltaLink: ReturnedDeltaLink));
+            }
 
             public Task<byte[]> GetMimeAsync(
                 string mailbox,
@@ -1025,6 +1408,11 @@ namespace Odmon.Worker.Tests
                     $@"C:\synthetic\{tikCounter}.msg"));
             }
 
+            public Task<string> ResolveDestinationPathAsync(
+                int docCounter,
+                CancellationToken cancellationToken)
+                => Task.FromResult($@"C:\synthetic\{docCounter - 100000}.msg");
+
             public Task<bool> IsVerifiedDestinationAsync(
                 string destinationPath,
                 long expectedLength,
@@ -1035,6 +1423,7 @@ namespace Odmon.Worker.Tests
                 string msgFilePath,
                 string destinationPath,
                 long expectedLength,
+                bool overwriteExisting,
                 CancellationToken cancellationToken)
             {
                 var tikCounter = int.Parse(Path.GetFileNameWithoutExtension(destinationPath));

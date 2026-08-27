@@ -251,7 +251,8 @@ namespace Odmon.Worker.Migrations
 
                     b.Property<string>("Candidate")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
 
                     b.Property<string>("CandidateType")
                         .IsRequired()
@@ -312,10 +313,6 @@ namespace Odmon.Worker.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
-
-                    b.Property<string>("OdcanitDestPath")
-                        .HasMaxLength(1024)
-                        .HasColumnType("nvarchar(1024)");
 
                     b.Property<int?>("OdcanitDocCounter")
                         .HasColumnType("int");

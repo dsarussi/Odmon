@@ -33,7 +33,8 @@ independent Graph delta polling
   -> validate absolute .msg path, non-empty length, and CFB signature
   -> reserve keyed email-fingerprint/TikCounter operation in IntegrationDb
   -> OdcanitDocumentWriter / dbo.ProcDocuments_AddNewDocument
-  -> persist returned DocCounter and DestPath
+  -> persist returned DocCounter only
+  -> validate the returned/resolved path against configured protected roots
   -> copy to returned protected Documents path
   -> verify destination exists, exact byte length, and CFB signature
   -> mark the reservation succeeded
@@ -63,15 +64,18 @@ eligible target.
 
 `EmailFilingDedups` has a unique email-fingerprint/TikCounter key and is a
 durable write-state record as well as the final success proof. It is reserved
-before the Odcanit procedure call. After the procedure returns, its DocCounter
-and DestPath are persisted before copying. Copy failures retry against that
+before the Odcanit procedure call. After the procedure returns, only its
+DocCounter is persisted before copying. On retry, the existing verified
+`dbo.procDocumentsGroup_BuildDocPath` read-only path lookup resolves the
+protected `.msg` destination from DocCounter. The path is canonicalized and
+must remain beneath `AllowedDestinationRoots`. Copy failures retry against that
 same Odcanit row. If the physical copy completed but the final success update
-did not, replay verifies the persisted destination and marks the reservation
-succeeded without creating another row.
+did not, replay resolves and verifies the same destination and marks the
+reservation succeeded without creating another row.
 
 `CREATING_DOCUMENT` and `CREATE_UNCERTAIN` are deliberately not retried. A
-process failure after the create intent is persisted but before DocCounter and
-DestPath are durably recorded cannot be resolved through the verified Odcanit
+process failure after the create intent is persisted but before DocCounter is
+durably recorded cannot be resolved through the verified Odcanit
 contract. Such a state raises a privacy-minimized critical alert for manual
 repair. No supported Documents rollback/delete contract exists in this
 codebase, so EmailFiling does not invent one.
@@ -88,6 +92,13 @@ Diagnostics contain keyed fingerprints, candidates, exact resolutions, target
 decisions, counts, and observer classifications. They do not contain bodies,
 attachment content, sender/recipient content, Internet Message-ID, or raw Graph
 message IDs. Operational logs avoid those values as well.
+
+Full MIME and Graph delta responses have positive, fail-closed size limits.
+MIME attachment count and identifier-candidate count are also bounded, and
+persisted diagnostic identifiers are limited to 64 characters. ODMON does not
+render HTML, fetch remote HTML resources, execute attachments, or extract
+archives. Attachment filenames are reduced to sanitized leaf names before they
+are stored as MSG properties.
 
 ## TikNumber extraction
 
@@ -109,7 +120,16 @@ lookup before it can become a target.
   "RealWriteEnabled": false,
   "IntervalMinutes": 3,
   "MaxMessagesPerCycle": 50,
+  "MaxMimeMessageBytes": 52428800,
+  "MaxDeltaPageBytes": 52428800,
+  "MaxMimeAttachmentCount": 100,
+  "MaxIdentifierCandidates": 100,
   "StartProcessingFromUtc": null,
+  "AllowHistoricalBackfill": false,
+  "AllowedDestinationRoots": [
+    "\\\\dc22\\Odlight\\Docs\\",
+    "D:\\Odlight\\Docs\\"
+  ],
   "RealWriteAllowlist": [
     {
       "TikNumber": "9/1984",
@@ -118,6 +138,12 @@ lookup before it can become a target.
   ]
 }
 ```
+
+With no existing cursor, null `StartProcessingFromUtc` initializes at the
+current service time. A past start time is rejected unless
+`AllowHistoricalBackfill=true`. Existing cursor URLs are resumed only after
+their HTTPS host, mailbox, folder, delta path, and opaque token are validated.
+Invalid cursors fail closed and are never reset automatically.
 
 EmailFiling uses the existing production `EmailAutomation` Graph configuration
 and `OdcanitDocuments` writer identity/configuration. It adds no credentials or
@@ -164,7 +190,7 @@ ORDER BY t.Id DESC;
 ```sql
 SELECT TOP (200)
     Id, MessageFingerprint, TikNumber, TikCounter, Status,
-    OdcanitDocCounter, OdcanitDestPath, ExpectedFileLength,
+    OdcanitDocCounter, ExpectedFileLength,
     LastErrorCategory, CreatedAtUtc, UpdatedAtUtc, FiledAtUtc
 FROM dbo.EmailFilingDedups
 ORDER BY Id DESC;

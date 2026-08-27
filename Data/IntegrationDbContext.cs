@@ -343,7 +343,7 @@ namespace Odmon.Worker.Data
                 b.HasIndex(x => new { x.CandidateType, x.ResolutionStatus });
                 b.Property(x => x.CandidateType).HasMaxLength(16).IsRequired();
                 b.Property(x => x.Source).HasMaxLength(16).IsRequired();
-                b.Property(x => x.Candidate).IsRequired();
+                b.Property(x => x.Candidate).HasMaxLength(64).IsRequired();
                 b.Property(x => x.ResolutionStatus).HasMaxLength(32).IsRequired();
                 b.Property(x => x.ResolvedTikNumber).HasMaxLength(64);
                 b.HasOne(x => x.EmailFilingDiagnostic)
@@ -375,7 +375,6 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.MessageFingerprint).HasMaxLength(64).IsRequired();
                 b.Property(x => x.TikNumber).HasMaxLength(64).IsRequired();
                 b.Property(x => x.Status).HasMaxLength(32).IsRequired();
-                b.Property(x => x.OdcanitDestPath).HasMaxLength(1024);
                 b.Property(x => x.LastErrorCategory).HasMaxLength(128);
                 b.Property(x => x.RowVersion).IsRowVersion();
             });

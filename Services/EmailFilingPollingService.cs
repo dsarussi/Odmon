@@ -65,11 +65,20 @@ namespace Odmon.Worker.Services
 
             if (state == null)
             {
+                var configuredStart = _settings.StartProcessingFromUtc.HasValue
+                    ? NormalizeUtc(_settings.StartProcessingFromUtc.Value)
+                    : now;
+                if (configuredStart < now && !_settings.AllowHistoricalBackfill)
+                {
+                    throw new InvalidOperationException(
+                        "EmailFiling historical processing requires EmailFiling:AllowHistoricalBackfill=true.");
+                }
+
                 state = new EmailFilingMailboxState
                 {
                     Mailbox = normalizedMailbox,
                     FolderId = folderId,
-                    ProcessingFromUtc = NormalizeUtc(_settings.StartProcessingFromUtc ?? now),
+                    ProcessingFromUtc = configuredStart,
                     CreatedAtUtc = now,
                     UpdatedAtUtc = now
                 };

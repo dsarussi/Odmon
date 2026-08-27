@@ -16,6 +16,8 @@ namespace Odmon.Worker.Services
         private readonly ILogger<OdcanitDocumentWriter> _logger;
 
         private const string SpName = "dbo.ProcDocuments_AddNewDocument";
+        internal const string BuildDocPathCommandText =
+            "EXEC dbo.procDocumentsGroup_BuildDocPath @docCounterValue, @docExtensionValue, @protectedDocPathValue OUTPUT;";
 
         public OdcanitDocumentWriter(
             OdcanitDbContext odcanitDb,
@@ -94,8 +96,7 @@ namespace Odmon.Worker.Services
                 if (!await reader.ReadAsync(ct))
                 {
                     throw new InvalidOperationException(
-                        $"{SpName} returned no result set for TikCounter={tikCounter}, Name={fileName}. " +
-                        "The SP may have failed silently.");
+                        $"{SpName} returned no result set for TikCounter={tikCounter}.");
                 }
 
                 var destPathOrd = reader.GetOrdinal("DestPath");
@@ -107,20 +108,71 @@ namespace Odmon.Worker.Services
                 if (string.IsNullOrWhiteSpace(destPath))
                 {
                     throw new InvalidOperationException(
-                        $"{SpName} returned empty DestPath for TikCounter={tikCounter}, Name={fileName}, DocCounter={docCounter}");
+                        $"{SpName} returned empty DestPath for TikCounter={tikCounter}, DocCounter={docCounter}");
                 }
 
                 if (docCounter <= 0)
                 {
                     throw new InvalidOperationException(
-                        $"{SpName} returned invalid DocCounter={docCounter} for TikCounter={tikCounter}, Name={fileName}, DestPath='{destPath}'");
+                        $"{SpName} returned invalid DocCounter={docCounter} for TikCounter={tikCounter}.");
                 }
 
                 _logger.LogDebug(
-                    "SP {SpName} succeeded: TikCounter={TikCounter}, Name={FileName}, DocCounter={DocCounter}, DestPath={DestPath}",
-                    SpName, tikCounter, fileName, docCounter, destPath);
+                    "SP {SpName} succeeded: TikCounter={TikCounter}, DocCounter={DocCounter}",
+                    SpName, tikCounter, docCounter);
 
                 return new DocumentCreateResult(docCounter, destPath);
+            }
+            finally
+            {
+                if (wasClosed && connection.State == ConnectionState.Open)
+                    await connection.CloseAsync();
+            }
+        }
+
+        /// <summary>
+        /// Reuses the verified protected-path builder as a narrow read-only lookup
+        /// for a previously created MSG document. The resolved path is not logged.
+        /// </summary>
+        public async Task<string> ResolveMsgDestinationPathAsync(
+            int docCounter,
+            CancellationToken ct)
+        {
+            if (docCounter <= 0)
+                throw new ArgumentOutOfRangeException(nameof(docCounter));
+
+            var connection = _odcanitDb.Database.GetDbConnection();
+            var wasClosed = connection.State == ConnectionState.Closed;
+            if (wasClosed)
+                await connection.OpenAsync(ct);
+
+            try
+            {
+                await using var command = (SqlCommand)connection.CreateCommand();
+                command.CommandText = BuildDocPathCommandText;
+                command.CommandType = CommandType.Text;
+                command.CommandTimeout = _ingestionSettings.CommandTimeoutSeconds;
+                command.Parameters.Add(new SqlParameter("@docCounterValue", SqlDbType.BigInt)
+                {
+                    Value = docCounter
+                });
+                command.Parameters.Add(new SqlParameter("@docExtensionValue", SqlDbType.NVarChar, 16)
+                {
+                    Value = ".msg"
+                });
+                var output = new SqlParameter("@protectedDocPathValue", SqlDbType.NVarChar, 4000)
+                {
+                    Direction = ParameterDirection.Output
+                };
+                command.Parameters.Add(output);
+                await command.ExecuteNonQueryAsync(ct);
+                var resolved = output.Value is DBNull or null
+                    ? null
+                    : Convert.ToString(output.Value, System.Globalization.CultureInfo.InvariantCulture);
+                if (string.IsNullOrWhiteSpace(resolved))
+                    throw new InvalidOperationException(
+                        $"Protected MSG path lookup returned no path for DocCounter={docCounter}.");
+                return resolved;
             }
             finally
             {

@@ -1,5 +1,7 @@
 using System.Text;
 using MimeKit;
+using Microsoft.Extensions.Options;
+using Odmon.Worker.Configuration;
 using Odmon.Worker.Services;
 using Xunit;
 
@@ -11,7 +13,10 @@ namespace Odmon.Worker.Tests
         public async Task MimeBoundaryPreservesAttachmentsInlineCidAndHebrew()
         {
             var mimeBytes = CreateSyntheticMimeBytes();
-            var neutral = await NeutralEmailMimeReader.ReadAsync(mimeBytes, CancellationToken.None);
+            var neutral = await NeutralEmailMimeReader.ReadAsync(
+                mimeBytes,
+                maximumAttachmentCount: 100,
+                CancellationToken.None);
 
             Assert.Contains("בדיקה", neutral.Subject);
             Assert.Contains("שלום", neutral.BodyText);
@@ -32,7 +37,7 @@ namespace Odmon.Worker.Tests
         [Fact]
         public async Task TemporaryMsgIsRandomAndDeletedOnDispose()
         {
-            var generator = new EmailMsgGenerator();
+            var generator = CreateGenerator();
             var artifact = await generator.GenerateAsync(
                 CreateSyntheticMimeBytes(),
                 CancellationToken.None);
@@ -54,7 +59,7 @@ namespace Odmon.Worker.Tests
             var before = Directory.Exists(directory)
                 ? Directory.GetFiles(directory, "*.msg").ToHashSet(StringComparer.OrdinalIgnoreCase)
                 : [];
-            var generator = new EmailMsgGenerator();
+            var generator = CreateGenerator();
 
             await Assert.ThrowsAnyAsync<Exception>(() => generator.GenerateAsync(
                 Encoding.UTF8.GetBytes("not a MIME message"),
@@ -65,6 +70,63 @@ namespace Odmon.Worker.Tests
                 : [];
             Assert.True(before.SetEquals(after));
         }
+
+        [Fact]
+        public async Task OversizedMimeIsRejectedBeforeTemporaryFileCreation()
+        {
+            var mime = CreateSyntheticMimeBytes();
+            var generator = CreateGenerator(maxMimeMessageBytes: mime.Length - 1);
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => generator.GenerateAsync(
+                mime,
+                CancellationToken.None));
+        }
+
+        [Fact]
+        public async Task ExcessiveAttachmentCountIsRejected()
+        {
+            var generator = CreateGenerator(maxMimeAttachmentCount: 1);
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => generator.GenerateAsync(
+                CreateSyntheticMimeBytes(),
+                CancellationToken.None));
+        }
+
+        [Fact]
+        public async Task AttachmentFilenameCannotCarryFilesystemTraversal()
+        {
+            using var message = new MimeMessage { Subject = "Synthetic traversal test" };
+            message.From.Add(new MailboxAddress("Sender", "sender@odmon.invalid"));
+            message.To.Add(new MailboxAddress("Recipient", "recipient@odmon.invalid"));
+            var builder = new BodyBuilder { TextBody = "Synthetic" };
+            builder.Attachments.Add(
+                @"..\..\private.pdf",
+                new MemoryStream(Encoding.ASCII.GetBytes("%PDF-synthetic")),
+                ContentType.Parse("application/pdf"));
+            message.Body = builder.ToMessageBody();
+            using var output = new MemoryStream();
+            message.WriteTo(output);
+
+            var neutral = await NeutralEmailMimeReader.ReadAsync(
+                output.ToArray(),
+                maximumAttachmentCount: 10,
+                CancellationToken.None);
+
+            var attachment = Assert.Single(neutral.Attachments);
+            Assert.Equal("private.pdf", attachment.FileName);
+            Assert.DoesNotContain("..", attachment.FileName, StringComparison.Ordinal);
+            Assert.DoesNotContain('\\', attachment.FileName);
+            Assert.DoesNotContain('/', attachment.FileName);
+        }
+
+        private static EmailMsgGenerator CreateGenerator(
+            long maxMimeMessageBytes = 52428800,
+            int maxMimeAttachmentCount = 100)
+            => new(Options.Create(new EmailFilingSettings
+            {
+                MaxMimeMessageBytes = maxMimeMessageBytes,
+                MaxMimeAttachmentCount = maxMimeAttachmentCount
+            }));
 
         private static byte[] CreateSyntheticMimeBytes()
         {

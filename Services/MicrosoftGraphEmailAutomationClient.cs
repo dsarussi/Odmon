@@ -16,14 +16,17 @@ namespace Odmon.Worker.Services
         private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
         private readonly HttpClient _httpClient;
         private readonly EmailAutomationSettings _settings;
+        private readonly EmailFilingSettings _filingSettings;
         private readonly TokenCredential _credential;
 
         public MicrosoftGraphEmailAutomationClient(
             HttpClient httpClient,
-            IOptions<EmailAutomationSettings> options)
+            IOptions<EmailAutomationSettings> options,
+            IOptions<EmailFilingSettings> filingOptions)
         {
             _httpClient = httpClient;
             _settings = options.Value;
+            _filingSettings = filingOptions.Value;
             _credential = new ClientSecretCredential(
                 _settings.TenantId,
                 _settings.ClientId,
@@ -72,9 +75,16 @@ namespace Odmon.Worker.Services
             using var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
             request.Headers.Accept.ParseAdd("message/rfc822");
             await AddAuthorizationAsync(request, cancellationToken);
-            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
             ThrowIfUnsuccessful(response);
-            return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+            return await ReadBoundedContentAsync(
+                response.Content,
+                _filingSettings.MaxMimeMessageBytes,
+                "MIME message",
+                cancellationToken);
         }
 
         private async Task<EmailAutomationDeltaPage> GetDeltaPageCoreAsync(
@@ -98,16 +108,31 @@ namespace Odmon.Worker.Services
                     $"users/{Uri.EscapeDataString(mailbox)}/mailFolders/{Uri.EscapeDataString(folderId)}/messages/delta" +
                     $"?changeType=created&$select={select}&$filter=receivedDateTime%20gt%20{filterTime}";
             }
+            else
+            {
+                requestUrl = ValidateDeltaCursorUrl(
+                    requestUrl,
+                    _httpClient.BaseAddress,
+                    mailbox,
+                    folderId);
+            }
 
             using var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
             request.Headers.TryAddWithoutValidation("Prefer", $"odata.maxpagesize={Math.Max(1, pageSize)}");
             await AddAuthorizationAsync(request, cancellationToken);
 
-            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
             ThrowIfUnsuccessful(response);
 
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            var responseBytes = await ReadBoundedContentAsync(
+                response.Content,
+                _filingSettings.MaxDeltaPageBytes,
+                "delta page",
+                cancellationToken);
+            using var document = JsonDocument.Parse(responseBytes);
             var root = document.RootElement;
             var messages = new List<EmailAutomationMessage>();
 
@@ -135,10 +160,93 @@ namespace Odmon.Worker.Services
                 }
             }
 
-            return new EmailAutomationDeltaPage(
-                messages,
-                GetString(root, "@odata.nextLink"),
-                GetString(root, "@odata.deltaLink"));
+            var nextLink = GetString(root, "@odata.nextLink");
+            var completedDeltaLink = GetString(root, "@odata.deltaLink");
+            if (!string.IsNullOrWhiteSpace(nextLink))
+                nextLink = ValidateDeltaCursorUrl(nextLink, _httpClient.BaseAddress, mailbox, folderId);
+            if (!string.IsNullOrWhiteSpace(completedDeltaLink))
+                completedDeltaLink = ValidateDeltaCursorUrl(
+                    completedDeltaLink,
+                    _httpClient.BaseAddress,
+                    mailbox,
+                    folderId);
+
+            return new EmailAutomationDeltaPage(messages, nextLink, completedDeltaLink);
+        }
+
+        internal static string ValidateDeltaCursorUrl(
+            string cursor,
+            Uri? graphBaseAddress,
+            string mailbox,
+            string folderId)
+        {
+            if (graphBaseAddress == null ||
+                !graphBaseAddress.IsAbsoluteUri ||
+                !Uri.TryCreate(cursor, UriKind.Absolute, out var cursorUri) ||
+                !string.Equals(cursorUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(cursorUri.Scheme, graphBaseAddress.Scheme, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(cursorUri.Host, graphBaseAddress.Host, StringComparison.OrdinalIgnoreCase) ||
+                cursorUri.Port != graphBaseAddress.Port ||
+                !string.IsNullOrEmpty(cursorUri.UserInfo) ||
+                !string.IsNullOrEmpty(cursorUri.Fragment))
+            {
+                throw new InvalidDataException(
+                    "Email Graph cursor is invalid or outside the configured Graph endpoint.");
+            }
+
+            var basePath = graphBaseAddress
+                .GetComponents(UriComponents.Path, UriFormat.UriEscaped)
+                .TrimEnd('/');
+            var expectedPath = string.Join(
+                '/',
+                basePath,
+                "users",
+                Uri.EscapeDataString(mailbox),
+                "mailFolders",
+                Uri.EscapeDataString(folderId),
+                "messages",
+                "delta").TrimStart('/');
+            var actualPath = cursorUri.GetComponents(UriComponents.Path, UriFormat.UriEscaped);
+            var query = Uri.UnescapeDataString(cursorUri.Query);
+            var hasOpaqueToken = query.Contains("$deltatoken=", StringComparison.OrdinalIgnoreCase) ||
+                                 query.Contains("$skiptoken=", StringComparison.OrdinalIgnoreCase);
+            if (!string.Equals(actualPath, expectedPath, StringComparison.OrdinalIgnoreCase) ||
+                !hasOpaqueToken)
+            {
+                throw new InvalidDataException(
+                    "Email Graph cursor does not match the configured mailbox/folder delta scope.");
+            }
+
+            return cursorUri.AbsoluteUri;
+        }
+
+        internal static async Task<byte[]> ReadBoundedContentAsync(
+            HttpContent content,
+            long maximumBytes,
+            string contentKind,
+            CancellationToken cancellationToken)
+        {
+            if (maximumBytes <= 0)
+                throw new InvalidOperationException($"EmailFiling {contentKind} size limit must be positive.");
+            if (content.Headers.ContentLength is long declaredLength && declaredLength > maximumBytes)
+                throw new InvalidDataException($"EmailFiling {contentKind} exceeds the configured size limit.");
+
+            await using var source = await content.ReadAsStreamAsync(cancellationToken);
+            using var destination = new MemoryStream();
+            var buffer = new byte[81920];
+            long total = 0;
+            while (true)
+            {
+                var read = await source.ReadAsync(buffer, cancellationToken);
+                if (read == 0)
+                    break;
+                total += read;
+                if (total > maximumBytes)
+                    throw new InvalidDataException($"EmailFiling {contentKind} exceeds the configured size limit.");
+                destination.Write(buffer, 0, read);
+            }
+
+            return destination.ToArray();
         }
 
         public async Task ForwardMessageAsync(

@@ -26,6 +26,8 @@ namespace Odmon.Worker.Services
     /// </summary>
     public sealed class EmailFilingService
     {
+        private const int MaximumIdentifierLength = 64;
+        private const int DefaultMaximumIdentifierCandidates = 100;
         private static readonly Regex TikNumberRegex = new(
             @"(?<![0-9/])[0-9]+/[0-9]+(?![0-9/])",
             RegexOptions.CultureInvariant | RegexOptions.Compiled,
@@ -95,7 +97,10 @@ namespace Odmon.Worker.Services
             }
 
             var normalizedBody = NormalizeBodyForDetection(message.Body, message.BodyContentType);
-            var tikCandidates = ExtractTikNumberCandidates(message.Subject, normalizedBody);
+            var tikCandidates = ExtractTikNumberCandidates(
+                message.Subject,
+                normalizedBody,
+                _settings.MaxIdentifierCandidates);
             var distinctTikNumbers = tikCandidates
                 .Select(candidate => candidate.Value)
                 .Distinct(StringComparer.Ordinal)
@@ -344,11 +349,25 @@ namespace Odmon.Worker.Services
 
         internal static IReadOnlyList<IdentifierCandidate> ExtractTikNumberCandidates(
             string? subject,
-            string? normalizedBody)
+            string? normalizedBody,
+            int maximumCandidates = DefaultMaximumIdentifierCandidates)
         {
             var candidates = new List<IdentifierCandidate>();
-            AddMatches(TikNumberRegex, subject, EmailFilingConstants.SubjectSource, candidates);
-            AddMatches(TikNumberRegex, normalizedBody, EmailFilingConstants.BodySource, candidates);
+            var matchCount = 0;
+            AddMatches(
+                TikNumberRegex,
+                subject,
+                EmailFilingConstants.SubjectSource,
+                candidates,
+                maximumCandidates,
+                ref matchCount);
+            AddMatches(
+                TikNumberRegex,
+                normalizedBody,
+                EmailFilingConstants.BodySource,
+                candidates,
+                maximumCandidates,
+                ref matchCount);
             return candidates
                 .DistinctBy(candidate => (candidate.Source, candidate.Value))
                 .ToArray();
@@ -422,6 +441,7 @@ namespace Odmon.Worker.Services
             string? normalizedBody)
         {
             var candidates = new List<IdentifierCandidate>();
+            var matchCount = 0;
             foreach (var pattern in rules
                          .Where(rule => rule.Enabled && !string.IsNullOrWhiteSpace(rule.SubjectRegex))
                          .Select(rule => rule.SubjectRegex)
@@ -433,8 +453,20 @@ namespace Odmon.Worker.Services
                         pattern,
                         RegexOptions.CultureInvariant,
                         TimeSpan.FromSeconds(1));
-                    AddMatches(regex, subject, EmailFilingConstants.SubjectSource, candidates);
-                    AddMatches(regex, normalizedBody, EmailFilingConstants.BodySource, candidates);
+                    AddMatches(
+                        regex,
+                        subject,
+                        EmailFilingConstants.SubjectSource,
+                        candidates,
+                        _settings.MaxIdentifierCandidates,
+                        ref matchCount);
+                    AddMatches(
+                        regex,
+                        normalizedBody,
+                        EmailFilingConstants.BodySource,
+                        candidates,
+                        _settings.MaxIdentifierCandidates,
+                        ref matchCount);
                 }
                 catch (ArgumentException)
                 {
@@ -480,6 +512,7 @@ namespace Odmon.Worker.Services
             long expectedFileLength,
             CancellationToken cancellationToken)
         {
+            string? destinationPath = null;
             if (state == null)
             {
                 state = new EmailFilingDedup
@@ -506,8 +539,7 @@ namespace Odmon.Worker.Services
                 RaiseCriticalOperationalDiagnostic(
                     "Odcanit document creation outcome is uncertain",
                     state,
-                    state.LastErrorCategory ?? "ProcessInterruption",
-                    null);
+                    state.LastErrorCategory ?? "ProcessInterruption");
                 return false;
             }
 
@@ -539,15 +571,14 @@ namespace Odmon.Worker.Services
                     RaiseCriticalOperationalDiagnostic(
                         "Odcanit document creation outcome is uncertain",
                         state,
-                        ex.GetType().Name,
-                        ex);
+                        ex.GetType().Name);
                     if (ex is OperationCanceledException)
                         throw;
                     return false;
                 }
 
                 state.OdcanitDocCounter = created.DocCounter;
-                state.OdcanitDestPath = created.DestPath;
+                destinationPath = created.DestPath;
                 state.Status = EmailFilingWriteStates.DocumentCreated;
                 state.UpdatedAtUtc = UtcNow();
                 try
@@ -560,10 +591,9 @@ namespace Odmon.Worker.Services
                     // may still contain CREATING_DOCUMENT. Never call the SP again.
                     target.Decision = EmailFilingConstants.ManualRepairRequired;
                     RaiseCriticalOperationalDiagnostic(
-                        "Odcanit document was created but its destination could not be persisted",
+                        "Odcanit document was created but its DocCounter could not be persisted",
                         state,
-                        ex.GetType().Name,
-                        ex);
+                        ex.GetType().Name);
                     throw;
                 }
             }
@@ -576,14 +606,11 @@ namespace Odmon.Worker.Services
                 RaiseCriticalOperationalDiagnostic(
                     "Email filing write state is not safely resumable",
                     state,
-                    "InvalidWriteState",
-                    null);
+                    "InvalidWriteState");
                 return false;
             }
 
-            if (!state.OdcanitDocCounter.HasValue ||
-                state.OdcanitDocCounter <= 0 ||
-                string.IsNullOrWhiteSpace(state.OdcanitDestPath))
+            if (!state.OdcanitDocCounter.HasValue || state.OdcanitDocCounter <= 0)
             {
                 state.Status = EmailFilingWriteStates.CreateUncertain;
                 state.LastErrorCategory = "MissingDocumentCoordinates";
@@ -591,20 +618,36 @@ namespace Odmon.Worker.Services
                 await TryPersistRecoveryStateAsync(state);
                 target.Decision = EmailFilingConstants.ManualRepairRequired;
                 RaiseCriticalOperationalDiagnostic(
-                    "Email filing document coordinates are incomplete",
+                    "Email filing DocCounter is missing",
                     state,
-                    state.LastErrorCategory,
-                    null);
+                    state.LastErrorCategory);
                 return false;
             }
 
-            if (state.Status is EmailFilingWriteStates.Copying or EmailFilingWriteStates.CopyFailed)
+            if (string.IsNullOrWhiteSpace(destinationPath))
+            {
+                try
+                {
+                    destinationPath = await _documentWriter.ResolveDestinationPathAsync(
+                        state.OdcanitDocCounter.Value,
+                        cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    await RecordCopyFailureAsync(state, ex);
+                    throw;
+                }
+            }
+
+            var overwriteExisting = state.Status is
+                EmailFilingWriteStates.Copying or EmailFilingWriteStates.CopyFailed;
+            if (overwriteExisting)
             {
                 bool destinationAlreadyVerified;
                 try
                 {
                     destinationAlreadyVerified = await _documentWriter.IsVerifiedDestinationAsync(
-                        state.OdcanitDestPath,
+                        destinationPath,
                         state.ExpectedFileLength,
                         cancellationToken);
                 }
@@ -636,8 +679,9 @@ namespace Odmon.Worker.Services
             {
                 await _documentWriter.CopyAndVerifyAsync(
                     msgFilePath,
-                    state.OdcanitDestPath,
+                    destinationPath,
                     expectedFileLength,
+                    overwriteExisting,
                     cancellationToken);
             }
             catch (Exception ex)
@@ -647,7 +691,7 @@ namespace Odmon.Worker.Services
             }
 
             // COPY success is recoverable even if this save fails: COPYING was
-            // persisted first, and a retry verifies the same DestPath rather than
+            // persisted first, and a retry resolves and verifies the same DocCounter rather than
             // creating a second Odcanit Documents row.
             await MarkSucceededAsync(state, cancellationToken);
             return true;
@@ -673,8 +717,7 @@ namespace Odmon.Worker.Services
             RaiseCriticalOperationalDiagnostic(
                 "Odcanit document row exists but MSG copy or verification failed",
                 state,
-                ex.GetType().Name,
-                ex);
+                ex.GetType().Name);
         }
 
         private async Task TryPersistRecoveryStateAsync(EmailFilingDedup state)
@@ -686,23 +729,21 @@ namespace Odmon.Worker.Services
             catch (Exception persistenceException)
             {
                 _logger.LogCritical(
-                    persistenceException,
-                    "EMAILFILING recovery state persistence failed. ReservationId={ReservationId}, TikCounter={TikCounter}, DocCounter={DocCounter}, State={State}",
+                    "EMAILFILING recovery state persistence failed. ReservationId={ReservationId}, TikCounter={TikCounter}, DocCounter={DocCounter}, State={State}, ErrorCategory={ErrorCategory}",
                     state.Id,
                     state.TikCounter,
                     state.OdcanitDocCounter,
-                    state.Status);
+                    state.Status,
+                    persistenceException.GetType().Name);
             }
         }
 
         private void RaiseCriticalOperationalDiagnostic(
             string title,
             EmailFilingDedup state,
-            string errorCategory,
-            Exception? exception)
+            string errorCategory)
         {
             _logger.LogCritical(
-                exception,
                 "EMAILFILING CRITICAL | {Title} | ReservationId={ReservationId}, TikCounter={TikCounter}, DocCounter={DocCounter}, State={State}, ErrorCategory={ErrorCategory}",
                 title,
                 state.Id,
@@ -721,7 +762,7 @@ namespace Odmon.Worker.Services
             _emailNotifier.QueueCriticalAlert(
                 title,
                 body,
-                exception?.GetType().Name,
+                errorCategory,
                 "EmailFilingService",
                 "Email Filing Manual Repair");
         }
@@ -808,8 +849,13 @@ namespace Odmon.Worker.Services
             Regex regex,
             string? input,
             string source,
-            ICollection<IdentifierCandidate> destination)
+            ICollection<IdentifierCandidate> destination,
+            int maximumCandidates,
+            ref int matchCount)
         {
+            if (maximumCandidates <= 0)
+                throw new InvalidOperationException("EmailFiling identifier-count limit must be positive.");
+
             if (string.IsNullOrWhiteSpace(input))
             {
                 return;
@@ -817,7 +863,18 @@ namespace Odmon.Worker.Services
 
             foreach (Match match in regex.Matches(input))
             {
-                if (match.Success && !string.IsNullOrWhiteSpace(match.Value))
+                if (!match.Success)
+                    continue;
+
+                matchCount++;
+                if (matchCount > maximumCandidates)
+                {
+                    throw new InvalidDataException(
+                        "Email contains more identifier candidates than the configured safety limit.");
+                }
+
+                if (match.Length <= MaximumIdentifierLength &&
+                    !string.IsNullOrWhiteSpace(match.Value))
                 {
                     destination.Add(new IdentifierCandidate(match.Value, source));
                 }
