@@ -33,6 +33,12 @@ namespace Odmon.Worker.Services
             @"(?:(?:מספר|מס\s*['׳’])\s*הליך(?:\s*בית\s*משפט)?|(?:מספר|מס\s*['׳’])\s*תיק\s*בית\s*משפט|תיק\s*בית\s*משפט\s*(?:מספר|מס\s*['׳’]))\s*[.:：#\-–—]?\s*(?<value>[\p{L}\p{N}][\p{L}\p{N}._/\-]{0,63})",
             RegexOptions.IgnoreCase);
 
+        // Israeli court case number: sequence (1-6 digits), month, two-digit
+        // year. Boundaries prevent extraction from longer numeric/hyphen tokens
+        // while allowing natural Hebrew punctuation such as "ל-8069-09-24".
+        private static readonly Regex StructuredCourtRegex = CreateRegex(
+            @"(?<![0-9]-)(?<![\p{L}\p{N}])(?<value>[0-9]{1,6}-(?:0[1-9]|1[0-2])-[0-9]{2})(?![\p{L}\p{N}-])");
+
         private static readonly Regex VehicleRegex = CreateRegex(
             @"(?:(?:מספר|מס\s*['׳’])\s*רכב|(?:מספר|מס\s*['׳’])\s*רישוי\.?)\s*[.:：#\-–—]?\s*(?<value>[0-9][0-9\- \t]{3,16}[0-9])",
             RegexOptions.IgnoreCase);
@@ -119,6 +125,16 @@ namespace Odmon.Worker.Services
                 destination,
                 maximumCandidates);
             AddMatches(
+                StructuredCourtRegex,
+                input,
+                EmailEvidenceType.CourtCaseNumber,
+                source,
+                EmailEvidenceExtractionKind.StructuredPattern,
+                NormalizeStructuredCourtCaseNumber,
+                destination,
+                maximumCandidates,
+                skipExistingValue: true);
+            AddMatches(
                 VehicleRegex,
                 input,
                 EmailEvidenceType.VehicleNumber,
@@ -164,13 +180,25 @@ namespace Odmon.Worker.Services
             EmailEvidenceExtractionKind extractionKind,
             Func<string, string?> normalize,
             ICollection<EmailEvidenceValue> destination,
-            int maximumCandidates)
+            int maximumCandidates,
+            bool skipExistingValue = false)
         {
             foreach (Match match in regex.Matches(input))
             {
                 var normalized = normalize(match.Groups["value"].Value);
                 if (string.IsNullOrWhiteSpace(normalized))
                     continue;
+
+                if (skipExistingValue && destination.Any(existing =>
+                        existing.EvidenceType == evidenceType &&
+                        existing.Source == source &&
+                        string.Equals(
+                            existing.NormalizedValue,
+                            normalized,
+                            StringComparison.Ordinal)))
+                {
+                    continue;
+                }
 
                 if (destination.Count >= maximumCandidates)
                 {
@@ -192,6 +220,30 @@ namespace Odmon.Worker.Services
             return normalized.Length is > 0 and <= MaximumIdentifierLength
                 ? normalized
                 : null;
+        }
+
+        private static string? NormalizeStructuredCourtCaseNumber(string value)
+        {
+            var normalized = NormalizeIdentifier(value);
+            if (normalized == null)
+                return null;
+
+            var parts = normalized.Split('-');
+            if (parts.Length != 3 ||
+                !int.TryParse(parts[0], out var first) ||
+                !int.TryParse(parts[2], out var third))
+            {
+                return null;
+            }
+
+            // Without a court label, reject tokens that are also valid common
+            // DD-MM-YY or YYYY-MM-DD dates. Ambiguous low sequence numbers stay
+            // observer-false-negative rather than becoming noisy evidence.
+            var isDayMonthYear = parts[0].Length <= 2 && first is >= 1 and <= 31;
+            var isYearMonthDay = parts[0].Length == 4 &&
+                                 first is >= 1900 and <= 2099 &&
+                                 third is >= 1 and <= 31;
+            return isDayMonthYear || isYearMonthDay ? null : normalized;
         }
 
         private static IReadOnlyList<EmailEvidenceValue> OfType(

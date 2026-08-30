@@ -108,6 +108,74 @@ namespace Odmon.Worker.Tests
                 EmailEvidenceExtractionKind.ExplicitLabel);
         }
 
+        [Fact]
+        public void ExtractsUnlabeledCourtCaseNumberAsEntireSubject()
+        {
+            var value = Assert.Single(Extract("8069-09-24", null).CourtCaseNumbers);
+
+            AssertEvidence(
+                value,
+                EmailEvidenceType.CourtCaseNumber,
+                "8069-09-24",
+                EmailEvidenceSource.Subject,
+                EmailEvidenceExtractionKind.StructuredPattern);
+        }
+
+        [Fact]
+        public void ExtractsUnlabeledCourtCaseNumberEmbeddedInNaturalSubjectText()
+        {
+            var value = Assert.Single(Extract(
+                "שים לב ל-8069-09-24 צריך בו התייעצות בהקדם",
+                null).CourtCaseNumbers);
+
+            AssertEvidence(
+                value,
+                EmailEvidenceType.CourtCaseNumber,
+                "8069-09-24",
+                EmailEvidenceSource.Subject,
+                EmailEvidenceExtractionKind.StructuredPattern);
+        }
+
+        [Fact]
+        public void ExtractsUnlabeledCourtCaseNumberFromBodyWithBodyProvenance()
+        {
+            var value = Assert.Single(Extract(
+                null,
+                "עדכון לגבי 8069-09-24 בהמשך היום").CourtCaseNumbers);
+
+            AssertEvidence(
+                value,
+                EmailEvidenceType.CourtCaseNumber,
+                "8069-09-24",
+                EmailEvidenceSource.Body,
+                EmailEvidenceExtractionKind.StructuredPattern);
+        }
+
+        [Theory]
+        [InlineData("2024-09-08")]
+        [InlineData("08-09-24")]
+        [InlineData("1234-13-24")]
+        [InlineData("1234567-09-24")]
+        [InlineData("1-8069-09-24")]
+        [InlineData("8069-09-24-1")]
+        [InlineData("ABC-09-24")]
+        [InlineData("12-345-67")]
+        public void DoesNotExtractDateLikeOrRandomHyphenatedValuesAsCourtCaseNumber(
+            string input)
+        {
+            Assert.Empty(Extract(input, null).CourtCaseNumbers);
+        }
+
+        [Fact]
+        public void ExplicitCourtLabelWinsOverStructuredDuplicate()
+        {
+            var value = Assert.Single(Extract(
+                "מספר הליך: 8069-09-24",
+                null).CourtCaseNumbers);
+
+            Assert.Equal(EmailEvidenceExtractionKind.ExplicitLabel, value.ExtractionKind);
+        }
+
         [Theory]
         [InlineData("מספר רכב: 12-345-67", "1234567")]
         [InlineData("מספר רישוי. 123 45 678", "12345678")]
