@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -32,6 +33,9 @@ namespace Odmon.Worker.Services
         private const string AnnexTextRejected = "לא אישר הגעה לדיון";
 
         internal const string SourceKindHearingApproval = "HearingApproval";
+        private const string NispahWriteLogsTableName = "NispahWriteLogs";
+        private const string NispahWriteLogsUniqueIndexName =
+            "IX_NispahWriteLogs_TikCounter_NispahType_SourceItemId_InfoHash";
 
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
@@ -201,13 +205,40 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
-                NispahWriteLog writeLog;
+                var writeLog = BuildWriteLog(
+                    c.TikCounter,
+                    c.TikNumber,
+                    itemId,
+                    annexText,
+                    nowUtc,
+                    failed: false);
+                var existingWriteLog = await _integrationDb.NispahWriteLogs
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(existing =>
+                        existing.TikCounter == writeLog.TikCounter &&
+                        existing.NispahType == writeLog.NispahType &&
+                        existing.SourceItemId == writeLog.SourceItemId &&
+                        existing.InfoHash == writeLog.InfoHash &&
+                        !existing.Failed,
+                        ct);
+                if (existingWriteLog != null)
+                {
+                    state.LastKnownStatus = currentIndex;
+                    state.LastWriteAtUtc ??= existingWriteLog.CreatedAtUtc;
+                    state.UpdatedAtUtc = nowUtc;
+                    await _integrationDb.SaveChangesAsync(ct);
+
+                    _logger.LogInformation(
+                        "HearingApproval annex already recorded; state advanced without another Odcanit write. TikCounter={TikCounter}, ItemId={ItemId}",
+                        c.TikCounter,
+                        itemId);
+                    continue;
+                }
+
                 try
                 {
                     await _odcanitWriter.AppendNispahAsync(c, nowUtc, NispahTypeName, annexText, ct);
                     state.LastWriteAtUtc = nowUtc;
-
-                    writeLog = BuildWriteLog(c.TikCounter, c.TikNumber, itemId, annexText, nowUtc, failed: false);
 
                     _logger.LogInformation(
                         "HearingApproval annex written: TikCounter={TikCounter}, Text='{AnnexText}'",
@@ -217,7 +248,7 @@ namespace Odmon.Worker.Services
                 {
                     writeLog = BuildWriteLog(c.TikCounter, c.TikNumber, itemId, annexText, nowUtc, failed: true, ex.Message);
                     _integrationDb.NispahWriteLogs.Add(writeLog);
-                    await TrySaveWriteLogAsync(ct);
+                    await TrySaveWriteLogAsync(writeLog, ct);
 
                     _logger.LogError(ex,
                         "HearingApproval annex write FAILED: TikCounter={TikCounter}, Text='{AnnexText}' — status NOT advanced",
@@ -228,7 +259,22 @@ namespace Odmon.Worker.Services
                 _integrationDb.NispahWriteLogs.Add(writeLog);
                 state.LastKnownStatus = currentIndex;
                 state.UpdatedAtUtc = nowUtc;
-                await _integrationDb.SaveChangesAsync(ct);
+                try
+                {
+                    await _integrationDb.SaveChangesAsync(ct);
+                }
+                catch (DbUpdateException ex) when (IsExpectedNispahWriteLogDuplicate(ex))
+                {
+                    // A concurrent or prior process inserted the same logical
+                    // log after our pre-check. The annex call completed, so
+                    // detach only the rejected log and durably advance state.
+                    _integrationDb.Entry(writeLog).State = EntityState.Detached;
+                    await _integrationDb.SaveChangesAsync(ct);
+                    _logger.LogInformation(
+                        "HearingApproval NispahWriteLog duplicate accepted as idempotent. TikCounter={TikCounter}, ItemId={ItemId}",
+                        c.TikCounter,
+                        itemId);
+                }
 
                 _logger.LogInformation(
                     "HearingApproval state updated: TikCounter={TikCounter}, NewStatus={NewStatus}",
@@ -272,14 +318,37 @@ namespace Odmon.Worker.Services
             return Convert.ToHexString(bytes).ToLowerInvariant();
         }
 
-        private async Task TrySaveWriteLogAsync(CancellationToken ct)
+        internal static bool IsExpectedNispahWriteLogDuplicate(DbUpdateException ex)
+            => NispahWriterService.IsSqlUniqueViolation(ex) &&
+               ex.InnerException is SqlException sqlException &&
+               sqlException.Message.Contains(
+                   NispahWriteLogsTableName,
+                   StringComparison.OrdinalIgnoreCase) &&
+               sqlException.Message.Contains(
+                   NispahWriteLogsUniqueIndexName,
+                   StringComparison.OrdinalIgnoreCase);
+
+        private async Task TrySaveWriteLogAsync(NispahWriteLog writeLog, CancellationToken ct)
         {
             try
             {
                 await _integrationDb.SaveChangesAsync(ct);
             }
+            catch (DbUpdateException ex) when (IsExpectedNispahWriteLogDuplicate(ex))
+            {
+                _integrationDb.Entry(writeLog).State = EntityState.Detached;
+                _logger.LogInformation(
+                    "HearingApproval failure NispahWriteLog already exists; duplicate accepted as idempotent. TikCounter={TikCounter}, SourceItemId={SourceItemId}",
+                    writeLog.TikCounter,
+                    writeLog.SourceItemId);
+            }
+            catch (DbUpdateException)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
+                _integrationDb.Entry(writeLog).State = EntityState.Detached;
                 _logger.LogWarning(ex, "HearingApproval failed to persist NispahWriteLog (non-fatal)");
             }
         }
