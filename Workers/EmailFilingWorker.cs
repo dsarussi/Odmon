@@ -129,10 +129,10 @@ namespace Odmon.Worker.Workers
 
             if (!_settings.DryRun && _settings.RealWriteEnabled)
             {
-                if (!_settings.IsRealWriteAllowlistConfigurationValid())
+                if (!_settings.IsRealWriteAuthorityConfigurationValid())
                 {
                     throw new InvalidOperationException(
-                        "EmailFiling real-write allowlist is empty or invalid.");
+                        "EmailFiling real-write authority configuration is invalid.");
                 }
 
                 if (!_settings.IsDestinationRootConfigurationValid())

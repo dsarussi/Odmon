@@ -154,11 +154,24 @@ namespace Odmon.Worker.OdcanitAccess
 
         public async Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(IEnumerable<string> tikNumbers, CancellationToken ct)
         {
+            var resolutions = await ResolveTikNumbersWithAmbiguityAsync(tikNumbers, ct);
+            return resolutions
+                .Where(pair => pair.Value.IsResolved)
+                .ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value.TikCounter!.Value,
+                    StringComparer.Ordinal);
+        }
+
+        public async Task<Dictionary<string, TikNumberResolution>> ResolveTikNumbersWithAmbiguityAsync(
+            IEnumerable<string> tikNumbers,
+            CancellationToken ct)
+        {
             var tikNumbersList = NormalizeTikNumbers(tikNumbers);
             
             if (!tikNumbersList.Any())
             {
-                return new Dictionary<string, int>(StringComparer.Ordinal);
+                return new Dictionary<string, TikNumberResolution>(StringComparer.Ordinal);
             }
 
             _logger.LogInformation(
@@ -175,16 +188,19 @@ namespace Odmon.Worker.OdcanitAccess
 
             try
             {
-                var resolved = await ResolveTikNumbersInBatchesAsync(
-                    tikNumbersList,
-                    TikNumberResolutionBatchSize,
-                    (batch, token) => ResolveTikNumberBatchAsync(connection, batch, token),
-                    ct);
+                var matches = new List<(string TikNumber, int TikCounter)>();
+                foreach (var batch in tikNumbersList.Chunk(TikNumberResolutionBatchSize))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    matches.AddRange(await ResolveTikNumberMatchBatchAsync(connection, batch, ct));
+                }
+
+                var resolutions = ClassifyTikNumberMatches(matches);
 
                 // Log unresolved TikNumbers
                 foreach (var tikNumber in tikNumbersList)
                 {
-                    if (!resolved.ContainsKey(tikNumber))
+                    if (!resolutions.ContainsKey(tikNumber))
                     {
                         _logger.LogWarning(
                             "TikNumber '{TikNumber}' could not be resolved to a TikCounter in Odcanit DB",
@@ -192,12 +208,20 @@ namespace Odmon.Worker.OdcanitAccess
                     }
                 }
 
-                _logger.LogInformation(
-                    "Resolved {ResolvedCount} of {TotalCount} TikNumbers",
-                    resolved.Count,
-                    tikNumbersList.Count);
+                foreach (var pair in resolutions.Where(pair => pair.Value.IsAmbiguous))
+                {
+                    _logger.LogWarning(
+                        "TikNumber '{TikNumber}' resolved to multiple TikCounters and was rejected as ambiguous",
+                        pair.Key);
+                }
 
-                return resolved;
+                _logger.LogInformation(
+                    "Uniquely resolved {ResolvedCount} of {TotalCount} TikNumbers; AmbiguousCount={AmbiguousCount}",
+                    resolutions.Count(pair => pair.Value.IsResolved),
+                    tikNumbersList.Count,
+                    resolutions.Count(pair => pair.Value.IsAmbiguous));
+
+                return resolutions;
             }
             finally
             {
@@ -207,6 +231,25 @@ namespace Odmon.Worker.OdcanitAccess
                 }
             }
         }
+
+        internal static Dictionary<string, TikNumberResolution> ClassifyTikNumberMatches(
+            IEnumerable<(string TikNumber, int TikCounter)> matches)
+            => matches
+                .Where(match => !string.IsNullOrWhiteSpace(match.TikNumber))
+                .GroupBy(match => match.TikNumber, StringComparer.Ordinal)
+                .ToDictionary(
+                    group => group.Key,
+                    group =>
+                    {
+                        var counters = group
+                            .Select(match => match.TikCounter)
+                            .Distinct()
+                            .ToArray();
+                        return counters.Length == 1
+                            ? new TikNumberResolution(counters[0], IsAmbiguous: false)
+                            : new TikNumberResolution(null, IsAmbiguous: true);
+                    },
+                    StringComparer.Ordinal);
 
         internal static List<string> NormalizeTikNumbers(IEnumerable<string>? tikNumbers)
         {
@@ -242,7 +285,7 @@ namespace Odmon.Worker.OdcanitAccess
             return resolved;
         }
 
-        private async Task<Dictionary<string, int>> ResolveTikNumberBatchAsync(
+        private async Task<List<(string TikNumber, int TikCounter)>> ResolveTikNumberMatchBatchAsync(
             System.Data.Common.DbConnection connection,
             IReadOnlyList<string> tikNumbers,
             CancellationToken ct)
@@ -260,7 +303,7 @@ namespace Odmon.Worker.OdcanitAccess
 
             command.CommandText = $"SELECT TikNumber, TikCounter FROM dbo.vwExportToOuterSystems_Files WHERE TikNumber IN ({string.Join(", ", paramNames)})";
 
-            var resolved = new Dictionary<string, int>(StringComparer.Ordinal);
+            var matches = new List<(string TikNumber, int TikCounter)>();
             using var reader = await command.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
             {
@@ -269,7 +312,7 @@ namespace Odmon.Worker.OdcanitAccess
 
                 if (!string.IsNullOrWhiteSpace(tikNumber))
                 {
-                    resolved[tikNumber] = tikCounter;
+                    matches.Add((tikNumber, tikCounter));
                     _logger.LogDebug(
                         "Resolved TikNumber '{TikNumber}' -> TikCounter {TikCounter}",
                         tikNumber,
@@ -277,7 +320,7 @@ namespace Odmon.Worker.OdcanitAccess
                 }
             }
 
-            return resolved;
+            return matches;
         }
 
         private async Task EnrichWithClientsAsync(List<OdcanitCase> cases, CancellationToken ct)

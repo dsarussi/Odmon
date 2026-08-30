@@ -10,6 +10,7 @@ namespace Odmon.Worker.Configuration
         public bool Enabled { get; set; }
         public bool DryRun { get; set; } = true;
         public bool RealWriteEnabled { get; set; }
+        public bool AllowAllResolvedTikNumbers { get; set; }
         public int IntervalMinutes { get; set; } = 3;
         public int MaxMessagesPerCycle { get; set; } = 50;
         public long MaxMimeMessageBytes { get; set; } = 52428800;
@@ -29,6 +30,17 @@ namespace Odmon.Worker.Configuration
                     entry.TikNumber?.Trim(),
                     tikNumber.Trim(),
                     StringComparison.Ordinal)) == true;
+
+        public bool IsRealWriteAuthorized(string tikNumber, int tikCounter)
+            => IsRealWriteAuthorityConfigurationValid() &&
+               (AllowAllResolvedTikNumbers || IsRealWriteAllowlisted(tikNumber, tikCounter));
+
+        public bool IsRealWriteAuthorityConfigurationValid()
+            => AllowAllResolvedTikNumbers
+                ? RealWriteAllowlist == null ||
+                  RealWriteAllowlist.Count == 0 ||
+                  IsRealWriteAllowlistConfigurationValid()
+                : IsRealWriteAllowlistConfigurationValid();
 
         public bool IsRealWriteAllowlistConfigurationValid()
         {

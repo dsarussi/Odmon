@@ -452,6 +452,12 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public void AllowAllResolvedTikNumbersDefaultsFalse()
+        {
+            Assert.False(new EmailFilingSettings().AllowAllResolvedTikNumbers);
+        }
+
+        [Fact]
         public async Task ExactTikNumberWritesOneMsgDocumentOnce()
         {
             await using var db = CreateDb();
@@ -923,6 +929,175 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public async Task ExplicitUnrestrictedModeWritesUniqueResolutionWithoutAllowlist()
+        {
+            await using var db = CreateDb();
+            var writer = new FakeDocumentWriter();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["253/248"] = 60002 },
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                allowlist: [],
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example", [], Message("253/248"), CancellationToken.None);
+
+            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
+            Assert.Equal([60002], writer.WrittenTikCounters);
+            Assert.False(Assert.Single(diagnostic.Targets).RealWriteAllowlisted);
+        }
+
+        [Fact]
+        public async Task UnrestrictedModeWithMalformedAllowlistFailsClosed()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var writer = new FakeDocumentWriter();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                allowlist:
+                [
+                    new EmailFilingAllowlistEntry { TikNumber = "malformed", TikCounter = 40514 }
+                ],
+                graphClient: graph,
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example", [], Message("9/1984"), CancellationToken.None);
+
+            Assert.Equal(EmailFilingConstants.NotAllowlisted, diagnostic!.FinalDecision);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Empty(writer.WrittenTikCounters);
+        }
+
+        [Fact]
+        public async Task UnrestrictedModeNeverAuthorizesUnresolvedAmbiguousOrCourtOnlyCandidates()
+        {
+            await using var db = CreateDb();
+            var writer = new FakeDocumentWriter();
+            var courtResolver = new FakeCourtResolver(new Dictionary<string, EmailAutomationCaseMatch>
+            {
+                ["123-45-67"] = new EmailAutomationCaseMatch(70003, "700/3", null)
+            });
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>(),
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                allowlist: [],
+                ambiguousTikNumbers: new Dictionary<string, IReadOnlyList<int>>
+                {
+                    ["9/1984"] = [40514, 60002]
+                },
+                courtResolver: courtResolver,
+                documentWriter: writer);
+            var rules = new[]
+            {
+                new EmailAutomationRuleSettings
+                {
+                    Enabled = true,
+                    SubjectRegex = @"\d{3}-\d{2}-\d{2}"
+                }
+            };
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                rules,
+                Message("9/1984 253/248 Court 123-45-67"),
+                CancellationToken.None);
+
+            Assert.Equal(EmailFilingConstants.NoValidTik, diagnostic!.FinalDecision);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Contains(diagnostic.Candidates, candidate =>
+                candidate.Candidate == "9/1984" &&
+                candidate.ResolutionStatus == EmailFilingConstants.TikAmbiguous);
+            Assert.Contains("COURT_ONLY", diagnostic.ObserverClassifications);
+        }
+
+        [Fact]
+        public async Task UnrestrictedMultiTikWritesUniqueTargetsOnceAndRejectsAmbiguousTarget()
+        {
+            await using var db = CreateDb();
+            var writer = new FakeDocumentWriter();
+            var graph = new FakeFilingGraphClient();
+            var generator = new FakeMsgGenerator();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>
+                {
+                    ["9/1984"] = 40514,
+                    ["253/248"] = 60002
+                },
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                allowlist: [],
+                ambiguousTikNumbers: new Dictionary<string, IReadOnlyList<int>>
+                {
+                    ["7/1236002"] = [70003, 70004]
+                },
+                graphClient: graph,
+                msgGenerator: generator,
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("9/1984 and 253/248 and 7/1236002", "Duplicate 9/1984"),
+                CancellationToken.None);
+
+            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
+            Assert.Equal(new[] { 40514, 60002 }, writer.WrittenTikCounters.OrderBy(value => value));
+            Assert.Equal(2, diagnostic.Targets.Count);
+            Assert.Equal(1, graph.MimeFetchCount);
+            Assert.Equal(1, generator.GenerateCount);
+            Assert.Contains(diagnostic.Candidates, candidate =>
+                candidate.Candidate == "7/1236002" &&
+                candidate.ResolutionStatus == EmailFilingConstants.TikAmbiguous);
+        }
+
+        [Fact]
+        public async Task UnrestrictedModeFilesValidTikAndRejectsAmbiguousTik()
+        {
+            await using var db = CreateDb();
+            var writer = new FakeDocumentWriter();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                allowlist: [],
+                ambiguousTikNumbers: new Dictionary<string, IReadOnlyList<int>>
+                {
+                    ["253/248"] = [60002, 60003]
+                },
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("9/1984 and 253/248"),
+                CancellationToken.None);
+
+            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
+            Assert.Equal([40514], writer.WrittenTikCounters);
+            Assert.Equal(40514, Assert.Single(diagnostic.Targets).TikCounter);
+            Assert.Contains(diagnostic.Candidates, candidate =>
+                candidate.Candidate == "253/248" &&
+                candidate.ResolutionStatus == EmailFilingConstants.TikAmbiguous);
+        }
+
+        [Fact]
         public async Task MalformedOrInconsistentRealWriteAllowlistFailsClosed()
         {
             await AssertRealWriteGateClosedAsync(
@@ -1230,8 +1405,10 @@ namespace Odmon.Worker.Tests
             IReadOnlyDictionary<string, int> resolvedTikNumbers,
             bool dryRun = true,
             bool realWriteEnabled = false,
+            bool allowAllResolvedTikNumbers = false,
             IEmailAutomationCaseResolver? courtResolver = null,
             IReadOnlyList<EmailFilingAllowlistEntry>? allowlist = null,
+            IReadOnlyDictionary<string, IReadOnlyList<int>>? ambiguousTikNumbers = null,
             IEmailFilingGraphClient? graphClient = null,
             IEmailMsgGenerator? msgGenerator = null,
             IEmailFilingDocumentWriter? documentWriter = null,
@@ -1242,6 +1419,7 @@ namespace Odmon.Worker.Tests
                 Enabled = true,
                 DryRun = dryRun,
                 RealWriteEnabled = realWriteEnabled,
+                AllowAllResolvedTikNumbers = allowAllResolvedTikNumbers,
                 RealWriteAllowlist = allowlist?.ToList() ??
                 [
                     new EmailFilingAllowlistEntry
@@ -1257,7 +1435,7 @@ namespace Odmon.Worker.Tests
             };
             return new EmailFilingService(
                 db,
-                new FakeOdcanitReader(resolvedTikNumbers),
+                new FakeOdcanitReader(resolvedTikNumbers, ambiguousTikNumbers),
                 courtResolver ?? new FakeCourtResolver(new Dictionary<string, EmailAutomationCaseMatch>()),
                 graphClient ?? new FakeFilingGraphClient(),
                 msgGenerator ?? new FakeMsgGenerator(),
@@ -1293,7 +1471,9 @@ namespace Odmon.Worker.Tests
             return new IntegrationDbContext(options);
         }
 
-        private sealed class FakeOdcanitReader(IReadOnlyDictionary<string, int> resolutions)
+        private sealed class FakeOdcanitReader(
+            IReadOnlyDictionary<string, int> resolutions,
+            IReadOnlyDictionary<string, IReadOnlyList<int>>? ambiguousResolutions = null)
             : IOdcanitReader
         {
             public Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(
@@ -1302,6 +1482,29 @@ namespace Odmon.Worker.Tests
                 => Task.FromResult(tikNumbers
                     .Where(resolutions.ContainsKey)
                     .ToDictionary(value => value, value => resolutions[value], StringComparer.Ordinal));
+
+            public Task<Dictionary<string, TikNumberResolution>> ResolveTikNumbersWithAmbiguityAsync(
+                IEnumerable<string> tikNumbers,
+                CancellationToken ct)
+            {
+                var result = new Dictionary<string, TikNumberResolution>(StringComparer.Ordinal);
+                foreach (var tikNumber in tikNumbers.Distinct(StringComparer.Ordinal))
+                {
+                    if (ambiguousResolutions?.TryGetValue(tikNumber, out var counters) == true)
+                    {
+                        var distinctCounters = counters.Distinct().ToArray();
+                        result[tikNumber] = distinctCounters.Length == 1
+                            ? new TikNumberResolution(distinctCounters[0], IsAmbiguous: false)
+                            : new TikNumberResolution(null, IsAmbiguous: true);
+                    }
+                    else if (resolutions.TryGetValue(tikNumber, out var counter))
+                    {
+                        result[tikNumber] = new TikNumberResolution(counter, IsAmbiguous: false);
+                    }
+                }
+
+                return Task.FromResult(result);
+            }
 
             public Task<List<OdcanitCase>> GetCasesCreatedOnDateAsync(DateTime date, CancellationToken ct)
                 => Task.FromResult(new List<OdcanitCase>());

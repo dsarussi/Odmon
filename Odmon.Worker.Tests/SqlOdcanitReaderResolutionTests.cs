@@ -96,6 +96,36 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public void ClassifyTikNumberMatches_RejectsDifferentCountersAsAmbiguous()
+        {
+            var resolutions = SqlOdcanitReader.ClassifyTikNumberMatches(
+            [
+                ("9/1984", 40514),
+                ("9/1984", 60002)
+            ]);
+
+            var resolution = Assert.Single(resolutions).Value;
+            Assert.True(resolution.IsAmbiguous);
+            Assert.False(resolution.IsResolved);
+            Assert.Null(resolution.TikCounter);
+        }
+
+        [Fact]
+        public void ClassifyTikNumberMatches_DuplicateSameCounterRemainsUnique()
+        {
+            var resolutions = SqlOdcanitReader.ClassifyTikNumberMatches(
+            [
+                ("9/1984", 40514),
+                ("9/1984", 40514)
+            ]);
+
+            var resolution = Assert.Single(resolutions).Value;
+            Assert.False(resolution.IsAmbiguous);
+            Assert.True(resolution.IsResolved);
+            Assert.Equal(40514, resolution.TikCounter);
+        }
+
+        [Fact]
         public async Task ResolveTikNumbersInBatchesAsync_CanceledToken_StopsBeforeQuery()
         {
             using var cts = new CancellationTokenSource();

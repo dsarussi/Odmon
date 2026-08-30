@@ -98,6 +98,7 @@ namespace Odmon.Worker.Models
 
         public const string Resolved = "RESOLVED";
         public const string SuspectNotCase = "SUSPECT_NOT_CASE";
+        public const string TikAmbiguous = "TIK_AMBIGUOUS";
         public const string CourtNotFound = "COURT_NOT_FOUND";
         public const string CourtAmbiguous = "COURT_AMBIGUOUS";
 

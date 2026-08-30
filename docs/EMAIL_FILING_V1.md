@@ -14,10 +14,14 @@ default. A real write requires every gate below:
 - `EmailFiling:DryRun=false`
 - `EmailFiling:RealWriteEnabled=true`
 - exact TikNumber resolution
-- exact TikNumber/TikCounter allowlist pair
+- either `AllowAllResolvedTikNumbers=true` or an exact TikNumber/TikCounter allowlist pair
 - no successful email-fingerprint/TikCounter dedup record
 
 The initial allowlist contains only TikNumber `9/1984`, TikCounter `40514`.
+`AllowAllResolvedTikNumbers` defaults to false. Empty, missing, or malformed
+allowlist configuration never enables unrestricted writing. When the explicit
+setting is true, only uniquely resolved internal TikNumbers gain authority;
+unresolved, ambiguous, and court-only identifiers remain non-fileable.
 
 ## Filing flow
 
@@ -118,6 +122,7 @@ lookup before it can become a target.
   "Enabled": false,
   "DryRun": true,
   "RealWriteEnabled": false,
+  "AllowAllResolvedTikNumbers": false,
   "IntervalMinutes": 3,
   "MaxMessagesPerCycle": 50,
   "MaxMimeMessageBytes": 52428800,
@@ -144,6 +149,11 @@ current service time. A past start time is rejected unless
 `AllowHistoricalBackfill=true`. Existing cursor URLs are resumed only after
 their HTTPS host, mailbox, folder, delta path, and opaque token are validated.
 Invalid cursors fail closed and are never reset automatically.
+
+For unrestricted exact-Tik real-write, set `Enabled=true`, `DryRun=false`,
+`RealWriteEnabled=true`, and `AllowAllResolvedTikNumbers=true`. The allowlist
+may then be empty, but if supplied it must still be well-formed. Court-number
+resolution remains observer-only in every authority mode.
 
 EmailFiling uses the existing production `EmailAutomation` Graph configuration
 and `OdcanitDocuments` writer identity/configuration. It adds no credentials or

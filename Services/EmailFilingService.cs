@@ -105,12 +105,19 @@ namespace Odmon.Worker.Services
                 .Select(candidate => candidate.Value)
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
-            var lookupResults = await _odcanitReader.ResolveTikNumbersToCountersAsync(
+            var lookupResults = await _odcanitReader.ResolveTikNumbersWithAmbiguityAsync(
                 distinctTikNumbers,
                 cancellationToken);
             var resolvedTikNumbers = lookupResults
-                .Where(pair => pair.Value > 0)
-                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                .Where(pair => pair.Value.IsResolved)
+                .ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value.TikCounter!.Value,
+                    StringComparer.Ordinal);
+            var ambiguousTikNumbers = lookupResults
+                .Where(pair => pair.Value.IsAmbiguous)
+                .Select(pair => pair.Key)
+                .ToHashSet(StringComparer.Ordinal);
 
             var courtCandidates = ExtractCourtCaseCandidates(
                 courtObserverRules,
@@ -172,6 +179,7 @@ namespace Odmon.Worker.Services
             foreach (var candidate in tikCandidates)
             {
                 var isResolved = resolvedTikNumbers.TryGetValue(candidate.Value, out var tikCounter);
+                var isAmbiguous = ambiguousTikNumbers.Contains(candidate.Value);
                 diagnostic.Candidates.Add(new EmailFilingCandidateDiagnostic
                 {
                     CandidateType = EmailFilingConstants.TikCandidateType,
@@ -179,7 +187,9 @@ namespace Odmon.Worker.Services
                     Candidate = candidate.Value,
                     ResolutionStatus = isResolved
                         ? EmailFilingConstants.Resolved
-                        : EmailFilingConstants.SuspectNotCase,
+                        : isAmbiguous
+                            ? EmailFilingConstants.TikAmbiguous
+                            : EmailFilingConstants.SuspectNotCase,
                     ResolvedTikCounter = isResolved ? tikCounter : null,
                     ResolvedTikNumber = isResolved ? candidate.Value : null
                 });
@@ -209,7 +219,10 @@ namespace Odmon.Worker.Services
                 var allowlisted = _settings.IsRealWriteAllowlisted(
                     target.TikNumber,
                     target.TikCounter);
-                var decision = GetTargetDecision(duplicate, allowlisted);
+                var authorized = _settings.IsRealWriteAuthorized(
+                    target.TikNumber,
+                    target.TikCounter);
+                var decision = GetTargetDecision(duplicate, authorized);
 
                 diagnostic.Targets.Add(new EmailFilingTargetDiagnostic
                 {
@@ -330,10 +343,12 @@ namespace Odmon.Worker.Services
             await _db.SaveChangesAsync(cancellationToken);
 
             _logger.LogInformation(
-                "EMAILFILING processing completed. TikCandidates=[{TikCandidates}], ResolvedTargets=[{ResolvedTargets}], SuspectNotCase=[{SuspectNotCase}], CourtClassifications={CourtClassifications}, DedupHits={DedupHits}, FinalDecision={FinalDecision}",
+                "EMAILFILING processing completed. TikCandidates=[{TikCandidates}], ResolvedTargets=[{ResolvedTargets}], AmbiguousTik=[{AmbiguousTik}], SuspectNotCase=[{SuspectNotCase}], CourtClassifications={CourtClassifications}, DedupHits={DedupHits}, FinalDecision={FinalDecision}",
                 string.Join(",", tikCandidates.Select(candidate => $"{candidate.Value}:{candidate.Source}")),
                 string.Join(",", resolvedTargets.Select(target => $"{target.TikNumber}:{target.TikCounter}")),
-                string.Join(",", distinctTikNumbers.Where(value => !resolvedTikNumbers.ContainsKey(value))),
+                string.Join(",", ambiguousTikNumbers),
+                string.Join(",", distinctTikNumbers.Where(value =>
+                    !resolvedTikNumbers.ContainsKey(value) && !ambiguousTikNumbers.Contains(value))),
                 diagnostic.ObserverClassifications,
                 diagnostic.DedupHitCount,
                 diagnostic.FinalDecision);
@@ -767,7 +782,7 @@ namespace Odmon.Worker.Services
                 "Email Filing Manual Repair");
         }
 
-        private string GetTargetDecision(bool duplicate, bool allowlisted)
+        private string GetTargetDecision(bool duplicate, bool authorized)
         {
             if (duplicate)
             {
@@ -784,7 +799,7 @@ namespace Odmon.Worker.Services
                 return EmailFilingConstants.RealWriteDisabled;
             }
 
-            if (!allowlisted)
+            if (!authorized)
             {
                 return EmailFilingConstants.NotAllowlisted;
             }
