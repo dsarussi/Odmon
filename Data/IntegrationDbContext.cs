@@ -36,6 +36,8 @@ namespace Odmon.Worker.Data
         public DbSet<EmailFilingCandidateDiagnostic> EmailFilingCandidateDiagnostics => Set<EmailFilingCandidateDiagnostic>();
         public DbSet<EmailFilingTargetDiagnostic> EmailFilingTargetDiagnostics => Set<EmailFilingTargetDiagnostic>();
         public DbSet<EmailFilingDedup> EmailFilingDedups => Set<EmailFilingDedup>();
+        public DbSet<EmailFilingResolutionRun> EmailFilingResolutionRuns => Set<EmailFilingResolutionRun>();
+        public DbSet<EmailFilingResolutionTarget> EmailFilingResolutionTargets => Set<EmailFilingResolutionTarget>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -364,6 +366,36 @@ namespace Odmon.Worker.Data
                 b.HasOne(x => x.EmailFilingDiagnostic)
                     .WithMany(x => x.Targets)
                     .HasForeignKey(x => x.EmailFilingDiagnosticId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<EmailFilingResolutionRun>(b =>
+            {
+                b.ToTable("EmailFilingResolutionRuns");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => x.EmailFilingDiagnosticId).IsUnique();
+                b.HasIndex(x => x.CreatedAtUtc);
+                b.HasIndex(x => x.FinalResolutionClass);
+                b.HasIndex(x => x.AgreementWithExistingAuthority);
+                b.Property(x => x.FinalResolutionClass).HasMaxLength(48).IsRequired();
+                b.Property(x => x.AgreementWithExistingAuthority).HasMaxLength(48).IsRequired();
+                b.Property(x => x.ObserverErrorCategory).HasMaxLength(128);
+                b.HasOne(x => x.EmailFilingDiagnostic)
+                    .WithOne(x => x.ResolutionRun)
+                    .HasForeignKey<EmailFilingResolutionRun>(x => x.EmailFilingDiagnosticId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<EmailFilingResolutionTarget>(b =>
+            {
+                b.ToTable("EmailFilingResolutionTargets");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new { x.ResolutionRunId, x.TikCounter, x.TargetKind }).IsUnique();
+                b.HasIndex(x => new { x.TargetKind, x.TikCounter });
+                b.Property(x => x.TargetKind).HasMaxLength(32).IsRequired();
+                b.HasOne(x => x.ResolutionRun)
+                    .WithMany(x => x.Targets)
+                    .HasForeignKey(x => x.ResolutionRunId)
                     .OnDelete(DeleteBehavior.Cascade);
             });
 

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -28,6 +29,8 @@ namespace Odmon.Worker.Services
     {
         private const int MaximumIdentifierLength = 64;
         private const int DefaultMaximumIdentifierCandidates = 100;
+        private const int MaximumObserverClassificationsLength = 256;
+        private const int MaximumObserverErrorCategoryLength = 128;
         private static readonly Regex TikNumberRegex = new(
             @"(?<![0-9/])[0-9]+/[0-9]+(?![0-9/])",
             RegexOptions.CultureInvariant | RegexOptions.Compiled,
@@ -44,6 +47,9 @@ namespace Odmon.Worker.Services
         private readonly IntegrationDbContext _db;
         private readonly IOdcanitReader _odcanitReader;
         private readonly IEmailAutomationCaseResolver _courtCaseResolver;
+        private readonly IEmailCaseEvidenceExtractor _evidenceExtractor;
+        private readonly IEmailCasePrimaryResolver _primaryResolver;
+        private readonly IEmailCaseResolutionEngine _resolutionEngine;
         private readonly IEmailFilingGraphClient _graphClient;
         private readonly IEmailMsgGenerator _msgGenerator;
         private readonly IEmailFilingDocumentWriter _documentWriter;
@@ -57,6 +63,9 @@ namespace Odmon.Worker.Services
             IntegrationDbContext db,
             IOdcanitReader odcanitReader,
             IEmailAutomationCaseResolver courtCaseResolver,
+            IEmailCaseEvidenceExtractor evidenceExtractor,
+            IEmailCasePrimaryResolver primaryResolver,
+            IEmailCaseResolutionEngine resolutionEngine,
             IEmailFilingGraphClient graphClient,
             IEmailMsgGenerator msgGenerator,
             IEmailFilingDocumentWriter documentWriter,
@@ -69,6 +78,9 @@ namespace Odmon.Worker.Services
             _db = db;
             _odcanitReader = odcanitReader;
             _courtCaseResolver = courtCaseResolver;
+            _evidenceExtractor = evidenceExtractor;
+            _primaryResolver = primaryResolver;
+            _resolutionEngine = resolutionEngine;
             _graphClient = graphClient;
             _msgGenerator = msgGenerator;
             _documentWriter = documentWriter;
@@ -97,6 +109,56 @@ namespace Odmon.Worker.Services
             }
 
             var normalizedBody = NormalizeBodyForDetection(message.Body, message.BodyContentType);
+            EmailCaseEvidence? canonicalEvidence = null;
+            var primarySnapshot = EmailCaseResolutionSnapshot.Empty;
+            var resolutionAnalysis = EmailCaseResolutionAnalysis.Empty;
+            string? observerErrorCategory = null;
+            var extractionDurationMs = 0L;
+            var primaryResolutionDurationMs = 0L;
+            var supportingNarrowingDurationMs = 0L;
+            var totalPhantomDurationMs = 0L;
+            if (_settings.ResolutionPhantomEnabled)
+            {
+                var phantomStarted = Stopwatch.GetTimestamp();
+                try
+                {
+                    var stageStarted = Stopwatch.GetTimestamp();
+                    canonicalEvidence = _evidenceExtractor.Extract(
+                        message.Subject,
+                        normalizedBody,
+                        _settings.MaxIdentifierCandidates);
+                    extractionDurationMs = ElapsedMilliseconds(stageStarted);
+
+                    stageStarted = Stopwatch.GetTimestamp();
+                    primarySnapshot = await _primaryResolver.ResolveAsync(
+                        canonicalEvidence,
+                        cancellationToken);
+                    primaryResolutionDurationMs = ElapsedMilliseconds(stageStarted);
+
+                    stageStarted = Stopwatch.GetTimestamp();
+                    resolutionAnalysis = await _resolutionEngine.AnalyzeAsync(
+                        canonicalEvidence,
+                        primarySnapshot,
+                        cancellationToken);
+                    supportingNarrowingDurationMs = ElapsedMilliseconds(stageStarted);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    observerErrorCategory = ex.GetType().Name[..Math.Min(
+                        ex.GetType().Name.Length,
+                        MaximumObserverErrorCategoryLength)];
+                    // Phantom failure remains isolated from established TikNumber
+                    // authority. Never log the exception message or raw evidence.
+                    _logger.LogWarning(
+                        "EMAILFILING phantom resolution failed. ErrorCategory={ErrorCategory}",
+                        observerErrorCategory);
+                }
+                finally
+                {
+                    totalPhantomDurationMs = ElapsedMilliseconds(phantomStarted);
+                }
+            }
+
             var tikCandidates = ExtractTikNumberCandidates(
                 message.Subject,
                 normalizedBody,
@@ -158,7 +220,10 @@ namespace Odmon.Worker.Services
                 .ToArray();
             var observerClassifications = ClassifyObserverResults(
                 targetCounters,
-                resolvedCourtCounters);
+                resolvedCourtCounters)
+                .Concat(resolutionAnalysis.ObserverClassifications)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
 
             var diagnostic = new EmailFilingDiagnostic
             {
@@ -172,7 +237,7 @@ namespace Odmon.Worker.Services
                 ResolvedCourtCount = resolvedCourtCounters.Length,
                 TargetCount = resolvedTargets.Length,
                 DedupHitCount = duplicateCounters.Count,
-                ObserverClassifications = string.Join(",", observerClassifications),
+                ObserverClassifications = FormatObserverClassifications(observerClassifications),
                 CreatedAtUtc = UtcNow()
             };
 
@@ -236,6 +301,22 @@ namespace Odmon.Worker.Services
                             : EmailFilingConstants.NotPreviouslyFiled,
                     Decision = decision
                 });
+            }
+
+            if (_settings.ResolutionPhantomEnabled)
+            {
+                diagnostic.ResolutionRun = EmailFilingResolutionTelemetry.CreateRun(
+                    canonicalEvidence,
+                    primarySnapshot,
+                    resolutionAnalysis,
+                    targetCounters,
+                    new EmailFilingResolutionTimings(
+                        extractionDurationMs,
+                        primaryResolutionDurationMs,
+                        supportingNarrowingDurationMs,
+                        totalPhantomDurationMs),
+                    observerErrorCategory,
+                    UtcNow());
             }
 
             _db.EmailFilingDiagnostics.Add(diagnostic);
@@ -362,6 +443,10 @@ namespace Odmon.Worker.Services
             return diagnostic;
         }
 
+        private static long ElapsedMilliseconds(long startedTimestamp)
+            => Math.Max(0L, (long)Math.Ceiling(
+                Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds));
+
         internal static IReadOnlyList<IdentifierCandidate> ExtractTikNumberCandidates(
             string? subject,
             string? normalizedBody,
@@ -448,6 +533,29 @@ namespace Odmon.Worker.Services
             }
 
             return classifications.Count == 0 ? ["NONE"] : classifications;
+        }
+
+        internal static string FormatObserverClassifications(IEnumerable<string> values)
+        {
+            const string truncated = "OBSERVER_TRUNCATED";
+            var classifications = values
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            var complete = string.Join(",", classifications);
+            if (complete.Length <= MaximumObserverClassificationsLength)
+                return complete;
+
+            var retained = new List<string>();
+            foreach (var classification in classifications)
+            {
+                var candidate = string.Join(",", retained.Append(classification).Append(truncated));
+                if (candidate.Length > MaximumObserverClassificationsLength)
+                    break;
+                retained.Add(classification);
+            }
+            retained.Add(truncated);
+            return string.Join(",", retained);
         }
 
         private IReadOnlyList<IdentifierCandidate> ExtractCourtCaseCandidates(

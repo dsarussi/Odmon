@@ -123,6 +123,7 @@ lookup before it can become a target.
   "DryRun": true,
   "RealWriteEnabled": false,
   "AllowAllResolvedTikNumbers": false,
+  "ResolutionPhantomEnabled": false,
   "IntervalMinutes": 3,
   "MaxMessagesPerCycle": 50,
   "MaxMimeMessageBytes": 52428800,
@@ -163,9 +164,117 @@ Apply migration `20260827124505_AddEmailFilingV1` before enabling the worker.
 Set `StartProcessingFromUtc` explicitly to observe older mail; null establishes
 a new current-time baseline.
 
+## Resolution phantom rollout
+
+`ResolutionPhantomEnabled` defaults to false and is independent of
+`RealWriteEnabled`. When enabled, the canonical resolver analyzes each message
+and stores one privacy-minimized `EmailFilingResolutionRuns` row plus target-set
+rows in `EmailFilingResolutionTargets`. An observer target is marked
+`PHANTOM_WOULD_FILE`; the existing exact-Tik target set is recorded separately
+as `EXISTING_AUTHORITY`. Phantom counters never enter production target
+diagnostics, dedup reservations, MIME retrieval, MSG generation, or the Odcanit
+writer.
+
+The primary evidence mask is Tik=1, Claim=2, Court=4. The supporting mask is
+Vehicle=1, EventDate=2, ClientHint=4, InsuredName=8, DriverPhone=16. Only masks,
+counts, enum-like outcomes, TikCounters, safe exception type, and aggregate
+timings are stored. Raw evidence values and email content are not stored in the
+phantom tables. The run is attached to the existing EmailFiling diagnostic and
+saved in the same transaction, so phantom mode adds no separate per-message
+diagnostic save.
+
+Apply migration `20260830154754_AddEmailFilingResolutionPhantom` before setting
+`ResolutionPhantomEnabled=true`. Leave the office's existing production
+EmailFiling settings unchanged and enable only the phantom flag. Phantom mode
+does not grant new filing authority and does not require disabling the working
+TikNumber filing path; Claim, Court, and supporting evidence remain
+observer-only.
+
+For the current production deployment, this produces the following shape. It
+describes that deployment and is not a universal default for other offices:
+
+```json
+"EmailFiling": {
+  "Enabled": true,
+  "DryRun": false,
+  "RealWriteEnabled": true,
+  "AllowAllResolvedTikNumbers": true,
+  "ResolutionPhantomEnabled": true
+}
+```
+
+### Phantom review SQL
+
+```sql
+USE odmonintegration;
+
+-- 1. Emails analyzed.
+SELECT COUNT_BIG(*) AS EmailsAnalyzed
+FROM dbo.EmailFilingResolutionRuns;
+
+-- 2. Final outcome distribution.
+SELECT FinalResolutionClass, COUNT_BIG(*) AS EmailCount
+FROM dbo.EmailFilingResolutionRuns
+GROUP BY FinalResolutionClass
+ORDER BY EmailCount DESC;
+
+-- 3. Agreement distribution and exact-agreement rate where Tik authority existed.
+SELECT
+    AgreementWithExistingAuthority,
+    COUNT_BIG(*) AS EmailCount
+FROM dbo.EmailFilingResolutionRuns
+GROUP BY AgreementWithExistingAuthority
+ORDER BY EmailCount DESC;
+
+SELECT
+    CAST(100.0 * SUM(CASE WHEN AgreementWithExistingAuthority = 'EXACT_AGREEMENT' THEN 1 ELSE 0 END)
+         / NULLIF(COUNT_BIG(*), 0) AS decimal(6,2)) AS ExactAgreementPercent
+FROM dbo.EmailFilingResolutionRuns
+WHERE ExistingAuthorityTargetCount > 0;
+
+-- 4. Conflicts and disjoint target sets.
+SELECT COUNT_BIG(*) AS ConflictOrDisjointCount
+FROM dbo.EmailFilingResolutionRuns
+WHERE FinalResolutionClass IN ('PRIMARY_CONFLICT', 'SUPPORTING_CONFLICT')
+   OR AgreementWithExistingAuthority = 'DISJOINT';
+
+-- 5. Unique phantom resolution with no existing Tik authority.
+SELECT COUNT_BIG(*) AS UniquePhantomWithoutExistingTikCount
+FROM dbo.EmailFilingResolutionRuns
+WHERE ExistingAuthorityTargetCount = 0
+  AND PhantomTargetCount = 1
+  AND AgreementWithExistingAuthority = 'NO_EXISTING_TIK_AUTHORITY';
+
+-- 6. Ambiguous primary narrowed to unique.
+SELECT COUNT_BIG(*) AS NarrowedToUniqueCount
+FROM dbo.EmailFilingResolutionRuns
+WHERE FinalResolutionClass = 'NARROWED_TO_UNIQUE';
+
+-- 7. Aggregate performance.
+SELECT
+    AVG(CAST(ExtractionDurationMs AS decimal(18,2))) AS AvgExtractionMs,
+    MAX(ExtractionDurationMs) AS MaxExtractionMs,
+    AVG(CAST(PrimaryResolutionDurationMs AS decimal(18,2))) AS AvgPrimaryResolutionMs,
+    MAX(PrimaryResolutionDurationMs) AS MaxPrimaryResolutionMs,
+    AVG(CAST(SupportingNarrowingDurationMs AS decimal(18,2))) AS AvgSupportingNarrowingMs,
+    MAX(SupportingNarrowingDurationMs) AS MaxSupportingNarrowingMs,
+    AVG(CAST(TotalPhantomDurationMs AS decimal(18,2))) AS AvgTotalPhantomMs,
+    MAX(TotalPhantomDurationMs) AS MaxTotalPhantomMs
+FROM dbo.EmailFilingResolutionRuns;
+
+-- 8. Observer errors by safe exception category.
+SELECT ObserverErrorCategory, COUNT_BIG(*) AS ErrorCount
+FROM dbo.EmailFilingResolutionRuns
+WHERE FinalResolutionClass = 'OBSERVER_ERROR'
+GROUP BY ObserverErrorCategory
+ORDER BY ErrorCount DESC;
+```
+
 ## Observer verification SQL
 
 ```sql
+USE odmonintegration;
+
 SELECT TOP (200)
     Id, CreatedAtUtc, Mailbox, ReceivedDateTimeUtc, MessageFingerprint,
     TikCandidateCount, ResolvedTikCount, SuspectNotCaseCount,
@@ -176,6 +285,8 @@ ORDER BY Id DESC;
 ```
 
 ```sql
+USE odmonintegration;
+
 SELECT TOP (500)
     d.Id AS DiagnosticId, d.CreatedAtUtc, c.CandidateType, c.Source,
     c.Candidate, c.ResolutionStatus, c.ResolvedTikNumber,
@@ -187,6 +298,8 @@ ORDER BY c.Id DESC;
 ```
 
 ```sql
+USE odmonintegration;
+
 SELECT TOP (500)
     d.Id AS DiagnosticId, d.CreatedAtUtc, d.MessageFingerprint,
     t.TikNumber, t.TikCounter, t.RealWriteAllowlisted,
@@ -198,6 +311,8 @@ ORDER BY t.Id DESC;
 ```
 
 ```sql
+USE odmonintegration;
+
 SELECT TOP (200)
     Id, MessageFingerprint, TikNumber, TikCounter, Status,
     OdcanitDocCounter, ExpectedFileLength,

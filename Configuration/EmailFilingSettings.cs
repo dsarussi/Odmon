@@ -11,6 +11,7 @@ namespace Odmon.Worker.Configuration
         public bool DryRun { get; set; } = true;
         public bool RealWriteEnabled { get; set; }
         public bool AllowAllResolvedTikNumbers { get; set; }
+        public bool ResolutionPhantomEnabled { get; set; }
         public int IntervalMinutes { get; set; } = 3;
         public int MaxMessagesPerCycle { get; set; } = 50;
         public long MaxMimeMessageBytes { get; set; } = 52428800;

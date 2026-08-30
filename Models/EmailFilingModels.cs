@@ -30,6 +30,48 @@ namespace Odmon.Worker.Models
         public DateTime CreatedAtUtc { get; set; }
         public List<EmailFilingCandidateDiagnostic> Candidates { get; set; } = [];
         public List<EmailFilingTargetDiagnostic> Targets { get; set; } = [];
+        public EmailFilingResolutionRun? ResolutionRun { get; set; }
+    }
+
+    /// <summary>
+    /// Privacy-minimized observer telemetry. Raw evidence and email identifiers
+    /// are deliberately excluded; the parent diagnostic provides keyed
+    /// correlation without exposing Graph or Message-ID values.
+    /// </summary>
+    public sealed class EmailFilingResolutionRun
+    {
+        public long Id { get; set; }
+        public long EmailFilingDiagnosticId { get; set; }
+        public EmailFilingDiagnostic EmailFilingDiagnostic { get; set; } = null!;
+        public int ExistingAuthorityTargetCount { get; set; }
+        public int PhantomTargetCount { get; set; }
+        public string FinalResolutionClass { get; set; } = string.Empty;
+        public int PrimaryEvidenceTypeMask { get; set; }
+        public int SupportingEvidenceTypeMask { get; set; }
+        public int TikPrimaryValueCount { get; set; }
+        public int ClaimPrimaryValueCount { get; set; }
+        public int CourtPrimaryValueCount { get; set; }
+        public int TikCandidateCounterCount { get; set; }
+        public int ClaimCandidateCounterCount { get; set; }
+        public int CourtCandidateCounterCount { get; set; }
+        public bool NarrowingApplied { get; set; }
+        public string AgreementWithExistingAuthority { get; set; } = string.Empty;
+        public long ExtractionDurationMs { get; set; }
+        public long PrimaryResolutionDurationMs { get; set; }
+        public long SupportingNarrowingDurationMs { get; set; }
+        public long TotalPhantomDurationMs { get; set; }
+        public string? ObserverErrorCategory { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
+        public List<EmailFilingResolutionTarget> Targets { get; set; } = [];
+    }
+
+    public sealed class EmailFilingResolutionTarget
+    {
+        public long Id { get; set; }
+        public long ResolutionRunId { get; set; }
+        public EmailFilingResolutionRun ResolutionRun { get; set; } = null!;
+        public int TikCounter { get; set; }
+        public string TargetKind { get; set; } = string.Empty;
     }
 
     public sealed class EmailFilingCandidateDiagnostic
@@ -118,5 +160,38 @@ namespace Odmon.Worker.Models
         public const string NoTikCandidates = "NO_TIK_CANDIDATES";
         public const string NoValidTik = "NO_VALID_TIK";
         public const string AllTargetsDuplicate = "ALL_TARGETS_DUPLICATE";
+    }
+
+    public static class EmailFilingResolutionClasses
+    {
+        public const string NoPrimary = "NO_PRIMARY";
+        public const string PrimaryNotFound = "PRIMARY_NOT_FOUND";
+        public const string PrimaryAmbiguous = "PRIMARY_AMBIGUOUS";
+        public const string PrimaryUnique = "PRIMARY_UNIQUE";
+        public const string PrimaryAgreement = "PRIMARY_AGREEMENT";
+        public const string PrimaryConflict = "PRIMARY_CONFLICT";
+        public const string PartialOverlap = "PARTIAL_OVERLAP";
+        public const string NarrowedToUnique = "NARROWED_TO_UNIQUE";
+        public const string NarrowedStillAmbiguous = "NARROWED_STILL_AMBIGUOUS";
+        public const string SupportingConflict = "SUPPORTING_CONFLICT";
+        public const string MultiTik = "MULTI_TIK";
+        public const string ObserverError = "OBSERVER_ERROR";
+    }
+
+    public static class EmailFilingResolutionAgreements
+    {
+        public const string ExactAgreement = "EXACT_AGREEMENT";
+        public const string PhantomSuperset = "PHANTOM_SUPERSET";
+        public const string PhantomSubset = "PHANTOM_SUBSET";
+        public const string PartialOverlap = "PARTIAL_OVERLAP";
+        public const string Disjoint = "DISJOINT";
+        public const string PhantomUnresolved = "PHANTOM_UNRESOLVED";
+        public const string NoExistingTikAuthority = "NO_EXISTING_TIK_AUTHORITY";
+    }
+
+    public static class EmailFilingResolutionTargetKinds
+    {
+        public const string ExistingAuthority = "EXISTING_AUTHORITY";
+        public const string PhantomWouldFile = "PHANTOM_WOULD_FILE";
     }
 }

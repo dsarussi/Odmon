@@ -6,6 +6,9 @@ namespace Odmon.Worker.Models
     {
         [Column("Counter")]
         public int TikCounter { get; set; }
+        public string? VisualId { get; set; }
+        public string? Additional { get; set; }
+        public string? clcCourtTikNum { get; set; }
         public string? clcCourtNum { get; set; }
         public string? CourtName { get; set; }
     }

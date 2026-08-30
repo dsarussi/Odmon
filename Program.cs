@@ -235,6 +235,10 @@ hostBuilder.ConfigureServices((context, services) =>
         client.Timeout = TimeSpan.FromSeconds(60);
     });
     services.AddScoped<EmailAutomationService>();
+    services.AddSingleton<IEmailCaseEvidenceExtractor, EmailCaseEvidenceExtractor>();
+    services.AddScoped<IEmailCaseResolutionRepository, SqlEmailCaseResolutionRepository>();
+    services.AddScoped<IEmailCasePrimaryResolver, EmailCasePrimaryResolver>();
+    services.AddScoped<IEmailCaseResolutionEngine, EmailCaseResolutionEngine>();
     services.AddScoped<IEmailMsgGenerator, EmailMsgGenerator>();
     services.AddScoped<IEmailFilingDocumentWriter, EmailFilingDocumentWriter>();
     services.AddScoped<EmailFilingService>();

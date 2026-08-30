@@ -452,6 +452,338 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public async Task CanonicalEvidenceExtractionAloneNeverCreatesFilingTarget()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var msgGenerator = new FakeMsgGenerator();
+            var documentWriter = new FakeDocumentWriter();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>(),
+                graphClient: graph,
+                msgGenerator: msgGenerator,
+                documentWriter: documentWriter);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message(
+                    "מספר תביעה: CLM-12345",
+                    "מספר רכב: 12-345-67; תאריך אירוע: 30/08/2026"),
+                CancellationToken.None);
+
+            Assert.NotNull(diagnostic);
+            Assert.Empty(diagnostic!.Targets);
+            Assert.Equal(EmailFilingConstants.NoTikCandidates, diagnostic.FinalDecision);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Equal(0, msgGenerator.GenerateCount);
+            Assert.Empty(documentWriter.CreatedTikCounters);
+            Assert.Empty(documentWriter.WrittenTikCounters);
+        }
+
+        [Fact]
+        public async Task UniqueClaimObserverCreatesNoTargetMimeOrWrite()
+        {
+            await AssertPrimaryObserverOnlyAsync(
+                "מספר תביעה: CLM-UNIQUE",
+                new EmailCaseResolutionSnapshot(
+                    [],
+                    [new(EmailEvidenceType.ClaimNumber, "CLM-UNIQUE", [501])],
+                    []),
+                "CLAIM_UNIQUE");
+        }
+
+        [Fact]
+        public async Task UniqueCourtObserverCreatesNoTargetMimeOrWrite()
+        {
+            await AssertPrimaryObserverOnlyAsync(
+                "מספר תיק בית משפט: 12345-01-26",
+                new EmailCaseResolutionSnapshot(
+                    [],
+                    [],
+                    [new(EmailEvidenceType.CourtCaseNumber, "12345-01-26", [502])]),
+                "COURT_UNIQUE");
+        }
+
+        [Fact]
+        public async Task AmbiguousClaimObserverCreatesNoTargetMimeOrWrite()
+        {
+            await AssertPrimaryObserverOnlyAsync(
+                "מספר תביעה: CLM-AMBIGUOUS",
+                new EmailCaseResolutionSnapshot(
+                    [],
+                    [new(EmailEvidenceType.ClaimNumber, "CLM-AMBIGUOUS", [501, 502])],
+                    []),
+                "CLAIM_AMBIGUOUS");
+        }
+
+        [Fact]
+        public async Task PrimaryObserverConflictDoesNotChangeCurrentTikAuthority()
+        {
+            await using var db = CreateDb();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [new(EmailEvidenceType.InternalTikNumber, "9/1984", [40514])],
+                [new(EmailEvidenceType.ClaimNumber, "CLM-CONFLICT", [99999])],
+                []);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                primaryResolver: new FakePrimaryResolver(snapshot));
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("9/1984 מספר תביעה: CLM-CONFLICT"),
+                CancellationToken.None);
+
+            Assert.NotNull(diagnostic);
+            Assert.Contains("PRIMARY_CONFLICT", diagnostic!.ObserverClassifications);
+            var target = Assert.Single(diagnostic.Targets);
+            Assert.Equal(40514, target.TikCounter);
+            Assert.Equal(EmailFilingConstants.DryRunWouldFile, target.Decision);
+        }
+
+        [Fact]
+        public async Task SupportingObserverNarrowingCreatesNoTargetMimeOrWrite()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var msgGenerator = new FakeMsgGenerator();
+            var documentWriter = new FakeDocumentWriter();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [],
+                [new(EmailEvidenceType.ClaimNumber, "CLM-AMBIGUOUS", [501, 502])],
+                []);
+            var repository = new FakeSupportingResolutionRepository(new HashSet<int> { 502 });
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>(),
+                dryRun: false,
+                realWriteEnabled: true,
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                resolutionEngine: new EmailCaseResolutionEngine(repository),
+                graphClient: graph,
+                msgGenerator: msgGenerator,
+                documentWriter: documentWriter);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("מספר תביעה: CLM-AMBIGUOUS מספר רכב: 22-222-22"),
+                CancellationToken.None);
+
+            Assert.NotNull(diagnostic);
+            Assert.Contains("NARROWED_BY_VEHICLE", diagnostic!.ObserverClassifications);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Equal(1, repository.SupportingCallCount);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Equal(0, msgGenerator.GenerateCount);
+            Assert.Empty(documentWriter.CreatedTikCounters);
+            Assert.Empty(documentWriter.WrittenTikCounters);
+        }
+
+        [Fact]
+        public async Task SupportingEvidenceAloneNeverQueriesOdcanitOrCreatesTarget()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var documentWriter = new FakeDocumentWriter();
+            var repository = new FakeSupportingResolutionRepository(new HashSet<int> { 502 });
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>(),
+                dryRun: false,
+                realWriteEnabled: true,
+                primaryResolver: new FakePrimaryResolver(EmailCaseResolutionSnapshot.Empty),
+                resolutionEngine: new EmailCaseResolutionEngine(repository),
+                graphClient: graph,
+                documentWriter: documentWriter);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("מספר רכב: 22-222-22"),
+                CancellationToken.None);
+
+            Assert.NotNull(diagnostic);
+            Assert.Contains("SUPPORTING_EVIDENCE_NO_EFFECT", diagnostic!.ObserverClassifications);
+            Assert.Equal(0, repository.SupportingCallCount);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Empty(documentWriter.CreatedTikCounters);
+            Assert.Empty(documentWriter.WrittenTikCounters);
+        }
+
+        [Fact]
+        public async Task SupportingObserverConflictDoesNotChangeCurrentTikTarget()
+        {
+            await using var db = CreateDb();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [new(EmailEvidenceType.InternalTikNumber, "9/1984", [40514])],
+                [],
+                []);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                resolutionEngine: new EmailCaseResolutionEngine(
+                    new FakeSupportingResolutionRepository(new HashSet<int>())));
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("9/1984 מספר רכב: 22-222-22"),
+                CancellationToken.None);
+
+            Assert.NotNull(diagnostic);
+            Assert.Contains("SUPPORTING_EVIDENCE_CONFLICT", diagnostic!.ObserverClassifications);
+            var target = Assert.Single(diagnostic.Targets);
+            Assert.Equal(40514, target.TikCounter);
+            Assert.Equal(EmailFilingConstants.DryRunWouldFile, target.Decision);
+        }
+
+        [Fact]
+        public async Task ResolutionPhantomDefaultsDisabledAndSkipsNewResolver()
+        {
+            await using var db = CreateDb();
+            var primaryResolver = new FakePrimaryResolver();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                resolutionPhantomEnabled: false,
+                primaryResolver: primaryResolver);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("9/1984"),
+                CancellationToken.None);
+
+            Assert.False(new EmailFilingSettings().ResolutionPhantomEnabled);
+            Assert.Equal(0, primaryResolver.CallCount);
+            Assert.Null(diagnostic!.ResolutionRun);
+            Assert.Empty(db.EmailFilingResolutionRuns);
+            Assert.Single(diagnostic.Targets);
+        }
+
+        [Fact]
+        public async Task PhantomUniqueResultPersistsTelemetryButCreatesNoProductionWork()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var generator = new FakeMsgGenerator();
+            var writer = new FakeDocumentWriter();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [],
+                [new(EmailEvidenceType.ClaimNumber, "SYNTHETIC-CLAIM", [501])],
+                []);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>(),
+                dryRun: false,
+                realWriteEnabled: true,
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                graphClient: graph,
+                msgGenerator: generator,
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("מספר תביעה: SYNTHETIC-CLAIM"),
+                CancellationToken.None);
+
+            Assert.Empty(diagnostic!.Targets);
+            Assert.Equal(EmailFilingConstants.NoTikCandidates, diagnostic.FinalDecision);
+            var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
+            Assert.Equal(EmailFilingResolutionClasses.PrimaryUnique, run.FinalResolutionClass);
+            Assert.Equal(1, run.PhantomTargetCount);
+            Assert.Equal(EmailFilingResolutionAgreements.NoExistingTikAuthority,
+                run.AgreementWithExistingAuthority);
+            Assert.Equal(501, Assert.Single(run.Targets).TikCounter);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Equal(0, generator.GenerateCount);
+            Assert.Empty(writer.CreatedTikCounters);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Empty(db.EmailFilingDedups);
+        }
+
+        [Fact]
+        public async Task PhantomMultipleWouldFileCountersNeverBecomeProductionTargets()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var generator = new FakeMsgGenerator();
+            var writer = new FakeDocumentWriter();
+            var first = new EvidenceResolutionResult(
+                EmailEvidenceType.InternalTikNumber, "1/111", [501]);
+            var second = new EvidenceResolutionResult(
+                EmailEvidenceType.InternalTikNumber, "2/222", [502]);
+            var snapshot = new EmailCaseResolutionSnapshot([first, second], [], []);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>(),
+                dryRun: false,
+                realWriteEnabled: true,
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                graphClient: graph,
+                msgGenerator: generator,
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("1/111 2/222"),
+                CancellationToken.None);
+
+            Assert.Empty(diagnostic!.Targets);
+            var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
+            Assert.Equal(2, run.PhantomTargetCount);
+            Assert.Equal(EmailFilingResolutionClasses.MultiTik, run.FinalResolutionClass);
+            Assert.All(run.Targets, target => Assert.Equal(
+                EmailFilingResolutionTargetKinds.PhantomWouldFile,
+                target.TargetKind));
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Equal(0, generator.GenerateCount);
+            Assert.Empty(writer.CreatedTikCounters);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Empty(db.EmailFilingDedups);
+        }
+
+        [Fact]
+        public async Task PhantomExceptionIsRecordedSafelyAndDoesNotBlockCurrentTikWrite()
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var writer = new FakeDocumentWriter();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 },
+                dryRun: false,
+                realWriteEnabled: true,
+                primaryResolver: new ThrowingPrimaryResolver(),
+                graphClient: graph,
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("9/1984"),
+                CancellationToken.None);
+
+            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
+            Assert.Equal(1, graph.MimeFetchCount);
+            Assert.Equal([40514], writer.WrittenTikCounters);
+            var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
+            Assert.Equal(EmailFilingResolutionClasses.ObserverError, run.FinalResolutionClass);
+            Assert.Equal(nameof(InvalidOperationException), run.ObserverErrorCategory);
+            Assert.Equal(EmailFilingResolutionAgreements.PhantomUnresolved,
+                run.AgreementWithExistingAuthority);
+            Assert.DoesNotContain("SYNTHETIC-PRIVATE-VALUE", run.ObserverErrorCategory);
+        }
+
+        [Fact]
         public void AllowAllResolvedTikNumbersDefaultsFalse()
         {
             Assert.False(new EmailFilingSettings().AllowAllResolvedTikNumbers);
@@ -1146,6 +1478,17 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public void ObserverClassificationFormattingCannotOverflowPersistedColumn()
+        {
+            var formatted = EmailFilingService.FormatObserverClassifications(
+                Enumerable.Range(1, 30)
+                    .Select(index => $"SYNTHETIC_CLASSIFICATION_{index:D2}"));
+
+            Assert.True(formatted.Length <= 256);
+            Assert.Contains("OBSERVER_TRUNCATED", formatted);
+        }
+
+        [Fact]
         public async Task PollingUsesIndependentCursorAndLeavesForwardingStateUntouched()
         {
             await using var db = CreateDb();
@@ -1171,6 +1514,9 @@ namespace Odmon.Worker.Tests
                 db,
                 new FakeOdcanitReader(new Dictionary<string, int> { ["9/1984"] = 40514 }),
                 new FakeCourtResolver(new Dictionary<string, EmailAutomationCaseMatch>()),
+                new EmailCaseEvidenceExtractor(),
+                new FakePrimaryResolver(),
+                new FakeResolutionEngine(),
                 new FakeFilingGraphClient(Message("RE: Update 9/1984")),
                 new FakeMsgGenerator(),
                 new FakeDocumentWriter(),
@@ -1406,9 +1752,12 @@ namespace Odmon.Worker.Tests
             bool dryRun = true,
             bool realWriteEnabled = false,
             bool allowAllResolvedTikNumbers = false,
+            bool resolutionPhantomEnabled = true,
             IEmailAutomationCaseResolver? courtResolver = null,
             IReadOnlyList<EmailFilingAllowlistEntry>? allowlist = null,
             IReadOnlyDictionary<string, IReadOnlyList<int>>? ambiguousTikNumbers = null,
+            IEmailCasePrimaryResolver? primaryResolver = null,
+            IEmailCaseResolutionEngine? resolutionEngine = null,
             IEmailFilingGraphClient? graphClient = null,
             IEmailMsgGenerator? msgGenerator = null,
             IEmailFilingDocumentWriter? documentWriter = null,
@@ -1420,6 +1769,7 @@ namespace Odmon.Worker.Tests
                 DryRun = dryRun,
                 RealWriteEnabled = realWriteEnabled,
                 AllowAllResolvedTikNumbers = allowAllResolvedTikNumbers,
+                ResolutionPhantomEnabled = resolutionPhantomEnabled,
                 RealWriteAllowlist = allowlist?.ToList() ??
                 [
                     new EmailFilingAllowlistEntry
@@ -1437,6 +1787,9 @@ namespace Odmon.Worker.Tests
                 db,
                 new FakeOdcanitReader(resolvedTikNumbers, ambiguousTikNumbers),
                 courtResolver ?? new FakeCourtResolver(new Dictionary<string, EmailAutomationCaseMatch>()),
+                new EmailCaseEvidenceExtractor(),
+                primaryResolver ?? new FakePrimaryResolver(),
+                resolutionEngine ?? new FakeResolutionEngine(),
                 graphClient ?? new FakeFilingGraphClient(),
                 msgGenerator ?? new FakeMsgGenerator(),
                 documentWriter ?? new FakeDocumentWriter(),
@@ -1445,6 +1798,40 @@ namespace Odmon.Worker.Tests
                 NullLogger<EmailFilingService>.Instance,
                 emailNotifier ?? new FakeEmailNotifier(),
                 new FixedTimeProvider(ReceivedUtc));
+        }
+
+        private static async Task AssertPrimaryObserverOnlyAsync(
+            string subject,
+            EmailCaseResolutionSnapshot snapshot,
+            string expectedClassification)
+        {
+            await using var db = CreateDb();
+            var graph = new FakeFilingGraphClient();
+            var msgGenerator = new FakeMsgGenerator();
+            var documentWriter = new FakeDocumentWriter();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>(),
+                dryRun: false,
+                realWriteEnabled: true,
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                graphClient: graph,
+                msgGenerator: msgGenerator,
+                documentWriter: documentWriter);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message(subject),
+                CancellationToken.None);
+
+            Assert.NotNull(diagnostic);
+            Assert.Contains(expectedClassification, diagnostic!.ObserverClassifications);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Equal(0, msgGenerator.GenerateCount);
+            Assert.Empty(documentWriter.CreatedTikCounters);
+            Assert.Empty(documentWriter.WrittenTikCounters);
         }
 
         private static EmailAutomationMessage Message(
@@ -1528,6 +1915,102 @@ namespace Odmon.Worker.Tests
                 CancellationToken cancellationToken)
                 => Task.FromResult(
                     resolutions.TryGetValue(courtCaseNumber, out var match) ? match : null);
+        }
+
+        private sealed class FakePrimaryResolver(
+            EmailCaseResolutionSnapshot? snapshot = null)
+            : IEmailCasePrimaryResolver
+        {
+            public int CallCount { get; private set; }
+
+            public Task<EmailCaseResolutionSnapshot> ResolveAsync(
+                EmailCaseEvidence evidence,
+                CancellationToken cancellationToken)
+            {
+                CallCount++;
+                return Task.FromResult(snapshot ?? EmailCaseResolutionSnapshot.Empty);
+            }
+        }
+
+        private sealed class ThrowingPrimaryResolver : IEmailCasePrimaryResolver
+        {
+            public Task<EmailCaseResolutionSnapshot> ResolveAsync(
+                EmailCaseEvidence evidence,
+                CancellationToken cancellationToken)
+                => throw new InvalidOperationException("SYNTHETIC-PRIVATE-VALUE");
+        }
+
+        private sealed class FakeResolutionEngine : IEmailCaseResolutionEngine
+        {
+            public Task<EmailCaseResolutionAnalysis> AnalyzeAsync(
+                EmailCaseEvidence evidence,
+                EmailCaseResolutionSnapshot primarySnapshot,
+                CancellationToken cancellationToken)
+                => Task.FromResult(
+                    EmailCaseResolutionAnalysis.WithoutSupportingNarrowing(primarySnapshot));
+        }
+
+        private sealed class FakeSupportingResolutionRepository(
+            IReadOnlySet<int> vehicleMatches)
+            : IEmailCaseResolutionRepository
+        {
+            public int SupportingCallCount { get; private set; }
+
+            public Task<IReadOnlyList<EvidenceResolutionResult>> ResolveInternalTikNumbersAsync(
+                IEnumerable<string> normalizedValues,
+                CancellationToken cancellationToken)
+                => EmptyPrimary();
+
+            public Task<IReadOnlyList<EvidenceResolutionResult>> ResolveClaimNumbersAsync(
+                IEnumerable<string> normalizedValues,
+                CancellationToken cancellationToken)
+                => EmptyPrimary();
+
+            public Task<IReadOnlyList<EvidenceResolutionResult>> ResolveCourtCaseNumbersAsync(
+                IEnumerable<string> normalizedValues,
+                CancellationToken cancellationToken)
+                => EmptyPrimary();
+
+            public Task<IReadOnlySet<int>> FilterCandidatesByVehicleAsync(
+                IEnumerable<int> candidateTikCounters,
+                IEnumerable<string> normalizedValues,
+                CancellationToken cancellationToken)
+            {
+                SupportingCallCount++;
+                var candidates = candidateTikCounters.ToHashSet();
+                return Task.FromResult<IReadOnlySet<int>>(
+                    vehicleMatches.Where(candidates.Contains).ToHashSet());
+            }
+
+            public Task<IReadOnlySet<int>> FilterCandidatesByEventDateAsync(
+                IEnumerable<int> candidateTikCounters,
+                IEnumerable<string> normalizedValues,
+                CancellationToken cancellationToken)
+                => EmptySet();
+
+            public Task<IReadOnlySet<int>> FilterCandidatesByClientAsync(
+                IEnumerable<int> candidateTikCounters,
+                IEnumerable<string> normalizedValues,
+                CancellationToken cancellationToken)
+                => EmptySet();
+
+            public Task<IReadOnlySet<int>> FilterCandidatesByInsuredNameAsync(
+                IEnumerable<int> candidateTikCounters,
+                IEnumerable<string> normalizedValues,
+                CancellationToken cancellationToken)
+                => EmptySet();
+
+            public Task<IReadOnlySet<int>> FilterCandidatesByDriverPhoneAsync(
+                IEnumerable<int> candidateTikCounters,
+                IEnumerable<string> normalizedValues,
+                CancellationToken cancellationToken)
+                => EmptySet();
+
+            private static Task<IReadOnlyList<EvidenceResolutionResult>> EmptyPrimary()
+                => Task.FromResult<IReadOnlyList<EvidenceResolutionResult>>([]);
+
+            private static Task<IReadOnlySet<int>> EmptySet()
+                => Task.FromResult<IReadOnlySet<int>>(new HashSet<int>());
         }
 
         private sealed class FakeFilingGraphClient(params EmailAutomationMessage[] messages)
