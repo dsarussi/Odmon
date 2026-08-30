@@ -133,7 +133,7 @@ namespace Odmon.Worker.OdcanitAccess
             // The join is verified, but no business-client SideType contract is
             // yet proven. This exact VisualID capability remains unused while
             // ClientHints extraction is intentionally empty.
-            var rows = await db.Sides
+            var rows = await db.SideDataLinks
                 .AsNoTracking()
                 .Where(side =>
                     candidates.Contains(side.TikCounter) &&

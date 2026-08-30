@@ -9,6 +9,43 @@ namespace Odmon.Worker.Tests
     public sealed class EmailCaseResolutionRepositoryTests
     {
         [Fact]
+        public void ExportSidesViewModelMatchesConfirmedProductionSchemaExactly()
+        {
+            using var db = CreateModelDb();
+            var entity = db.Model.FindEntityType(typeof(OdcanitSide));
+            Assert.NotNull(entity);
+
+            Assert.Equal("vwExportToOuterSystems_vwSides", entity!.GetViewName());
+            Assert.Equal("dbo", entity.GetViewSchema());
+            Assert.Equal(
+                new[]
+                {
+                    "FullAddress", "FullName", "ID", "SideTypeCode", "SideTypeName",
+                    "TikCounter", "TikNumber", "tsCreateDate", "tsModifyDate"
+                },
+                entity.GetProperties().Select(property => property.Name).OrderBy(name => name));
+            Assert.DoesNotContain(entity.GetProperties(), property =>
+                property.Name == "SideDataCounter");
+        }
+
+        [Fact]
+        public void EmailFilingSideDataLinkUsesSeparateDboSidesProjection()
+        {
+            using var db = CreateModelDb();
+            var entity = db.Model.FindEntityType(typeof(OdcanitSideDataLink));
+            Assert.NotNull(entity);
+
+            Assert.Equal("SIDES", entity!.GetTableName());
+            Assert.Equal("dbo", entity.GetSchema());
+            Assert.Equal(
+                new[] { "SideDataCounter", "TikCounter" },
+                entity.GetProperties().Select(property => property.Name).OrderBy(name => name));
+            Assert.NotEqual(
+                db.Model.FindEntityType(typeof(OdcanitSide))!.GetViewName(),
+                entity.GetTableName());
+        }
+
+        [Fact]
         public async Task InternalTik_NoMatch_ReturnsNotFound()
         {
             await using var fixture = CreateFixture(Row(1, visualId: "9/1984"));
@@ -461,7 +498,7 @@ namespace Odmon.Worker.Tests
                 dateData = date
             };
 
-        private static OdcanitSide Side(int tikCounter, int sideDataCounter)
+        private static OdcanitSideDataLink Side(int tikCounter, int sideDataCounter)
             => new() { TikCounter = tikCounter, SideDataCounter = sideDataCounter };
 
         private static OdcanitClient Client(int sideCounter, string visualId)
@@ -481,7 +518,7 @@ namespace Odmon.Worker.Tests
 
         private static RepositoryFixture CreateSupportingFixture(
             IReadOnlyList<OdcanitUserData>? userData = null,
-            IReadOnlyList<OdcanitSide>? sides = null,
+            IReadOnlyList<OdcanitSideDataLink>? sides = null,
             IReadOnlyList<OdcanitClient>? clients = null)
         {
             var db = CreateTestDb();
@@ -492,7 +529,7 @@ namespace Odmon.Worker.Tests
             }
             for (var index = 0; index < (sides?.Count ?? 0); index++)
             {
-                db.Sides.Add(sides![index]);
+                db.SideDataLinks.Add(sides![index]);
                 db.Entry(sides[index]).Property<int>("SyntheticSideId").CurrentValue = index + 1;
             }
             for (var index = 0; index < (clients?.Count ?? 0); index++)
@@ -512,6 +549,14 @@ namespace Odmon.Worker.Tests
             return new TestOdcanitDbContext(options);
         }
 
+        private static OdcanitDbContext CreateModelDb()
+        {
+            var options = new DbContextOptionsBuilder<OdcanitDbContext>()
+                .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+                .Options;
+            return new OdcanitDbContext(options);
+        }
+
         private sealed class TestOdcanitDbContext(DbContextOptions<OdcanitDbContext> options)
             : OdcanitDbContext(options)
         {
@@ -526,9 +571,9 @@ namespace Odmon.Worker.Tests
                     .Property<int>("SyntheticUserDataId");
                 modelBuilder.Entity<OdcanitUserData>()
                     .HasKey("SyntheticUserDataId");
-                modelBuilder.Entity<OdcanitSide>()
+                modelBuilder.Entity<OdcanitSideDataLink>()
                     .Property<int>("SyntheticSideId");
-                modelBuilder.Entity<OdcanitSide>()
+                modelBuilder.Entity<OdcanitSideDataLink>()
                     .HasKey("SyntheticSideId");
                 modelBuilder.Entity<OdcanitClient>()
                     .Property<int>("SyntheticClientId");

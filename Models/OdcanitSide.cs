@@ -6,7 +6,6 @@ namespace Odmon.Worker.Models
     {
         public string? FullName { get; set; }
         public int TikCounter { get; set; }
-        public int? SideDataCounter { get; set; }
         public string? TikNumber { get; set; }
         public string? ID { get; set; }
         public string? FullAddress { get; set; }
