@@ -45,6 +45,10 @@ namespace Odmon.Worker.Models
         public EmailFilingDiagnostic EmailFilingDiagnostic { get; set; } = null!;
         public int ExistingAuthorityTargetCount { get; set; }
         public int PhantomTargetCount { get; set; }
+        public string AuthorityDecisionClass { get; set; } = string.Empty;
+        public string SourceTemplateKind { get; set; } = string.Empty;
+        public bool PreferredClaimUsed { get; set; }
+        public int DecisiveSupportingEvidenceTypeMask { get; set; }
         public string FinalResolutionClass { get; set; } = string.Empty;
         public int PrimaryEvidenceTypeMask { get; set; }
         public int SupportingEvidenceTypeMask { get; set; }
@@ -63,6 +67,7 @@ namespace Odmon.Worker.Models
         public string? ObserverErrorCategory { get; set; }
         public DateTime CreatedAtUtc { get; set; }
         public List<EmailFilingResolutionTarget> Targets { get; set; } = [];
+        public List<EmailFilingResolutionCandidate> Candidates { get; set; } = [];
     }
 
     public sealed class EmailFilingResolutionTarget
@@ -72,6 +77,21 @@ namespace Odmon.Worker.Models
         public EmailFilingResolutionRun ResolutionRun { get; set; } = null!;
         public int TikCounter { get; set; }
         public string TargetKind { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Privacy-safe primary candidate telemetry. Only Odcanit TikCounter and
+    /// structured enum-like classifications are retained; raw evidence values
+    /// are deliberately excluded.
+    /// </summary>
+    public sealed class EmailFilingResolutionCandidate
+    {
+        public long Id { get; set; }
+        public long ResolutionRunId { get; set; }
+        public EmailFilingResolutionRun ResolutionRun { get; set; } = null!;
+        public int TikCounter { get; set; }
+        public string PrimaryEvidenceType { get; set; } = string.Empty;
+        public string CandidateStage { get; set; } = string.Empty;
     }
 
     public sealed class EmailFilingCandidateDiagnostic
@@ -193,5 +213,39 @@ namespace Odmon.Worker.Models
     {
         public const string ExistingAuthority = "EXISTING_AUTHORITY";
         public const string PhantomWouldFile = "PHANTOM_WOULD_FILE";
+    }
+
+    public static class EmailFilingAuthorityDecisionClasses
+    {
+        public const string AllowedExactTik = "ALLOWED_EXACT_TIK";
+        public const string AllowedDirectUniqueClaim = "ALLOWED_DIRECT_UNIQUE_CLAIM";
+        public const string AllowedDirectClaimVehicle = "ALLOWED_DIRECT_CLAIM_VEHICLE";
+        public const string AllowedExactCourt = "ALLOWED_EXACT_COURT";
+        public const string BlockedResolverError = "BLOCKED_RESOLVER_ERROR";
+        public const string BlockedInsuredDecisive = "BLOCKED_INSURED_DECISIVE";
+        public const string BlockedMultiTik = "BLOCKED_MULTI_TIK";
+        public const string BlockedAmbiguous = "BLOCKED_AMBIGUOUS";
+        public const string BlockedConflict = "BLOCKED_CONFLICT";
+        public const string BlockedMultipleCandidates = "BLOCKED_MULTIPLE_CANDIDATES";
+        public const string BlockedNoSafeAuthority = "BLOCKED_NO_SAFE_AUTHORITY";
+    }
+
+    public static class EmailFilingSourceTemplateKinds
+    {
+        public const string Generic = "GENERIC";
+        public const string DirectInsurance = "DIRECT_INSURANCE";
+    }
+
+    public static class EmailFilingResolutionPrimaryEvidenceTypes
+    {
+        public const string Tik = "TIK";
+        public const string Claim = "CLAIM";
+        public const string Court = "COURT";
+    }
+
+    public static class EmailFilingResolutionCandidateStages
+    {
+        public const string PrimaryCandidate = "PRIMARY_CANDIDATE";
+        public const string AfterSupport = "AFTER_SUPPORT";
     }
 }

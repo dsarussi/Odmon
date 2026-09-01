@@ -36,6 +36,48 @@ namespace Odmon.Worker.Tests
             { [], [1], EmailFilingResolutionAgreements.NoExistingTikAuthority }
         };
 
+        [Theory]
+        [InlineData(true, EmailFilingAuthorityKinds.ExactTik,
+            EmailFilingAuthorityDecisionClasses.AllowedExactTik)]
+        [InlineData(true, EmailFilingAuthorityKinds.DirectUniqueClaim,
+            EmailFilingAuthorityDecisionClasses.AllowedDirectUniqueClaim)]
+        [InlineData(true, EmailFilingAuthorityKinds.DirectClaimVehicle,
+            EmailFilingAuthorityDecisionClasses.AllowedDirectClaimVehicle)]
+        [InlineData(true, EmailFilingAuthorityKinds.ExactCourt,
+            EmailFilingAuthorityDecisionClasses.AllowedExactCourt)]
+        [InlineData(false, EmailFilingAuthorityKinds.BlockedResolverError,
+            EmailFilingAuthorityDecisionClasses.BlockedResolverError)]
+        [InlineData(false, EmailFilingAuthorityKinds.BlockedInsuredDecisive,
+            EmailFilingAuthorityDecisionClasses.BlockedInsuredDecisive)]
+        [InlineData(false, EmailFilingAuthorityKinds.BlockedMultiTik,
+            EmailFilingAuthorityDecisionClasses.BlockedMultiTik)]
+        [InlineData(false, EmailFilingAuthorityKinds.BlockedAmbiguous,
+            EmailFilingAuthorityDecisionClasses.BlockedAmbiguous)]
+        [InlineData(false, EmailFilingAuthorityKinds.BlockedConflict,
+            EmailFilingAuthorityDecisionClasses.BlockedConflict)]
+        [InlineData(false, EmailFilingAuthorityKinds.BlockedMultipleCandidates,
+            EmailFilingAuthorityDecisionClasses.BlockedMultipleCandidates)]
+        [InlineData(false, EmailFilingAuthorityKinds.BlockedNoSafeAuthority,
+            EmailFilingAuthorityDecisionClasses.BlockedNoSafeAuthority)]
+        public void EveryGateClassHasDedicatedStructuredTelemetry(
+            bool allowed,
+            string authorityKind,
+            string expected)
+        {
+            var decision = allowed
+                ? EmailFilingAuthorityDecision.Authorized(authorityKind, 10)
+                : EmailFilingAuthorityDecision.Blocked(authorityKind);
+
+            var run = CreateRun(
+                Evidence(),
+                EmailCaseResolutionSnapshot.Empty,
+                EmailCaseResolutionAnalysis.Empty,
+                [],
+                decision);
+
+            Assert.Equal(expected, run.AuthorityDecisionClass);
+        }
+
         [Fact]
         public void AmbiguousClaimNarrowedToUniqueCreatesObserverTargetOnly()
         {
@@ -54,6 +96,20 @@ namespace Odmon.Worker.Tests
             var target = Assert.Single(run.Targets);
             Assert.Equal(20, target.TikCounter);
             Assert.Equal(EmailFilingResolutionTargetKinds.PhantomWouldFile, target.TargetKind);
+            Assert.Equal(1, run.DecisiveSupportingEvidenceTypeMask);
+            Assert.Equal(3, run.Candidates.Count);
+            Assert.Contains(run.Candidates, candidate =>
+                candidate.TikCounter == 10 &&
+                candidate.PrimaryEvidenceType == EmailFilingResolutionPrimaryEvidenceTypes.Claim &&
+                candidate.CandidateStage == EmailFilingResolutionCandidateStages.PrimaryCandidate);
+            Assert.Contains(run.Candidates, candidate =>
+                candidate.TikCounter == 20 &&
+                candidate.PrimaryEvidenceType == EmailFilingResolutionPrimaryEvidenceTypes.Claim &&
+                candidate.CandidateStage == EmailFilingResolutionCandidateStages.PrimaryCandidate);
+            Assert.Contains(run.Candidates, candidate =>
+                candidate.TikCounter == 20 &&
+                candidate.PrimaryEvidenceType == EmailFilingResolutionPrimaryEvidenceTypes.Claim &&
+                candidate.CandidateStage == EmailFilingResolutionCandidateStages.AfterSupport);
         }
 
         [Fact]
@@ -89,6 +145,49 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public void DirectPreferredClaimAndInsuredDecisiveContextAreStoredWithoutRawValue()
+        {
+            var primary = Result(EmailEvidenceType.ClaimNumber, [10, 20]);
+            var snapshot = new EmailCaseResolutionSnapshot([], [primary], []);
+            var analysis = new EmailCaseResolutionAnalysis(
+                snapshot,
+                [new(primary, [20], PrimaryNarrowingStatus.Unique,
+                    ["NARROWED_BY_INSURED_NAME", "NARROWED_TO_UNIQUE_BY_INSURED_NAME"])],
+                ["CLAIM_AMBIGUOUS", "NARROWED_BY_INSURED_NAME"]);
+            var evidence = Evidence(claim: true) with
+            {
+                SourceTemplate = EmailSourceTemplate.DirectInsurance,
+                DetectedSourceTemplate = EmailSourceTemplate.DirectInsurance,
+                PreferredClaimNumbers = [Value(
+                    EmailEvidenceType.ClaimNumber,
+                    "SYNTHETIC-NOT-PERSISTED")]
+            };
+
+            var run = CreateRun(
+                evidence,
+                snapshot,
+                analysis,
+                [],
+                EmailFilingAuthorityDecision.Blocked(
+                    EmailFilingAuthorityKinds.BlockedInsuredDecisive),
+                preferredClaimUsed: true);
+
+            Assert.Equal(EmailFilingSourceTemplateKinds.DirectInsurance, run.SourceTemplateKind);
+            Assert.True(run.PreferredClaimUsed);
+            Assert.Equal(8, run.DecisiveSupportingEvidenceTypeMask);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.BlockedInsuredDecisive,
+                run.AuthorityDecisionClass);
+            Assert.DoesNotContain("SYNTHETIC-NOT-PERSISTED", string.Join(
+                '|',
+                run.Candidates.SelectMany(candidate => new[]
+                {
+                    candidate.PrimaryEvidenceType,
+                    candidate.CandidateStage
+                })));
+        }
+
+        [Fact]
         public void MultipleExplicitTikResultsProduceMultipleObserverTargets()
         {
             var first = Result(EmailEvidenceType.InternalTikNumber, [10], "1/1");
@@ -113,6 +212,9 @@ namespace Odmon.Worker.Tests
                 null,
                 EmailCaseResolutionSnapshot.Empty,
                 EmailCaseResolutionAnalysis.Empty,
+                EmailFilingAuthorityDecision.Blocked(
+                    EmailFilingAuthorityKinds.BlockedResolverError),
+                preferredClaimUsed: false,
                 [10],
                 new(1, 2, 3, 6),
                 errorCategory,
@@ -122,6 +224,9 @@ namespace Odmon.Worker.Tests
             Assert.Equal(errorCategory, run.ObserverErrorCategory);
             Assert.Equal(0, run.PhantomTargetCount);
             Assert.Equal(EmailFilingResolutionAgreements.PhantomUnresolved, run.AgreementWithExistingAuthority);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.BlockedResolverError,
+                run.AuthorityDecisionClass);
             Assert.DoesNotContain(run.Targets, target =>
                 target.TargetKind == EmailFilingResolutionTargetKinds.PhantomWouldFile);
         }
@@ -132,11 +237,14 @@ namespace Odmon.Worker.Tests
             using var db = CreateDb();
             var runType = db.Model.FindEntityType(typeof(EmailFilingResolutionRun));
             var targetType = db.Model.FindEntityType(typeof(EmailFilingResolutionTarget));
+            var candidateType = db.Model.FindEntityType(typeof(EmailFilingResolutionCandidate));
             Assert.NotNull(runType);
             Assert.NotNull(targetType);
+            Assert.NotNull(candidateType);
 
             var propertyNames = runType!.GetProperties()
                 .Concat(targetType!.GetProperties())
+                .Concat(candidateType!.GetProperties())
                 .Select(property => property.Name)
                 .ToArray();
             var forbiddenFragments = new[]
@@ -155,17 +263,32 @@ namespace Odmon.Worker.Tests
                     [nameof(EmailFilingResolutionTarget.ResolutionRunId),
                      nameof(EmailFilingResolutionTarget.TikCounter),
                      nameof(EmailFilingResolutionTarget.TargetKind)]));
+            Assert.Contains(candidateType.GetIndexes(), index => index.IsUnique &&
+                index.Properties.Select(property => property.Name).SequenceEqual(
+                    [nameof(EmailFilingResolutionCandidate.ResolutionRunId),
+                     nameof(EmailFilingResolutionCandidate.TikCounter),
+                     nameof(EmailFilingResolutionCandidate.PrimaryEvidenceType),
+                     nameof(EmailFilingResolutionCandidate.CandidateStage)]));
+            Assert.DoesNotContain(candidateType.GetProperties(), property =>
+                property.ClrType == typeof(string) &&
+                property.Name is not nameof(EmailFilingResolutionCandidate.PrimaryEvidenceType) and
+                    not nameof(EmailFilingResolutionCandidate.CandidateStage));
         }
 
         private static EmailFilingResolutionRun CreateRun(
             EmailCaseEvidence evidence,
             EmailCaseResolutionSnapshot snapshot,
             EmailCaseResolutionAnalysis analysis,
-            IEnumerable<int> existing)
+            IEnumerable<int> existing,
+            EmailFilingAuthorityDecision? authorityDecision = null,
+            bool preferredClaimUsed = false)
             => EmailFilingResolutionTelemetry.CreateRun(
                 evidence,
                 snapshot,
                 analysis,
+                authorityDecision ?? EmailFilingAuthorityDecision.Blocked(
+                    EmailFilingAuthorityKinds.BlockedNoSafeAuthority),
+                preferredClaimUsed,
                 existing,
                 new(1, 2, 3, 6),
                 null,

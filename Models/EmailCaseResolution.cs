@@ -15,6 +15,14 @@ namespace Odmon.Worker.Models
         Conflict
     }
 
+    public sealed record SupportingEvidenceFilterResult(
+        IReadOnlySet<int> ComparableTikCounters,
+        IReadOnlySet<int> MatchingTikCounters)
+    {
+        public static SupportingEvidenceFilterResult Empty { get; } =
+            new(new HashSet<int>(), new HashSet<int>());
+    }
+
     /// <summary>
     /// Transient set-valued result for one normalized evidence value. The value
     /// itself may contain sensitive operational data and is not diagnostic data.

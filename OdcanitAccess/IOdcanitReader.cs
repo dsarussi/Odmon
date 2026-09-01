@@ -11,6 +11,25 @@ namespace Odmon.Worker.OdcanitAccess
     {
         Task<List<OdcanitCase>> GetCasesCreatedOnDateAsync(DateTime date, CancellationToken ct);
         Task<List<OdcanitCase>> GetCasesByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct);
+        async Task<IReadOnlyDictionary<int, string>> ResolveTikCountersToNumbersAsync(
+            IEnumerable<int> tikCounters,
+            CancellationToken ct)
+        {
+            var requested = tikCounters.Where(value => value > 0).Distinct().ToHashSet();
+            var cases = await GetCasesByTikCountersAsync(requested, ct);
+            return cases
+                .Where(item => requested.Contains(item.TikCounter) && !string.IsNullOrWhiteSpace(item.TikNumber))
+                .GroupBy(item => item.TikCounter)
+                .Select(group => new
+                {
+                    TikCounter = group.Key,
+                    TikNumbers = group.Select(item => item.TikNumber!.Trim())
+                        .Distinct(StringComparer.Ordinal)
+                        .ToArray()
+                })
+                .Where(item => item.TikNumbers.Length == 1)
+                .ToDictionary(item => item.TikCounter, item => item.TikNumbers[0]);
+        }
         /// <summary>Fetches all vwExportToOuterSystems_YomanData rows for the given TikCounters (no date/status filter).</summary>
         Task<List<OdcanitDiaryEvent>> GetDiaryEventsByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct);
         /// <summary>Resolves TikNumber strings (e.g., "9/900003") to TikCounter integers. Returns dictionary of resolved mappings.</summary>

@@ -215,6 +215,111 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public void DirectInsuranceTemplateSelectsOnlyExplicitClaimFileNumberAsPreferred()
+        {
+            var evidence = Extract(
+                null,
+                "פרטי צד ג : תביעה - SYNTHETIC-X\r\n" +
+                "מספר רכב - 12-345-67\r\n" +
+                "תיק תביעה מספר : SYNTHETIC-Y\r\n" +
+                "תאריך אירוע : 30/08/2026");
+
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.SourceTemplate);
+            var preferred = Assert.Single(evidence.PreferredClaimNumbers);
+            Assert.Equal("SYNTHETIC-Y", preferred.NormalizedValue);
+            Assert.Equal(
+                ["SYNTHETIC-Y"],
+                evidence.ClaimNumbers.Select(value => value.NormalizedValue).Distinct());
+        }
+
+        [Fact]
+        public void SimilarGenericContentWithoutAllStableMarkersIsNotDirectInsurance()
+        {
+            var evidence = Extract(
+                null,
+                "תיק תביעה מספר : SYNTHETIC-Y\r\nמספר רכב - 12-345-67");
+
+            Assert.Equal(EmailSourceTemplate.Generic, evidence.SourceTemplate);
+            Assert.Empty(evidence.PreferredClaimNumbers);
+        }
+
+        [Fact]
+        public void DirectSenderDomainIsDetectedWithoutChangingStrictAuthorityTemplate()
+        {
+            var evidence = Extract(
+                "synthetic correspondence",
+                "no structured template",
+                "unit.test@5555555.co.il");
+
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.DetectedSourceTemplate);
+            Assert.Equal(EmailSourceTemplate.Generic, evidence.SourceTemplate);
+            Assert.Empty(evidence.PreferredClaimNumbers);
+        }
+
+        [Fact]
+        public void ForwardedOriginalDirectSenderIsDetectedWhenOuterSenderIsInternal()
+        {
+            var evidence = Extract(
+                "FW: synthetic correspondence",
+                "From: unit.test@5555555.co.il\r\nSent: synthetic header",
+                "internal@odmon.example");
+
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.DetectedSourceTemplate);
+            Assert.Equal(EmailSourceTemplate.Generic, evidence.SourceTemplate);
+        }
+
+        [Fact]
+        public void DirectDisplayMarkerRequiresSupportingStructuredIndicators()
+        {
+            var evidence = Extract(
+                null,
+                "תיק תביעה מספר: SYNTHETIC-CLAIM\r\nמספר רכב: 12-345-67",
+                "Synthetic Employee - ביטוח ישיר");
+
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.DetectedSourceTemplate);
+            Assert.Equal(EmailSourceTemplate.Generic, evidence.SourceTemplate);
+        }
+
+        [Fact]
+        public void KnownWebAssetWithStructuredMarkersIsDetected()
+        {
+            const string body =
+                "תיק תביעה מספר: SYNTHETIC-CLAIM\r\n" +
+                "מספר רכב: 12-345-67\r\n" +
+                "תאריך אירוע: 30/08/2026";
+            var evidence = Extract(
+                null,
+                body,
+                "internal@odmon.example",
+                $"<html><img src=\"https://www.555.co.il/assets/direct-logo.png\">{body}</html>");
+
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.DetectedSourceTemplate);
+            Assert.Equal(EmailSourceTemplate.Generic, evidence.SourceTemplate);
+        }
+
+        [Fact]
+        public void IncidentalDirectWebLinkAloneDoesNotClassifyGenericEmail()
+        {
+            var evidence = Extract(
+                "synthetic generic message",
+                "See https://www.555.co.il/information for public information",
+                "sender@odmon.example");
+
+            Assert.Equal(EmailSourceTemplate.Generic, evidence.DetectedSourceTemplate);
+        }
+
+        [Fact]
+        public void CasualDirectInsuranceMentionAloneDoesNotClassifyGenericEmail()
+        {
+            var evidence = Extract(
+                "synthetic generic message",
+                "הודעה כללית המזכירה ביטוח ישיר ללא תבנית",
+                "sender@odmon.example");
+
+            Assert.Equal(EmailSourceTemplate.Generic, evidence.DetectedSourceTemplate);
+        }
+
+        [Fact]
         public void ExtractsMultipleValuesOfSameType()
         {
             var evidence = Extract(
@@ -278,8 +383,17 @@ namespace Odmon.Worker.Tests
             Assert.Empty(evidence.CourtCaseNumbers);
         }
 
-        private EmailCaseEvidence Extract(string? subject, string? body)
-            => _extractor.Extract(subject, body, maximumCandidates: 100);
+        private EmailCaseEvidence Extract(
+            string? subject,
+            string? body,
+            string? senderIdentity = null,
+            string? rawBody = null)
+            => _extractor.Extract(
+                subject,
+                body,
+                maximumCandidates: 100,
+                senderIdentity,
+                rawBody);
 
         private static void AssertEvidence(
             EmailEvidenceValue actual,

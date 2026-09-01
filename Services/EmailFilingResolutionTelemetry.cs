@@ -34,6 +34,8 @@ namespace Odmon.Worker.Services
             EmailCaseEvidence? evidence,
             EmailCaseResolutionSnapshot snapshot,
             EmailCaseResolutionAnalysis analysis,
+            EmailFilingAuthorityDecision authorityDecision,
+            bool preferredClaimUsed,
             IEnumerable<int> existingAuthorityTikCounters,
             EmailFilingResolutionTimings timings,
             string? observerErrorCategory,
@@ -49,6 +51,12 @@ namespace Odmon.Worker.Services
             {
                 ExistingAuthorityTargetCount = existing.Count,
                 PhantomTargetCount = phantom.Count,
+                AuthorityDecisionClass = ClassifyAuthorityDecision(authorityDecision),
+                SourceTemplateKind = evidence?.DetectedSourceTemplate == EmailSourceTemplate.DirectInsurance
+                    ? EmailFilingSourceTemplateKinds.DirectInsurance
+                    : EmailFilingSourceTemplateKinds.Generic,
+                PreferredClaimUsed = preferredClaimUsed,
+                DecisiveSupportingEvidenceTypeMask = (int)GetDecisiveSupportingMask(analysis),
                 FinalResolutionClass = ClassifyFinal(evidence, snapshot, analysis, phantom, observerErrorCategory),
                 PrimaryEvidenceTypeMask = (int)GetPrimaryMask(evidence),
                 SupportingEvidenceTypeMask = (int)GetSupportingMask(evidence),
@@ -81,8 +89,38 @@ namespace Odmon.Worker.Services
                 TikCounter = counter,
                 TargetKind = EmailFilingResolutionTargetKinds.PhantomWouldFile
             }));
+            AddCandidateTelemetry(run, snapshot, analysis);
             return run;
         }
+
+        internal static string ClassifyAuthorityDecision(EmailFilingAuthorityDecision decision)
+            => decision.AuthorityKind switch
+            {
+                EmailFilingAuthorityKinds.ExactTik =>
+                    EmailFilingAuthorityDecisionClasses.AllowedExactTik,
+                EmailFilingAuthorityKinds.DirectUniqueClaim =>
+                    EmailFilingAuthorityDecisionClasses.AllowedDirectUniqueClaim,
+                EmailFilingAuthorityKinds.DirectClaimVehicle =>
+                    EmailFilingAuthorityDecisionClasses.AllowedDirectClaimVehicle,
+                EmailFilingAuthorityKinds.ExactCourt =>
+                    EmailFilingAuthorityDecisionClasses.AllowedExactCourt,
+                EmailFilingAuthorityKinds.BlockedResolverError =>
+                    EmailFilingAuthorityDecisionClasses.BlockedResolverError,
+                EmailFilingAuthorityKinds.BlockedInsuredDecisive =>
+                    EmailFilingAuthorityDecisionClasses.BlockedInsuredDecisive,
+                EmailFilingAuthorityKinds.BlockedMultiTik =>
+                    EmailFilingAuthorityDecisionClasses.BlockedMultiTik,
+                EmailFilingAuthorityKinds.BlockedAmbiguous =>
+                    EmailFilingAuthorityDecisionClasses.BlockedAmbiguous,
+                EmailFilingAuthorityKinds.BlockedConflict =>
+                    EmailFilingAuthorityDecisionClasses.BlockedConflict,
+                EmailFilingAuthorityKinds.BlockedMultipleCandidates =>
+                    EmailFilingAuthorityDecisionClasses.BlockedMultipleCandidates,
+                EmailFilingAuthorityKinds.BlockedNoSafeAuthority =>
+                    EmailFilingAuthorityDecisionClasses.BlockedNoSafeAuthority,
+                _ => throw new InvalidOperationException(
+                    "EmailFiling authority decision has no durable telemetry mapping.")
+            };
 
         internal static string ClassifyAgreement(
             IReadOnlySet<int> existingAuthority,
@@ -203,5 +241,72 @@ namespace Odmon.Worker.Services
             if (evidence?.DriverPhones.Count > 0) mask |= PhantomSupportingEvidenceMask.DriverPhone;
             return mask;
         }
+
+        private static PhantomSupportingEvidenceMask GetDecisiveSupportingMask(
+            EmailCaseResolutionAnalysis analysis)
+        {
+            var mask = PhantomSupportingEvidenceMask.None;
+            var classifications = analysis.PrimaryResults
+                .SelectMany(result => result.Classifications)
+                .Concat(analysis.ObserverClassifications)
+                .ToHashSet(StringComparer.Ordinal);
+            if (classifications.Contains("NARROWED_BY_VEHICLE"))
+                mask |= PhantomSupportingEvidenceMask.VehicleNumber;
+            if (classifications.Contains("NARROWED_BY_EVENT_DATE"))
+                mask |= PhantomSupportingEvidenceMask.EventDate;
+            if (classifications.Contains("NARROWED_BY_CLIENT"))
+                mask |= PhantomSupportingEvidenceMask.ClientHint;
+            if (classifications.Contains("NARROWED_BY_INSURED_NAME"))
+                mask |= PhantomSupportingEvidenceMask.InsuredName;
+            if (classifications.Contains("NARROWED_BY_DRIVER_PHONE"))
+                mask |= PhantomSupportingEvidenceMask.DriverPhone;
+            return mask;
+        }
+
+        private static void AddCandidateTelemetry(
+            EmailFilingResolutionRun run,
+            EmailCaseResolutionSnapshot snapshot,
+            EmailCaseResolutionAnalysis analysis)
+        {
+            var candidates = snapshot.AllResults()
+                .SelectMany(result => result.TikCounters.Select(counter => new
+                {
+                    Counter = counter,
+                    EvidenceType = GetPrimaryEvidenceType(result.EvidenceType),
+                    Stage = EmailFilingResolutionCandidateStages.PrimaryCandidate
+                }))
+                .Concat(analysis.PrimaryResults.SelectMany(result =>
+                    result.RemainingTikCounters.Select(counter => new
+                    {
+                        Counter = counter,
+                        EvidenceType = GetPrimaryEvidenceType(result.PrimaryResult.EvidenceType),
+                        Stage = EmailFilingResolutionCandidateStages.AfterSupport
+                    })))
+                .Distinct()
+                .OrderBy(value => value.EvidenceType, StringComparer.Ordinal)
+                .ThenBy(value => value.Stage, StringComparer.Ordinal)
+                .ThenBy(value => value.Counter);
+
+            run.Candidates.AddRange(candidates.Select(value =>
+                new EmailFilingResolutionCandidate
+                {
+                    TikCounter = value.Counter,
+                    PrimaryEvidenceType = value.EvidenceType,
+                    CandidateStage = value.Stage
+                }));
+        }
+
+        private static string GetPrimaryEvidenceType(EmailEvidenceType evidenceType)
+            => evidenceType switch
+            {
+                EmailEvidenceType.InternalTikNumber =>
+                    EmailFilingResolutionPrimaryEvidenceTypes.Tik,
+                EmailEvidenceType.ClaimNumber =>
+                    EmailFilingResolutionPrimaryEvidenceTypes.Claim,
+                EmailEvidenceType.CourtCaseNumber =>
+                    EmailFilingResolutionPrimaryEvidenceTypes.Court,
+                _ => throw new InvalidOperationException(
+                    "Supporting evidence cannot be stored as a primary candidate.")
+            };
     }
 }

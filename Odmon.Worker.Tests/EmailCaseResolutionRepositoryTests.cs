@@ -303,7 +303,8 @@ namespace Odmon.Worker.Tests
                 ["22-222-22"],
                 CancellationToken.None);
 
-            Assert.Equal([200], matches.OrderBy(value => value));
+            Assert.Equal([100, 200], matches.ComparableTikCounters.OrderBy(value => value));
+            Assert.Equal([200], matches.MatchingTikCounters.OrderBy(value => value));
         }
 
         [Theory]
@@ -323,7 +324,23 @@ namespace Odmon.Worker.Tests
                 [input],
                 CancellationToken.None);
 
-            Assert.Equal([100], matches);
+            Assert.Equal([100], matches.ComparableTikCounters);
+            Assert.Equal([100], matches.MatchingTikCounters);
+        }
+
+        [Fact]
+        public async Task NullEventDateIsUnknownRatherThanComparableMismatch()
+        {
+            await using var fixture = CreateSupportingFixture(
+                userData: [UserData(100, "תאריך אירוע")]);
+
+            var result = await fixture.Repository.FilterCandidatesByEventDateAsync(
+                [100],
+                ["2026-08-30"],
+                CancellationToken.None);
+
+            Assert.Empty(result.ComparableTikCounters);
+            Assert.Empty(result.MatchingTikCounters);
         }
 
         [Fact]
@@ -341,7 +358,8 @@ namespace Odmon.Worker.Tests
                 ["Synthetic Insured"],
                 CancellationToken.None);
 
-            Assert.Equal([100], matches);
+            Assert.Equal([100, 200], matches.ComparableTikCounters.OrderBy(value => value));
+            Assert.Equal([100], matches.MatchingTikCounters);
         }
 
         [Fact]
@@ -359,7 +377,8 @@ namespace Odmon.Worker.Tests
                 ["0501234567"],
                 CancellationToken.None);
 
-            Assert.Equal([100], matches);
+            Assert.Equal([100, 200], matches.ComparableTikCounters.OrderBy(value => value));
+            Assert.Equal([100], matches.MatchingTikCounters);
         }
 
         [Fact]
@@ -384,7 +403,8 @@ namespace Odmon.Worker.Tests
                 ["CLIENT-2"],
                 CancellationToken.None);
 
-            Assert.Equal([200], matches);
+            Assert.Equal([100, 200], matches.ComparableTikCounters.OrderBy(value => value));
+            Assert.Equal([200], matches.MatchingTikCounters);
         }
 
         [Fact]
@@ -398,7 +418,8 @@ namespace Odmon.Worker.Tests
                 ["11-111-11"],
                 CancellationToken.None);
 
-            Assert.Empty(matches);
+            Assert.Empty(matches.ComparableTikCounters);
+            Assert.Empty(matches.MatchingTikCounters);
         }
 
         [Fact]
@@ -615,38 +636,38 @@ namespace Odmon.Worker.Tests
                 CancellationToken cancellationToken)
                 => Task.FromResult<IReadOnlyList<EvidenceResolutionResult>>([]);
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByVehicleAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByVehicleAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => EmptySet();
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByEventDateAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByEventDateAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => EmptySet();
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByClientAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByClientAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => EmptySet();
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByInsuredNameAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByInsuredNameAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => EmptySet();
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByDriverPhoneAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByDriverPhoneAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => EmptySet();
 
-            private static Task<IReadOnlySet<int>> EmptySet()
-                => Task.FromResult<IReadOnlySet<int>>(new HashSet<int>());
+            private static Task<SupportingEvidenceFilterResult> EmptySet()
+                => Task.FromResult(SupportingEvidenceFilterResult.Empty);
         }
     }
 }

@@ -8,7 +8,9 @@ namespace Odmon.Worker.Services
         EmailCaseEvidence Extract(
             string? subject,
             string? normalizedBody,
-            int maximumCandidates);
+            int maximumCandidates,
+            string? senderIdentity = null,
+            string? rawBody = null);
     }
 
     /// <summary>
@@ -27,6 +29,32 @@ namespace Odmon.Worker.Services
 
         private static readonly Regex ClaimRegex = CreateRegex(
             @"(?:(?:מספר|מס\s*['׳’])\s*תביעה|תיק\s*תביעה\s*(?:מספר|מס\s*['׳’])|זיהוי\s*נוסף)\s*[.:：#\-–—]?\s*(?<value>[\p{L}\p{N}][\p{L}\p{N}._/\-]{0,63})",
+            RegexOptions.IgnoreCase);
+
+        private static readonly Regex DirectInsurancePreferredClaimRegex = CreateRegex(
+            @"תיק\s*תביעה\s*(?:מספר|מס\s*['׳’])\s*[.:：#\-–—]?\s*(?<value>[\p{L}\p{N}][\p{L}\p{N}._/\-]{0,63})",
+            RegexOptions.IgnoreCase);
+
+        private static readonly Regex DirectInsuranceThirdPartyMarkerRegex = CreateRegex(
+            @"פרטי\s*צד\s*ג",
+            RegexOptions.IgnoreCase);
+        private static readonly Regex DirectInsuranceVehicleMarkerRegex = CreateRegex(
+            @"(?:מספר|מס\s*['׳’])\s*(?:רכב|רישוי)",
+            RegexOptions.IgnoreCase);
+        private static readonly Regex DirectInsuranceEventDateMarkerRegex = CreateRegex(
+            @"תאריך\s*(?:ה)?אירוע",
+            RegexOptions.IgnoreCase);
+        private static readonly Regex DirectInsuranceSenderDomainRegex = CreateRegex(
+            @"(?:^|[<\s])[^@\s<>]+@5555555\.co\.il(?:$|[>\s])",
+            RegexOptions.IgnoreCase);
+        private static readonly Regex DirectInsuranceForwardedFromRegex = CreateRegex(
+            @"(?:^|[\r\n])\s*(?:from|מאת)\s*:\s*[^\r\n]{0,256}@5555555\.co\.il\b",
+            RegexOptions.IgnoreCase | RegexOptions.Multiline);
+        private static readonly Regex DirectInsuranceDisplayNameRegex = CreateRegex(
+            @"ביטוח\s*ישיר",
+            RegexOptions.IgnoreCase);
+        private static readonly Regex DirectInsuranceWebAssetRegex = CreateRegex(
+            @"https?://(?:www\.)?555\.co\.il(?:[/\s""'<>]|$)",
             RegexOptions.IgnoreCase);
 
         private static readonly Regex CourtRegex = CreateRegex(
@@ -58,7 +86,9 @@ namespace Odmon.Worker.Services
         public EmailCaseEvidence Extract(
             string? subject,
             string? normalizedBody,
-            int maximumCandidates)
+            int maximumCandidates,
+            string? senderIdentity = null,
+            string? rawBody = null)
         {
             if (maximumCandidates <= 0)
                 throw new ArgumentOutOfRangeException(nameof(maximumCandidates));
@@ -77,6 +107,39 @@ namespace Odmon.Worker.Services
                 })
                 .ToArray();
 
+            var sourceTemplate = IsDirectInsuranceTemplate(subject, normalizedBody)
+                ? EmailSourceTemplate.DirectInsurance
+                : EmailSourceTemplate.Generic;
+            var detectedSourceTemplate = IsDirectInsuranceSource(
+                    senderIdentity,
+                    subject,
+                    normalizedBody,
+                    rawBody)
+                ? EmailSourceTemplate.DirectInsurance
+                : EmailSourceTemplate.Generic;
+            var preferredClaims = new List<EmailEvidenceValue>();
+            if (sourceTemplate == EmailSourceTemplate.DirectInsurance)
+            {
+                AddMatches(
+                    DirectInsurancePreferredClaimRegex,
+                    subject ?? string.Empty,
+                    EmailEvidenceType.ClaimNumber,
+                    EmailEvidenceSource.Subject,
+                    EmailEvidenceExtractionKind.ExplicitLabel,
+                    static value => NormalizeIdentifier(value),
+                    preferredClaims,
+                    maximumCandidates);
+                AddMatches(
+                    DirectInsurancePreferredClaimRegex,
+                    normalizedBody ?? string.Empty,
+                    EmailEvidenceType.ClaimNumber,
+                    EmailEvidenceSource.Body,
+                    EmailEvidenceExtractionKind.ExplicitLabel,
+                    static value => NormalizeIdentifier(value),
+                    preferredClaims,
+                    maximumCandidates);
+            }
+
             return new EmailCaseEvidence(
                 OfType(distinct, EmailEvidenceType.InternalTikNumber),
                 OfType(distinct, EmailEvidenceType.ClaimNumber),
@@ -85,7 +148,59 @@ namespace Odmon.Worker.Services
                 OfType(distinct, EmailEvidenceType.EventDate),
                 [], // Client extraction is intentionally deferred until its text contract is verified.
                 OfType(distinct, EmailEvidenceType.InsuredName),
-                OfType(distinct, EmailEvidenceType.DriverPhone));
+                OfType(distinct, EmailEvidenceType.DriverPhone))
+            {
+                SourceTemplate = sourceTemplate,
+                DetectedSourceTemplate = detectedSourceTemplate,
+                PreferredClaimNumbers = preferredClaims
+                    .DistinctBy(value => new
+                    {
+                        value.NormalizedValue,
+                        value.Source,
+                        value.ExtractionKind
+                    })
+                    .ToArray()
+            };
+        }
+
+        private static bool IsDirectInsuranceTemplate(string? subject, string? normalizedBody)
+        {
+            var content = string.Concat(subject, "\n", normalizedBody);
+            return DirectInsuranceThirdPartyMarkerRegex.IsMatch(content) &&
+                   DirectInsurancePreferredClaimRegex.IsMatch(content) &&
+                   DirectInsuranceVehicleMarkerRegex.IsMatch(content) &&
+                   DirectInsuranceEventDateMarkerRegex.IsMatch(content);
+        }
+
+        private static bool IsDirectInsuranceSource(
+            string? senderIdentity,
+            string? subject,
+            string? normalizedBody,
+            string? rawBody)
+        {
+            var normalizedContent = string.Concat(subject, "\n", normalizedBody);
+            var templateContent = string.Concat(normalizedContent, "\n", rawBody);
+            var hasPreferredClaim = DirectInsurancePreferredClaimRegex.IsMatch(normalizedContent);
+            var hasVehicle = DirectInsuranceVehicleMarkerRegex.IsMatch(normalizedContent);
+            var hasEventDate = DirectInsuranceEventDateMarkerRegex.IsMatch(normalizedContent);
+            var hasThirdPartyBlock = DirectInsuranceThirdPartyMarkerRegex.IsMatch(normalizedContent);
+            var hasStructuredBlock = hasThirdPartyBlock &&
+                                     hasPreferredClaim &&
+                                     hasVehicle &&
+                                     hasEventDate;
+            var hasStrongSender = DirectInsuranceSenderDomainRegex.IsMatch(
+                senderIdentity ?? string.Empty);
+            var hasForwardedSender = DirectInsuranceForwardedFromRegex.IsMatch(
+                normalizedBody ?? string.Empty);
+            var hasDisplayMarker = DirectInsuranceDisplayNameRegex.IsMatch(
+                senderIdentity ?? string.Empty);
+            var hasWebAsset = DirectInsuranceWebAssetRegex.IsMatch(templateContent);
+
+            return hasStrongSender ||
+                   hasForwardedSender ||
+                   hasStructuredBlock ||
+                   (hasDisplayMarker && hasPreferredClaim && hasVehicle) ||
+                   (hasWebAsset && hasPreferredClaim && hasVehicle && hasEventDate);
         }
 
         private static void ExtractFromSource(

@@ -18,27 +18,27 @@ namespace Odmon.Worker.OdcanitAccess
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken);
 
-        Task<IReadOnlySet<int>> FilterCandidatesByVehicleAsync(
+        Task<SupportingEvidenceFilterResult> FilterCandidatesByVehicleAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken);
 
-        Task<IReadOnlySet<int>> FilterCandidatesByEventDateAsync(
+        Task<SupportingEvidenceFilterResult> FilterCandidatesByEventDateAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken);
 
-        Task<IReadOnlySet<int>> FilterCandidatesByClientAsync(
+        Task<SupportingEvidenceFilterResult> FilterCandidatesByClientAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken);
 
-        Task<IReadOnlySet<int>> FilterCandidatesByInsuredNameAsync(
+        Task<SupportingEvidenceFilterResult> FilterCandidatesByInsuredNameAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken);
 
-        Task<IReadOnlySet<int>> FilterCandidatesByDriverPhoneAsync(
+        Task<SupportingEvidenceFilterResult> FilterCandidatesByDriverPhoneAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken);
@@ -88,7 +88,7 @@ namespace Odmon.Worker.OdcanitAccess
                 HozlapResolutionField.CourtCaseNumber,
                 cancellationToken);
 
-        public Task<IReadOnlySet<int>> FilterCandidatesByVehicleAsync(
+        public Task<SupportingEvidenceFilterResult> FilterCandidatesByVehicleAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken)
@@ -102,7 +102,7 @@ namespace Odmon.Worker.OdcanitAccess
                 EmailEvidenceNormalization.VehicleNumber,
                 cancellationToken);
 
-        public Task<IReadOnlySet<int>> FilterCandidatesByEventDateAsync(
+        public Task<SupportingEvidenceFilterResult> FilterCandidatesByEventDateAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken)
@@ -118,7 +118,7 @@ namespace Odmon.Worker.OdcanitAccess
                 EmailEvidenceNormalization.EventDate,
                 cancellationToken);
 
-        public async Task<IReadOnlySet<int>> FilterCandidatesByClientAsync(
+        public async Task<SupportingEvidenceFilterResult> FilterCandidatesByClientAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken)
@@ -128,7 +128,7 @@ namespace Odmon.Worker.OdcanitAccess
                 normalizedValues,
                 static value => EmailEvidenceNormalization.Text(value));
             if (candidates.Count == 0 || values.Count == 0)
-                return new HashSet<int>();
+                return SupportingEvidenceFilterResult.Empty;
 
             // The join is verified, but no business-client SideType contract is
             // yet proven. This exact VisualID capability remains unused while
@@ -147,7 +147,12 @@ namespace Odmon.Worker.OdcanitAccess
                         client.VisualID))
                 .ToListAsync(cancellationToken);
 
-            return rows
+            var comparable = rows
+                .Where(row => EmailEvidenceNormalization.Text(row.VisualId) != null)
+                .Select(row => row.TikCounter)
+                .Where(candidates.Contains)
+                .ToHashSet();
+            var matching = rows
                 .Where(row =>
                 {
                     var normalized = EmailEvidenceNormalization.Text(row.VisualId);
@@ -156,9 +161,10 @@ namespace Odmon.Worker.OdcanitAccess
                 .Select(row => row.TikCounter)
                 .Where(candidates.Contains)
                 .ToHashSet();
+            return new SupportingEvidenceFilterResult(comparable, matching);
         }
 
-        public Task<IReadOnlySet<int>> FilterCandidatesByInsuredNameAsync(
+        public Task<SupportingEvidenceFilterResult> FilterCandidatesByInsuredNameAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken)
@@ -172,7 +178,7 @@ namespace Odmon.Worker.OdcanitAccess
                 static value => EmailEvidenceNormalization.Text(value),
                 cancellationToken);
 
-        public Task<IReadOnlySet<int>> FilterCandidatesByDriverPhoneAsync(
+        public Task<SupportingEvidenceFilterResult> FilterCandidatesByDriverPhoneAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             CancellationToken cancellationToken)
@@ -242,7 +248,7 @@ namespace Odmon.Worker.OdcanitAccess
                 .Distinct(StringComparer.Ordinal)
                 .ToArray() ?? [];
 
-        private async Task<IReadOnlySet<int>> FilterUserDataCandidatesAsync(
+        private async Task<SupportingEvidenceFilterResult> FilterUserDataCandidatesAsync(
             IEnumerable<int> candidateTikCounters,
             IEnumerable<string> normalizedValues,
             IReadOnlySet<string> fieldNames,
@@ -253,7 +259,7 @@ namespace Odmon.Worker.OdcanitAccess
             var candidates = NormalizeCandidateCounters(candidateTikCounters);
             var values = NormalizeSupportingValues(normalizedValues, normalizeInputValue);
             if (candidates.Count == 0 || values.Count == 0)
-                return new HashSet<int>();
+                return SupportingEvidenceFilterResult.Empty;
 
             // Candidate TikCounters are the only SQL authority boundary here.
             // Field/page normalization stays in memory over this bounded batch.
@@ -268,13 +274,20 @@ namespace Odmon.Worker.OdcanitAccess
                     row.dateData))
                 .ToListAsync(cancellationToken);
 
-            return rows
+            var relevantRows = rows
                 .Where(row =>
                     string.Equals(
                         NormalizePageName(row.PageName),
                         LegalUserDataPageName,
                         StringComparison.Ordinal) &&
                     fieldNames.Contains(NormalizeFieldName(row.FieldName) ?? string.Empty))
+                .ToArray();
+            var comparable = relevantRows
+                .Where(row => normalizeRowValue(row) != null)
+                .Select(row => row.TikCounter)
+                .Where(candidates.Contains)
+                .ToHashSet();
+            var matching = relevantRows
                 .Where(row =>
                 {
                     var normalized = normalizeRowValue(row);
@@ -283,6 +296,7 @@ namespace Odmon.Worker.OdcanitAccess
                 .Select(row => row.TikCounter)
                 .Where(candidates.Contains)
                 .ToHashSet();
+            return new SupportingEvidenceFilterResult(comparable, matching);
         }
 
         private static IReadOnlySet<string> NormalizeSupportingValues(

@@ -117,46 +117,67 @@ namespace Odmon.Worker.Services
             var primaryResolutionDurationMs = 0L;
             var supportingNarrowingDurationMs = 0L;
             var totalPhantomDurationMs = 0L;
-            if (_settings.ResolutionPhantomEnabled)
+            EmailCaseEvidence? authorityEvidence = null;
+            var phantomStarted = Stopwatch.GetTimestamp();
+            try
             {
-                var phantomStarted = Stopwatch.GetTimestamp();
-                try
-                {
-                    var stageStarted = Stopwatch.GetTimestamp();
-                    canonicalEvidence = _evidenceExtractor.Extract(
-                        message.Subject,
-                        normalizedBody,
-                        _settings.MaxIdentifierCandidates);
-                    extractionDurationMs = ElapsedMilliseconds(stageStarted);
+                var stageStarted = Stopwatch.GetTimestamp();
+                canonicalEvidence = _evidenceExtractor.Extract(
+                    message.Subject,
+                    normalizedBody,
+                    _settings.MaxIdentifierCandidates,
+                    message.Sender,
+                    message.Body);
+                extractionDurationMs = ElapsedMilliseconds(stageStarted);
 
+                if (canonicalEvidence.SourceTemplate == EmailSourceTemplate.DirectInsurance &&
+                    canonicalEvidence.PreferredClaimNumbers.Count > 0)
+                {
+                    authorityEvidence = CreateDirectInsuranceResolutionEvidence(canonicalEvidence);
                     stageStarted = Stopwatch.GetTimestamp();
                     primarySnapshot = await _primaryResolver.ResolveAsync(
-                        canonicalEvidence,
+                        authorityEvidence,
                         cancellationToken);
                     primaryResolutionDurationMs = ElapsedMilliseconds(stageStarted);
 
                     stageStarted = Stopwatch.GetTimestamp();
                     resolutionAnalysis = await _resolutionEngine.AnalyzeAsync(
-                        canonicalEvidence,
+                        authorityEvidence,
                         primarySnapshot,
                         cancellationToken);
                     supportingNarrowingDurationMs = ElapsedMilliseconds(stageStarted);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                else
                 {
-                    observerErrorCategory = ex.GetType().Name[..Math.Min(
-                        ex.GetType().Name.Length,
-                        MaximumObserverErrorCategoryLength)];
-                    // Phantom failure remains isolated from established TikNumber
-                    // authority. Never log the exception message or raw evidence.
-                    _logger.LogWarning(
-                        "EMAILFILING phantom resolution failed. ErrorCategory={ErrorCategory}",
-                        observerErrorCategory);
+                    authorityEvidence = canonicalEvidence;
+                    stageStarted = Stopwatch.GetTimestamp();
+                    primarySnapshot = await _primaryResolver.ResolveAsync(
+                        authorityEvidence,
+                        cancellationToken);
+                    primaryResolutionDurationMs = ElapsedMilliseconds(stageStarted);
+
+                    stageStarted = Stopwatch.GetTimestamp();
+                    resolutionAnalysis = await _resolutionEngine.AnalyzeAsync(
+                        authorityEvidence,
+                        primarySnapshot,
+                        cancellationToken);
+                    supportingNarrowingDurationMs = ElapsedMilliseconds(stageStarted);
                 }
-                finally
-                {
-                    totalPhantomDurationMs = ElapsedMilliseconds(phantomStarted);
-                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                observerErrorCategory = ex.GetType().Name[..Math.Min(
+                    ex.GetType().Name.Length,
+                    MaximumObserverErrorCategoryLength)];
+                // Resolver failure remains isolated from established generic
+                // TikNumber authority. Never log the exception message or evidence.
+                _logger.LogWarning(
+                    "EMAILFILING resolution failed. ErrorCategory={ErrorCategory}",
+                    observerErrorCategory);
+            }
+            finally
+            {
+                totalPhantomDurationMs = ElapsedMilliseconds(phantomStarted);
             }
 
             var tikCandidates = ExtractTikNumberCandidates(
@@ -190,7 +211,7 @@ namespace Odmon.Worker.Services
                 cancellationToken);
 
             var messageFingerprint = CreateMessageFingerprint(mailbox, message);
-            var resolvedTargets = resolvedTikNumbers
+            var genericResolvedTargets = resolvedTikNumbers
                 .Where(pair => distinctTikNumbers.Contains(pair.Key, StringComparer.Ordinal))
                 .GroupBy(pair => pair.Value)
                 .Select(group => new ResolvedTarget(
@@ -198,6 +219,28 @@ namespace Odmon.Worker.Services
                     group.Select(pair => pair.Key).OrderBy(x => x, StringComparer.Ordinal).First()))
                 .OrderBy(target => target.TikCounter)
                 .ToArray();
+            var authorityDecision = authorityEvidence == null
+                ? EmailFilingAuthorityDecision.Blocked(EmailFilingAuthorityKinds.BlockedResolverError)
+                : authorityEvidence.SourceTemplate == EmailSourceTemplate.DirectInsurance
+                    ? EmailFilingRealWriteGate.EvaluateDirect(
+                        authorityEvidence,
+                        resolutionAnalysis,
+                        observerErrorCategory != null)
+                    : EmailFilingRealWriteGate.EvaluateGeneric(
+                        primarySnapshot,
+                        resolutionAnalysis,
+                        observerErrorCategory != null);
+            ResolvedTarget[] resolvedTargets = [];
+            if (authorityDecision is { IsAuthorized: true, TikCounter: not null })
+            {
+                var existingTarget = genericResolvedTargets.SingleOrDefault(target =>
+                    target.TikCounter == authorityDecision.TikCounter.Value);
+                resolvedTargets = existingTarget == null
+                    ? await ResolveAuthorityTargetAsync(
+                        authorityDecision.TikCounter.Value,
+                        cancellationToken)
+                    : [existingTarget];
+            }
             var targetCounters = resolvedTargets.Select(target => target.TikCounter).ToArray();
             var writeStates = targetCounters.Length == 0
                 ? []
@@ -222,6 +265,7 @@ namespace Odmon.Worker.Services
                 targetCounters,
                 resolvedCourtCounters)
                 .Concat(resolutionAnalysis.ObserverClassifications)
+                .Append($"REAL_WRITE_AUTHORITY_{authorityDecision.AuthorityKind}")
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
 
@@ -305,10 +349,15 @@ namespace Odmon.Worker.Services
 
             if (_settings.ResolutionPhantomEnabled)
             {
+                var preferredClaimUsed = canonicalEvidence?.SourceTemplate ==
+                                         EmailSourceTemplate.DirectInsurance &&
+                                         canonicalEvidence.PreferredClaimNumbers.Count > 0;
                 diagnostic.ResolutionRun = EmailFilingResolutionTelemetry.CreateRun(
                     canonicalEvidence,
                     primarySnapshot,
                     resolutionAnalysis,
+                    authorityDecision,
+                    preferredClaimUsed,
                     targetCounters,
                     new EmailFilingResolutionTimings(
                         extractionDurationMs,
@@ -418,7 +467,9 @@ namespace Odmon.Worker.Services
                 : readyTargets.Length > 0
                     ? EmailFilingConstants.Filed
                     : GetFinalDecision(
-                        tikCandidates.Count,
+                        tikCandidates.Count +
+                        (canonicalEvidence?.PreferredClaimNumbers.Count ?? 0) +
+                        (canonicalEvidence?.CourtCaseNumbers.Count ?? 0),
                         resolvedTargets.Length,
                         diagnostic.Targets);
             await _db.SaveChangesAsync(cancellationToken);
@@ -913,6 +964,34 @@ namespace Odmon.Worker.Services
             }
 
             return EmailFilingConstants.ReadyToFile;
+        }
+
+        private static EmailCaseEvidence CreateDirectInsuranceResolutionEvidence(
+            EmailCaseEvidence evidence)
+            => new(
+                [],
+                evidence.PreferredClaimNumbers,
+                evidence.CourtCaseNumbers,
+                evidence.VehicleNumbers,
+                evidence.EventDates,
+                evidence.ClientHints,
+                evidence.InsuredNames,
+                evidence.DriverPhones)
+            {
+                SourceTemplate = evidence.SourceTemplate,
+                PreferredClaimNumbers = evidence.PreferredClaimNumbers
+            };
+
+        private async Task<ResolvedTarget[]> ResolveAuthorityTargetAsync(
+            int tikCounter,
+            CancellationToken cancellationToken)
+        {
+            var tikNumbers = await _odcanitReader.ResolveTikCountersToNumbersAsync(
+                [tikCounter],
+                cancellationToken);
+            return tikNumbers.TryGetValue(tikCounter, out var tikNumber)
+                ? [new ResolvedTarget(tikCounter, tikNumber)]
+                : [];
         }
 
         private string GetFinalDecision(

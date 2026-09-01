@@ -94,7 +94,7 @@ namespace Odmon.Worker.Tests
 
             Assert.Equal([200], Assert.Single(analysis.PrimaryResults).RemainingTikCounters);
             Assert.Contains("NARROWED_BY_VEHICLE", analysis.ObserverClassifications);
-            Assert.Contains("NARROWED_BY_EVENT_DATE", analysis.ObserverClassifications);
+            Assert.DoesNotContain("NARROWED_BY_EVENT_DATE", analysis.ObserverClassifications);
         }
 
         [Fact]
@@ -138,6 +138,66 @@ namespace Odmon.Worker.Tests
             var result = Assert.Single(analysis.PrimaryResults);
             Assert.Empty(result.RemainingTikCounters);
             Assert.Equal(PrimaryNarrowingStatus.Conflict, result.Status);
+        }
+
+        [Fact]
+        public async Task UniqueClaimCorroboratedByVehicleIsNotInvalidatedByInsuredName()
+        {
+            var analysis = await AnalyzeAsync(
+                Claim(200),
+                Evidence(vehicle: "2222222", insuredName: "Synthetic Other"),
+                Matches(
+                    (EmailEvidenceType.VehicleNumber, [200]),
+                    (EmailEvidenceType.InsuredName, [])));
+
+            var result = Assert.Single(analysis.PrimaryResults);
+            Assert.Equal([200], result.RemainingTikCounters);
+            Assert.Equal(PrimaryNarrowingStatus.Unique, result.Status);
+            Assert.DoesNotContain("NARROWED_BY_INSURED_NAME", analysis.ObserverClassifications);
+            Assert.DoesNotContain("SUPPORTING_EVIDENCE_CONFLICT", analysis.ObserverClassifications);
+        }
+
+        [Fact]
+        public async Task InsuredNameCanStillNarrowAmbiguousClaim()
+        {
+            var analysis = await AnalyzeAsync(
+                Claim(100, 200),
+                Evidence(insuredName: "Synthetic Insured"),
+                Matches((EmailEvidenceType.InsuredName, [200])));
+
+            var result = Assert.Single(analysis.PrimaryResults);
+            Assert.Equal([200], result.RemainingTikCounters);
+            Assert.Equal(PrimaryNarrowingStatus.Unique, result.Status);
+            Assert.Contains("NARROWED_BY_INSURED_NAME", analysis.ObserverClassifications);
+        }
+
+        [Fact]
+        public async Task MissingCandidateEventDateIsUnknownAndDoesNotCreateConflict()
+        {
+            var analysis = await AnalyzeAsync(
+                Claim(200),
+                Evidence(eventDate: "2026-08-30"),
+                MatchesWithComparable(EmailEvidenceType.EventDate, [], []));
+
+            var result = Assert.Single(analysis.PrimaryResults);
+            Assert.Equal([200], result.RemainingTikCounters);
+            Assert.Equal(PrimaryNarrowingStatus.Unique, result.Status);
+            Assert.DoesNotContain("SUPPORTING_EVIDENCE_CONFLICT", analysis.ObserverClassifications);
+        }
+
+        [Fact]
+        public async Task ComparableDifferentEventDateStillCreatesConflict()
+        {
+            var analysis = await AnalyzeAsync(
+                Claim(200),
+                Evidence(eventDate: "2026-08-30"),
+                MatchesWithComparable(EmailEvidenceType.EventDate, [], [200]));
+
+            var result = Assert.Single(analysis.PrimaryResults);
+            Assert.Empty(result.RemainingTikCounters);
+            Assert.Equal(PrimaryNarrowingStatus.Conflict, result.Status);
+            Assert.Contains("NARROWED_BY_EVENT_DATE", analysis.ObserverClassifications);
+            Assert.Contains("SUPPORTING_EVIDENCE_CONFLICT", analysis.ObserverClassifications);
         }
 
         [Fact]
@@ -309,8 +369,17 @@ namespace Odmon.Worker.Tests
             params (EmailEvidenceType Type, int[] Counters)[] matches)
             => new(matches.ToDictionary(match => match.Type, match => match.Counters.ToHashSet()));
 
+        private static FakeResolutionRepository MatchesWithComparable(
+            EmailEvidenceType type,
+            int[] matches,
+            int[] comparable)
+            => new(
+                new Dictionary<EmailEvidenceType, HashSet<int>> { [type] = matches.ToHashSet() },
+                new Dictionary<EmailEvidenceType, HashSet<int>> { [type] = comparable.ToHashSet() });
+
         private sealed class FakeResolutionRepository(
-            IReadOnlyDictionary<EmailEvidenceType, HashSet<int>> matches)
+            IReadOnlyDictionary<EmailEvidenceType, HashSet<int>> matches,
+            IReadOnlyDictionary<EmailEvidenceType, HashSet<int>>? comparable = null)
             : IEmailCaseResolutionRepository
         {
             public int SupportingCallCount { get; private set; }
@@ -330,46 +399,49 @@ namespace Odmon.Worker.Tests
                 CancellationToken cancellationToken)
                 => EmptyPrimary();
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByVehicleAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByVehicleAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => Filter(EmailEvidenceType.VehicleNumber, candidateTikCounters);
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByEventDateAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByEventDateAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => Filter(EmailEvidenceType.EventDate, candidateTikCounters);
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByClientAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByClientAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => Filter(EmailEvidenceType.ClientHint, candidateTikCounters);
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByInsuredNameAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByInsuredNameAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => Filter(EmailEvidenceType.InsuredName, candidateTikCounters);
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByDriverPhoneAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByDriverPhoneAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => Filter(EmailEvidenceType.DriverPhone, candidateTikCounters);
 
-            private Task<IReadOnlySet<int>> Filter(
+            private Task<SupportingEvidenceFilterResult> Filter(
                 EmailEvidenceType type,
                 IEnumerable<int> candidates)
             {
                 SupportingCallCount++;
                 var candidateSet = candidates.ToHashSet();
-                var result = matches.TryGetValue(type, out var configured)
+                var matching = matches.TryGetValue(type, out var configured)
                     ? configured.Where(candidateSet.Contains).ToHashSet()
                     : [];
-                return Task.FromResult<IReadOnlySet<int>>(result);
+                var comparableSet = comparable?.TryGetValue(type, out var configuredComparable) == true
+                    ? configuredComparable.Where(candidateSet.Contains).ToHashSet()
+                    : candidateSet;
+                return Task.FromResult(new SupportingEvidenceFilterResult(comparableSet, matching));
             }
 
             private static Task<IReadOnlyList<EvidenceResolutionResult>> EmptyPrimary()

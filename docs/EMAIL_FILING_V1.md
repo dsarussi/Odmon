@@ -205,6 +205,98 @@ describes that deployment and is not a universal default for other offices:
 
 ### Phantom review SQL
 
+Migration `20260901113438_AddEmailFilingAuthorityReviewTelemetry` adds structured,
+privacy-safe authority-review fields and candidate TikCounter rows. The source
+classification is diagnostic only: strong outer/original sender-domain signals
+and deterministic Direct Insurance template combinations may identify
+`DIRECT_INSURANCE`, while the existing stricter structured-template marker still
+controls the unchanged Direct authority route. No sender, claim, vehicle, name,
+date, or other extracted value is stored in the new telemetry.
+
+Recent blocked authority decisions can be reviewed without parsing the legacy
+`ObserverClassifications` string:
+
+```sql
+USE odmonintegration;
+
+SELECT TOP (500)
+    d.Id AS EmailFilingDiagnosticId,
+    r.Id AS ResolutionRunId,
+    d.ReceivedDateTimeUtc,
+    r.CreatedAtUtc,
+    d.Mailbox,
+    d.MessageFingerprint,
+    r.AuthorityDecisionClass,
+    r.SourceTemplateKind,
+    r.PreferredClaimUsed,
+    r.PrimaryEvidenceTypeMask,
+    r.SupportingEvidenceTypeMask,
+    CASE
+        WHEN r.DecisiveSupportingEvidenceTypeMask = 0 THEN 'NONE'
+        ELSE CONCAT_WS(',',
+            CASE WHEN (r.DecisiveSupportingEvidenceTypeMask & 1) <> 0 THEN 'VEHICLE' END,
+            CASE WHEN (r.DecisiveSupportingEvidenceTypeMask & 2) <> 0 THEN 'EVENT_DATE' END,
+            CASE WHEN (r.DecisiveSupportingEvidenceTypeMask & 4) <> 0 THEN 'CLIENT_HINT' END,
+            CASE WHEN (r.DecisiveSupportingEvidenceTypeMask & 8) <> 0 THEN 'INSURED_NAME' END,
+            CASE WHEN (r.DecisiveSupportingEvidenceTypeMask & 16) <> 0 THEN 'DRIVER_PHONE' END)
+    END AS DecisiveSupportingEvidenceType,
+    r.TikCandidateCounterCount,
+    r.ClaimCandidateCounterCount,
+    r.CourtCandidateCounterCount,
+    candidates.TikPrimaryCandidates,
+    candidates.TikAfterSupport,
+    candidates.ClaimPrimaryCandidates,
+    candidates.ClaimAfterSupport,
+    candidates.CourtPrimaryCandidates,
+    candidates.CourtAfterSupport,
+    phantom.PhantomWouldFileTikCounters,
+    r.FinalResolutionClass,
+    r.ObserverErrorCategory
+FROM dbo.EmailFilingResolutionRuns AS r
+JOIN dbo.EmailFilingDiagnostics AS d
+  ON d.Id = r.EmailFilingDiagnosticId
+OUTER APPLY
+(
+    SELECT
+        STRING_AGG(CASE WHEN c.PrimaryEvidenceType = 'TIK'
+                             AND c.CandidateStage = 'PRIMARY_CANDIDATE'
+                        THEN CONVERT(varchar(max), c.TikCounter) END, ',')
+            AS TikPrimaryCandidates,
+        STRING_AGG(CASE WHEN c.PrimaryEvidenceType = 'TIK'
+                             AND c.CandidateStage = 'AFTER_SUPPORT'
+                        THEN CONVERT(varchar(max), c.TikCounter) END, ',')
+            AS TikAfterSupport,
+        STRING_AGG(CASE WHEN c.PrimaryEvidenceType = 'CLAIM'
+                             AND c.CandidateStage = 'PRIMARY_CANDIDATE'
+                        THEN CONVERT(varchar(max), c.TikCounter) END, ',')
+            AS ClaimPrimaryCandidates,
+        STRING_AGG(CASE WHEN c.PrimaryEvidenceType = 'CLAIM'
+                             AND c.CandidateStage = 'AFTER_SUPPORT'
+                        THEN CONVERT(varchar(max), c.TikCounter) END, ',')
+            AS ClaimAfterSupport,
+        STRING_AGG(CASE WHEN c.PrimaryEvidenceType = 'COURT'
+                             AND c.CandidateStage = 'PRIMARY_CANDIDATE'
+                        THEN CONVERT(varchar(max), c.TikCounter) END, ',')
+            AS CourtPrimaryCandidates,
+        STRING_AGG(CASE WHEN c.PrimaryEvidenceType = 'COURT'
+                             AND c.CandidateStage = 'AFTER_SUPPORT'
+                        THEN CONVERT(varchar(max), c.TikCounter) END, ',')
+            AS CourtAfterSupport
+    FROM dbo.EmailFilingResolutionCandidates AS c
+    WHERE c.ResolutionRunId = r.Id
+) AS candidates
+OUTER APPLY
+(
+    SELECT STRING_AGG(CONVERT(varchar(max), t.TikCounter), ',')
+        AS PhantomWouldFileTikCounters
+    FROM dbo.EmailFilingResolutionTargets AS t
+    WHERE t.ResolutionRunId = r.Id
+      AND t.TargetKind = 'PHANTOM_WOULD_FILE'
+) AS phantom
+WHERE r.AuthorityDecisionClass LIKE 'BLOCKED[_]%'
+ORDER BY r.Id DESC;
+```
+
 ```sql
 USE odmonintegration;
 

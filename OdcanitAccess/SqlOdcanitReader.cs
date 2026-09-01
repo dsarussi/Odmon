@@ -115,6 +115,33 @@ namespace Odmon.Worker.OdcanitAccess
             return cases;
         }
 
+        public async Task<IReadOnlyDictionary<int, string>> ResolveTikCountersToNumbersAsync(
+            IEnumerable<int> tikCounters,
+            CancellationToken ct)
+        {
+            var requested = tikCounters.Where(value => value > 0).Distinct().ToArray();
+            if (requested.Length == 0)
+                return new Dictionary<int, string>();
+
+            var rows = await _db.Cases
+                .AsNoTracking()
+                .Where(item => requested.Contains(item.TikCounter) && item.TikNumber != null)
+                .Select(item => new { item.TikCounter, item.TikNumber })
+                .ToListAsync(ct);
+            return rows
+                .GroupBy(item => item.TikCounter)
+                .Select(group => new
+                {
+                    TikCounter = group.Key,
+                    TikNumbers = group.Select(item => item.TikNumber!.Trim())
+                        .Where(value => value.Length > 0)
+                        .Distinct(StringComparer.Ordinal)
+                        .ToArray()
+                })
+                .Where(item => item.TikNumbers.Length == 1)
+                .ToDictionary(item => item.TikCounter, item => item.TikNumbers[0]);
+        }
+
         public async Task<List<int>> GetTikCountersSinceCutoffAsync(DateTime cutoffDate, CancellationToken ct)
         {
             var cutoff = cutoffDate.Date; // date-only comparison

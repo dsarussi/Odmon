@@ -25,6 +25,12 @@ namespace Odmon.Worker.Models
         Contextual
     }
 
+    public enum EmailSourceTemplate
+    {
+        Generic,
+        DirectInsurance
+    }
+
     /// <summary>
     /// Transient evidence extracted from an email. Values in this model can
     /// contain personal data and must not be persisted merely for diagnostics.
@@ -47,5 +53,25 @@ namespace Odmon.Worker.Models
         IReadOnlyList<EmailEvidenceValue> EventDates,
         IReadOnlyList<EmailEvidenceValue> ClientHints,
         IReadOnlyList<EmailEvidenceValue> InsuredNames,
-        IReadOnlyList<EmailEvidenceValue> DriverPhones);
+        IReadOnlyList<EmailEvidenceValue> DriverPhones)
+    {
+        /// <summary>
+        /// Strict structured-template classification used by the existing
+        /// Direct Insurance authority route. Its semantics must remain stable.
+        /// </summary>
+        public EmailSourceTemplate SourceTemplate { get; init; } = EmailSourceTemplate.Generic;
+
+        /// <summary>
+        /// Privacy-safe source classification for diagnostics. It may use
+        /// strong sender/forwarded-source indicators but grants no authority.
+        /// </summary>
+        public EmailSourceTemplate DetectedSourceTemplate { get; init; } = EmailSourceTemplate.Generic;
+
+        /// <summary>
+        /// Source-specific primary claim evidence. It remains transient and is
+        /// populated only when a conservatively recognized template defines a
+        /// stronger claim-number label.
+        /// </summary>
+        public IReadOnlyList<EmailEvidenceValue> PreferredClaimNumbers { get; init; } = [];
+    }
 }

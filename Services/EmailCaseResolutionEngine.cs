@@ -75,7 +75,8 @@ namespace Odmon.Worker.Services
                 filters.Add(new AppliedSupportFilter(
                     input.EvidenceType,
                     input.NarrowingClassification,
-                    matchingCounters.Where(candidateUnion.Contains).ToHashSet()));
+                    matchingCounters.ComparableTikCounters.Where(candidateUnion.Contains).ToHashSet(),
+                    matchingCounters.MatchingTikCounters.Where(candidateUnion.Contains).ToHashSet()));
             }
 
             var narrowedResults = primaryResults
@@ -109,7 +110,7 @@ namespace Odmon.Worker.Services
                 classifications.Distinct(StringComparer.Ordinal).ToArray());
         }
 
-        private async Task<IReadOnlySet<int>> FilterCandidatesAsync(
+        private async Task<SupportingEvidenceFilterResult> FilterCandidatesAsync(
             EmailEvidenceType evidenceType,
             IReadOnlySet<int> candidateTikCounters,
             IReadOnlyList<string> values,
@@ -161,17 +162,39 @@ namespace Odmon.Worker.Services
             var remaining = primary.TikCounters.ToHashSet();
             var original = primary.TikCounters.ToHashSet();
             var classifications = new List<string>();
-            var changed = false;
+            var consideredFilterCount = 0;
             foreach (var filter in filters)
             {
-                var independentMatch = original
-                    .Where(filter.MatchingTikCounters.Contains)
+                // InsuredName is deliberately weak. It may narrow ambiguity but
+                // cannot veto a candidate already made unique by stronger evidence.
+                if (filter.EvidenceType == EmailEvidenceType.InsuredName && remaining.Count <= 1)
+                    continue;
+
+                consideredFilterCount++;
+                var countBeforeFilter = remaining.Count;
+                var comparableRemaining = remaining
+                    .Where(filter.ComparableTikCounters.Contains)
                     .ToHashSet();
-                if (independentMatch.Count < original.Count)
+                var contradictions = comparableRemaining
+                    .Where(counter => !filter.MatchingTikCounters.Contains(counter))
+                    .ToHashSet();
+                if (contradictions.Count > 0)
                     classifications.Add(filter.NarrowingClassification);
-                remaining.IntersectWith(filter.MatchingTikCounters);
+                remaining.ExceptWith(contradictions);
+                if (countBeforeFilter > 1 && remaining.Count == 1)
+                {
+                    classifications.Add(filter.EvidenceType switch
+                    {
+                        EmailEvidenceType.VehicleNumber => "NARROWED_TO_UNIQUE_BY_VEHICLE",
+                        EmailEvidenceType.EventDate => "NARROWED_TO_UNIQUE_BY_EVENT_DATE",
+                        EmailEvidenceType.ClientHint => "NARROWED_TO_UNIQUE_BY_CLIENT",
+                        EmailEvidenceType.InsuredName => "NARROWED_TO_UNIQUE_BY_INSURED_NAME",
+                        EmailEvidenceType.DriverPhone => "NARROWED_TO_UNIQUE_BY_DRIVER_PHONE",
+                        _ => throw new ArgumentOutOfRangeException()
+                    });
+                }
             }
-            changed = remaining.Count < original.Count;
+            var changed = remaining.Count < original.Count;
 
             PrimaryNarrowingStatus status;
             if (remaining.Count == 0)
@@ -182,14 +205,14 @@ namespace Odmon.Worker.Services
             else if (remaining.Count == 1)
             {
                 status = PrimaryNarrowingStatus.Unique;
-                if (filters.Count > 0 && !changed)
+                if (consideredFilterCount > 0 && !changed)
                     classifications.Add("SUPPORTING_EVIDENCE_NO_EFFECT");
             }
             else
             {
                 status = PrimaryNarrowingStatus.Ambiguous;
                 classifications.Add("PRIMARY_STILL_AMBIGUOUS");
-                if (filters.Count > 0 && !changed)
+                if (consideredFilterCount > 0 && !changed)
                     classifications.Add("SUPPORTING_EVIDENCE_NO_EFFECT");
             }
 
@@ -274,6 +297,7 @@ namespace Odmon.Worker.Services
         private sealed record AppliedSupportFilter(
             EmailEvidenceType EvidenceType,
             string NarrowingClassification,
+            IReadOnlySet<int> ComparableTikCounters,
             IReadOnlySet<int> MatchingTikCounters);
     }
 }

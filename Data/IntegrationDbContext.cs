@@ -38,6 +38,7 @@ namespace Odmon.Worker.Data
         public DbSet<EmailFilingDedup> EmailFilingDedups => Set<EmailFilingDedup>();
         public DbSet<EmailFilingResolutionRun> EmailFilingResolutionRuns => Set<EmailFilingResolutionRun>();
         public DbSet<EmailFilingResolutionTarget> EmailFilingResolutionTargets => Set<EmailFilingResolutionTarget>();
+        public DbSet<EmailFilingResolutionCandidate> EmailFilingResolutionCandidates => Set<EmailFilingResolutionCandidate>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -377,6 +378,9 @@ namespace Odmon.Worker.Data
                 b.HasIndex(x => x.CreatedAtUtc);
                 b.HasIndex(x => x.FinalResolutionClass);
                 b.HasIndex(x => x.AgreementWithExistingAuthority);
+                b.HasIndex(x => x.AuthorityDecisionClass);
+                b.Property(x => x.AuthorityDecisionClass).HasMaxLength(48).IsRequired();
+                b.Property(x => x.SourceTemplateKind).HasMaxLength(32).IsRequired();
                 b.Property(x => x.FinalResolutionClass).HasMaxLength(48).IsRequired();
                 b.Property(x => x.AgreementWithExistingAuthority).HasMaxLength(48).IsRequired();
                 b.Property(x => x.ObserverErrorCategory).HasMaxLength(128);
@@ -395,6 +399,26 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.TargetKind).HasMaxLength(32).IsRequired();
                 b.HasOne(x => x.ResolutionRun)
                     .WithMany(x => x.Targets)
+                    .HasForeignKey(x => x.ResolutionRunId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<EmailFilingResolutionCandidate>(b =>
+            {
+                b.ToTable("EmailFilingResolutionCandidates");
+                b.HasKey(x => x.Id);
+                b.HasIndex(x => new
+                {
+                    x.ResolutionRunId,
+                    x.TikCounter,
+                    x.PrimaryEvidenceType,
+                    x.CandidateStage
+                }).IsUnique();
+                b.HasIndex(x => new { x.PrimaryEvidenceType, x.TikCounter });
+                b.Property(x => x.PrimaryEvidenceType).HasMaxLength(16).IsRequired();
+                b.Property(x => x.CandidateStage).HasMaxLength(24).IsRequired();
+                b.HasOne(x => x.ResolutionRun)
+                    .WithMany(x => x.Candidates)
                     .HasForeignKey(x => x.ResolutionRunId)
                     .OnDelete(DeleteBehavior.Cascade);
             });

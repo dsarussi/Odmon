@@ -226,7 +226,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task OneEmailWouldFileToEveryResolvedCase()
+        public async Task MultiTikEmailIsBlockedBeforeTargetCreation()
         {
             await using var db = CreateDb();
             var graph = new FakeFilingGraphClient();
@@ -244,11 +244,8 @@ namespace Odmon.Worker.Tests
                 CancellationToken.None);
 
             Assert.NotNull(diagnostic);
-            Assert.Equal(2, diagnostic!.Targets.Count);
-            Assert.All(diagnostic.Targets, target =>
-                Assert.Equal(EmailFilingConstants.DryRunWouldFile, target.Decision));
-            Assert.Equal(new[] { 40514, 60002 },
-                diagnostic.Targets.Select(target => target.TikCounter).OrderBy(x => x));
+            Assert.Empty(diagnostic!.Targets);
+            Assert.Contains("REAL_WRITE_AUTHORITY_BLOCKED_MULTI_TIK", diagnostic.ObserverClassifications);
             Assert.Equal(0, graph.MimeFetchCount);
             Assert.Empty(writer.WrittenTikCounters);
         }
@@ -519,7 +516,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task PrimaryObserverConflictDoesNotChangeCurrentTikAuthority()
+        public async Task PrimaryConflictBlocksCurrentTikAuthority()
         {
             await using var db = CreateDb();
             var snapshot = new EmailCaseResolutionSnapshot(
@@ -539,9 +536,8 @@ namespace Odmon.Worker.Tests
 
             Assert.NotNull(diagnostic);
             Assert.Contains("PRIMARY_CONFLICT", diagnostic!.ObserverClassifications);
-            var target = Assert.Single(diagnostic.Targets);
-            Assert.Equal(40514, target.TikCounter);
-            Assert.Equal(EmailFilingConstants.DryRunWouldFile, target.Decision);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Contains("REAL_WRITE_AUTHORITY_BLOCKED_CONFLICT", diagnostic.ObserverClassifications);
         }
 
         [Fact]
@@ -616,7 +612,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task SupportingObserverConflictDoesNotChangeCurrentTikTarget()
+        public async Task SupportingConflictBlocksCurrentTikTarget()
         {
             await using var db = CreateDb();
             var snapshot = new EmailCaseResolutionSnapshot(
@@ -638,16 +634,201 @@ namespace Odmon.Worker.Tests
 
             Assert.NotNull(diagnostic);
             Assert.Contains("SUPPORTING_EVIDENCE_CONFLICT", diagnostic!.ObserverClassifications);
-            var target = Assert.Single(diagnostic.Targets);
-            Assert.Equal(40514, target.TikCounter);
-            Assert.Equal(EmailFilingConstants.DryRunWouldFile, target.Decision);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Contains("REAL_WRITE_AUTHORITY_BLOCKED_CONFLICT", diagnostic.ObserverClassifications);
+            Assert.NotNull(diagnostic.ResolutionRun);
+            Assert.Single(db.EmailFilingResolutionRuns);
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task DirectInsuranceUniqueClaimOverridesUnrelatedFreeTextTik(
+            bool resolutionPhantomEnabled)
+        {
+            await using var db = CreateDb();
+            var writer = new FakeDocumentWriter();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [],
+                [new(EmailEvidenceType.ClaimNumber, "SYNTHETIC-CLAIM-A", [501])],
+                []);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>
+                {
+                    ["1/100"] = 501,
+                    ["2/200"] = 502
+                },
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                resolutionPhantomEnabled: resolutionPhantomEnabled,
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message(
+                    "FW: synthetic direct template",
+                    DirectInsuranceBody("SYNTHETIC-CLAIM-A", "2/200")),
+                CancellationToken.None);
+
+            var target = Assert.Single(diagnostic!.Targets);
+            Assert.Equal(501, target.TikCounter);
+            Assert.DoesNotContain(diagnostic.Targets, item => item.TikCounter == 502);
+            Assert.Contains("REAL_WRITE_AUTHORITY_DIRECT_UNIQUE_CLAIM", diagnostic.ObserverClassifications);
+            Assert.Equal([501], writer.WrittenTikCounters);
+            if (resolutionPhantomEnabled)
+            {
+                var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
+                Assert.Equal(
+                    EmailFilingAuthorityDecisionClasses.AllowedDirectUniqueClaim,
+                    run.AuthorityDecisionClass);
+                Assert.Equal(EmailFilingSourceTemplateKinds.DirectInsurance, run.SourceTemplateKind);
+                Assert.True(run.PreferredClaimUsed);
+            }
         }
 
         [Fact]
-        public async Task ResolutionPhantomDefaultsDisabledAndSkipsNewResolver()
+        public async Task DirectInsuranceAmbiguousClaimCanBeNarrowedByVehicle()
         {
             await using var db = CreateDb();
-            var primaryResolver = new FakePrimaryResolver();
+            var writer = new FakeDocumentWriter();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [],
+                [new(EmailEvidenceType.ClaimNumber, "SYNTHETIC-CLAIM-A", [501, 502])],
+                []);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>
+                {
+                    ["1/100"] = 501,
+                    ["2/200"] = 502
+                },
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                resolutionEngine: new EmailCaseResolutionEngine(
+                    new FakeSupportingResolutionRepository(new HashSet<int> { 502 })),
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message(
+                    "synthetic direct template",
+                    DirectInsuranceBody("SYNTHETIC-CLAIM-A")),
+                CancellationToken.None);
+
+            var target = Assert.Single(diagnostic!.Targets);
+            Assert.Equal(502, target.TikCounter);
+            Assert.Contains("NARROWED_BY_VEHICLE", diagnostic.ObserverClassifications);
+            Assert.Contains("REAL_WRITE_AUTHORITY_DIRECT_CLAIM_VEHICLE", diagnostic.ObserverClassifications);
+            Assert.Equal([502], writer.WrittenTikCounters);
+            var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.AllowedDirectClaimVehicle,
+                run.AuthorityDecisionClass);
+            Assert.Equal(1, run.DecisiveSupportingEvidenceTypeMask);
+            Assert.Contains(run.Candidates, candidate =>
+                candidate.TikCounter == 501 &&
+                candidate.PrimaryEvidenceType == EmailFilingResolutionPrimaryEvidenceTypes.Claim &&
+                candidate.CandidateStage == EmailFilingResolutionCandidateStages.PrimaryCandidate);
+            Assert.Contains(run.Candidates, candidate =>
+                candidate.TikCounter == 502 &&
+                candidate.PrimaryEvidenceType == EmailFilingResolutionPrimaryEvidenceTypes.Claim &&
+                candidate.CandidateStage == EmailFilingResolutionCandidateStages.AfterSupport);
+        }
+
+        [Fact]
+        public async Task UniqueExactCourtCaseNumberIsAuthorizedForRealWrite()
+        {
+            await using var db = CreateDb();
+            var writer = new FakeDocumentWriter();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [],
+                [],
+                [new(EmailEvidenceType.CourtCaseNumber, "12345-01-26", [501])]);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["1/100"] = 501 },
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                documentWriter: writer);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("מספר תיק בית משפט: 12345-01-26"),
+                CancellationToken.None);
+
+            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
+            Assert.Equal(501, Assert.Single(diagnostic.Targets).TikCounter);
+            Assert.Equal([501], writer.WrittenTikCounters);
+            Assert.Contains("REAL_WRITE_AUTHORITY_EXACT_COURT", diagnostic.ObserverClassifications);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.AllowedExactCourt,
+                Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun)
+                    .AuthorityDecisionClass);
+        }
+
+        [Fact]
+        public async Task DirectInsuranceWithoutUsablePreferredClaimFallsBackToGenericTik()
+        {
+            await using var db = CreateDb();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["2/200"] = 502 });
+            var body =
+                "פרטי צד ג : תביעה - SYNTHETIC-X\r\n" +
+                "מספר רכב - 12-345-67\r\n" +
+                "תיק תביעה מספר : ---\r\n" +
+                "תאריך אירוע : 30/08/2026\r\n" +
+                "free text 2/200";
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("synthetic fallback", body),
+                CancellationToken.None);
+
+            var target = Assert.Single(diagnostic!.Targets);
+            Assert.Equal(502, target.TikCounter);
+            Assert.Contains("REAL_WRITE_AUTHORITY_EXACT_TIK", diagnostic.ObserverClassifications);
+        }
+
+        [Fact]
+        public async Task GenericMultiTikIsBlockedOutsideDirectInsurance()
+        {
+            await using var db = CreateDb();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>
+                {
+                    ["1/100"] = 501,
+                    ["2/200"] = 502
+                });
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message("generic 1/100 and 2/200"),
+                CancellationToken.None);
+
+            Assert.Empty(diagnostic!.Targets);
+            Assert.Contains("REAL_WRITE_AUTHORITY_BLOCKED_MULTI_TIK", diagnostic.ObserverClassifications);
+        }
+
+        [Fact]
+        public async Task ResolutionPhantomDisabledStillRunsAuthorityResolverWithoutPersistingPhantomRun()
+        {
+            await using var db = CreateDb();
+            var primaryResolver = new FakePrimaryResolver(
+                resolutions: new Dictionary<string, int> { ["9/1984"] = 40514 });
             var service = CreateService(
                 db,
                 new Dictionary<string, int> { ["9/1984"] = 40514 },
@@ -661,7 +842,7 @@ namespace Odmon.Worker.Tests
                 CancellationToken.None);
 
             Assert.False(new EmailFilingSettings().ResolutionPhantomEnabled);
-            Assert.Equal(0, primaryResolver.CallCount);
+            Assert.Equal(1, primaryResolver.CallCount);
             Assert.Null(diagnostic!.ResolutionRun);
             Assert.Empty(db.EmailFilingResolutionRuns);
             Assert.Single(diagnostic.Targets);
@@ -752,7 +933,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task PhantomExceptionIsRecordedSafelyAndDoesNotBlockCurrentTikWrite()
+        public async Task ResolverExceptionIsRecordedSafelyAndBlocksRealWrite()
         {
             await using var db = CreateDb();
             var graph = new FakeFilingGraphClient();
@@ -772,13 +953,20 @@ namespace Odmon.Worker.Tests
                 Message("9/1984"),
                 CancellationToken.None);
 
-            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
-            Assert.Equal(1, graph.MimeFetchCount);
-            Assert.Equal([40514], writer.WrittenTikCounters);
+            Assert.Equal(EmailFilingConstants.NoValidTik, diagnostic!.FinalDecision);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Contains(
+                "REAL_WRITE_AUTHORITY_BLOCKED_RESOLVER_ERROR",
+                diagnostic.ObserverClassifications);
             var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
             Assert.Equal(EmailFilingResolutionClasses.ObserverError, run.FinalResolutionClass);
             Assert.Equal(nameof(InvalidOperationException), run.ObserverErrorCategory);
-            Assert.Equal(EmailFilingResolutionAgreements.PhantomUnresolved,
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.BlockedResolverError,
+                run.AuthorityDecisionClass);
+            Assert.Equal(EmailFilingResolutionAgreements.NoExistingTikAuthority,
                 run.AgreementWithExistingAuthority);
             Assert.DoesNotContain("SYNTHETIC-PRIVATE-VALUE", run.ObserverErrorCategory);
         }
@@ -818,6 +1006,35 @@ namespace Odmon.Worker.Tests
             Assert.Equal([40514], writer.WrittenTikCounters);
             Assert.Single(db.EmailFilingDedups);
             Assert.True(generator.LastArtifact!.Disposed);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.AllowedExactTik,
+                Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun)
+                    .AuthorityDecisionClass);
+        }
+
+        [Fact]
+        public async Task DirectSourceTelemetryDoesNotChangeGenericExactTikAuthority()
+        {
+            await using var db = CreateDb();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["9/1984"] = 40514 });
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message(
+                    "9/1984",
+                    sender: "unit.test@5555555.co.il"),
+                CancellationToken.None);
+
+            var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic!.ResolutionRun);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.AllowedExactTik,
+                run.AuthorityDecisionClass);
+            Assert.Equal(EmailFilingSourceTemplateKinds.DirectInsurance, run.SourceTemplateKind);
+            Assert.False(run.PreferredClaimUsed);
+            Assert.Single(diagnostic.Targets);
         }
 
         [Fact]
@@ -848,7 +1065,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task TwoAllowlistedCasesFetchAndGenerateOnceThenWriteTwice()
+        public async Task TwoAllowlistedTikCasesAreBlockedAsMultiTik()
         {
             await using var db = CreateDb();
             var graph = new FakeFilingGraphClient();
@@ -879,16 +1096,13 @@ namespace Odmon.Worker.Tests
                 CancellationToken.None);
 
             Assert.NotNull(diagnostic);
-            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
-            Assert.Equal(new[] { 40514, 60002 },
-                diagnostic.Targets.Select(target => target.TikCounter).OrderBy(value => value));
-            Assert.All(diagnostic.Targets, target =>
-                Assert.Equal(EmailFilingConstants.Filed, target.Decision));
-            Assert.Equal(1, graph.MimeFetchCount);
-            Assert.Equal(1, generator.GenerateCount);
-            Assert.Equal(new[] { 40514, 60002 }, writer.WrittenTikCounters.OrderBy(value => value));
-            Assert.Equal(2, db.EmailFilingDedups.Count());
-            Assert.True(generator.LastArtifact!.Disposed);
+            Assert.Equal(EmailFilingConstants.NoValidTik, diagnostic!.FinalDecision);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Contains("REAL_WRITE_AUTHORITY_BLOCKED_MULTI_TIK", diagnostic.ObserverClassifications);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Equal(0, generator.GenerateCount);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Empty(db.EmailFilingDedups);
         }
 
         [Fact]
@@ -920,7 +1134,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task OneDuplicateTargetAndOneNewTargetWritesOnlyNewTarget()
+        public async Task MultiTikIsBlockedBeforeExistingDedupStateIsConsidered()
         {
             await using var db = CreateDb();
             var resolutions = new Dictionary<string, int>
@@ -961,15 +1175,12 @@ namespace Odmon.Worker.Tests
             var diagnostic = await service.ProcessAsync(
                 "mailbox@odmon.example", [], message, CancellationToken.None);
 
-            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
-            Assert.Equal(EmailFilingConstants.SkipDuplicate,
-                diagnostic.Targets.Single(value => value.TikCounter == 40514).Decision);
-            Assert.Equal(EmailFilingConstants.Filed,
-                diagnostic.Targets.Single(value => value.TikCounter == 60002).Decision);
-            Assert.Equal([60002], writer.WrittenTikCounters);
-            Assert.Equal(1, graph.MimeFetchCount);
-            Assert.Equal(1, generator.GenerateCount);
-            Assert.Equal(2, db.EmailFilingDedups.Count());
+            Assert.Equal(EmailFilingConstants.NoValidTik, diagnostic!.FinalDecision);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Equal(0, generator.GenerateCount);
+            Assert.Single(db.EmailFilingDedups);
         }
 
         [Fact]
@@ -1065,7 +1276,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task MultiTargetFailureMarksOnlySuccessfulTargetAsDeduplicated()
+        public async Task MultiTikIsBlockedBeforeAnyTargetCanFail()
         {
             await using var db = CreateDb();
             var graph = new FakeFilingGraphClient();
@@ -1090,22 +1301,15 @@ namespace Odmon.Worker.Tests
                 msgGenerator: generator,
                 documentWriter: writer);
 
-            await Assert.ThrowsAsync<EmailFilingProcessingException>(() => service.ProcessAsync(
-                "mailbox@odmon.example", [], Message("9/1984 and 253/248"), CancellationToken.None));
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example", [], Message("9/1984 and 253/248"), CancellationToken.None);
 
-            var success = Assert.Single(db.EmailFilingDedups.Where(
-                row => row.Status == EmailFilingWriteStates.Succeeded));
-            Assert.Equal(40514, success.TikCounter);
-            Assert.Equal(2, db.EmailFilingDedups.Count());
-            Assert.Equal(EmailFilingWriteStates.CopyFailed,
-                db.EmailFilingDedups.Single(row => row.TikCounter == 60002).Status);
-            Assert.Equal(EmailFilingConstants.Filed,
-                db.EmailFilingTargetDiagnostics.Single(value => value.TikCounter == 40514).Decision);
-            Assert.Equal(EmailFilingConstants.WriteFailed,
-                db.EmailFilingTargetDiagnostics.Single(value => value.TikCounter == 60002).Decision);
-            Assert.Equal(1, graph.MimeFetchCount);
-            Assert.Equal(1, generator.GenerateCount);
-            Assert.True(generator.LastArtifact!.Disposed);
+            Assert.Equal(EmailFilingConstants.NoValidTik, diagnostic!.FinalDecision);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Empty(db.EmailFilingDedups);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Equal(0, generator.GenerateCount);
+            Assert.Empty(writer.WrittenTikCounters);
         }
 
         [Fact]
@@ -1356,7 +1560,7 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task UnrestrictedMultiTikWritesUniqueTargetsOnceAndRejectsAmbiguousTarget()
+        public async Task UnrestrictedMultiTikIncludingAmbiguousValueIsBlocked()
         {
             await using var db = CreateDb();
             var writer = new FakeDocumentWriter();
@@ -1387,18 +1591,18 @@ namespace Odmon.Worker.Tests
                 Message("9/1984 and 253/248 and 7/1236002", "Duplicate 9/1984"),
                 CancellationToken.None);
 
-            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
-            Assert.Equal(new[] { 40514, 60002 }, writer.WrittenTikCounters.OrderBy(value => value));
-            Assert.Equal(2, diagnostic.Targets.Count);
-            Assert.Equal(1, graph.MimeFetchCount);
-            Assert.Equal(1, generator.GenerateCount);
+            Assert.Equal(EmailFilingConstants.NoValidTik, diagnostic!.FinalDecision);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Empty(diagnostic.Targets);
+            Assert.Equal(0, graph.MimeFetchCount);
+            Assert.Equal(0, generator.GenerateCount);
             Assert.Contains(diagnostic.Candidates, candidate =>
                 candidate.Candidate == "7/1236002" &&
                 candidate.ResolutionStatus == EmailFilingConstants.TikAmbiguous);
         }
 
         [Fact]
-        public async Task UnrestrictedModeFilesValidTikAndRejectsAmbiguousTik()
+        public async Task UnrestrictedModeBlocksEmailContainingAmbiguousTik()
         {
             await using var db = CreateDb();
             var writer = new FakeDocumentWriter();
@@ -1421,9 +1625,9 @@ namespace Odmon.Worker.Tests
                 Message("9/1984 and 253/248"),
                 CancellationToken.None);
 
-            Assert.Equal(EmailFilingConstants.Filed, diagnostic!.FinalDecision);
-            Assert.Equal([40514], writer.WrittenTikCounters);
-            Assert.Equal(40514, Assert.Single(diagnostic.Targets).TikCounter);
+            Assert.Equal(EmailFilingConstants.NoValidTik, diagnostic!.FinalDecision);
+            Assert.Empty(writer.WrittenTikCounters);
+            Assert.Empty(diagnostic.Targets);
             Assert.Contains(diagnostic.Candidates, candidate =>
                 candidate.Candidate == "253/248" &&
                 candidate.ResolutionStatus == EmailFilingConstants.TikAmbiguous);
@@ -1515,7 +1719,8 @@ namespace Odmon.Worker.Tests
                 new FakeOdcanitReader(new Dictionary<string, int> { ["9/1984"] = 40514 }),
                 new FakeCourtResolver(new Dictionary<string, EmailAutomationCaseMatch>()),
                 new EmailCaseEvidenceExtractor(),
-                new FakePrimaryResolver(),
+                new FakePrimaryResolver(
+                    resolutions: new Dictionary<string, int> { ["9/1984"] = 40514 }),
                 new FakeResolutionEngine(),
                 new FakeFilingGraphClient(Message("RE: Update 9/1984")),
                 new FakeMsgGenerator(),
@@ -1788,7 +1993,9 @@ namespace Odmon.Worker.Tests
                 new FakeOdcanitReader(resolvedTikNumbers, ambiguousTikNumbers),
                 courtResolver ?? new FakeCourtResolver(new Dictionary<string, EmailAutomationCaseMatch>()),
                 new EmailCaseEvidenceExtractor(),
-                primaryResolver ?? new FakePrimaryResolver(),
+                primaryResolver ?? new FakePrimaryResolver(
+                    resolutions: resolvedTikNumbers,
+                    ambiguousResolutions: ambiguousTikNumbers),
                 resolutionEngine ?? new FakeResolutionEngine(),
                 graphClient ?? new FakeFilingGraphClient(),
                 msgGenerator ?? new FakeMsgGenerator(),
@@ -1837,18 +2044,29 @@ namespace Odmon.Worker.Tests
         private static EmailAutomationMessage Message(
             string subject,
             string? body = "Synthetic body",
-            string? bodyContentType = "text")
+            string? bodyContentType = "text",
+            string? sender = "sender@odmon.example")
             => new(
                 "graph-synthetic-1",
                 "<synthetic-1@odmon.example>",
                 subject,
-                "sender@odmon.example",
+                sender,
                 ["recipient@odmon.example"],
                 ["copy@odmon.example"],
                 ReceivedUtc,
                 Body: body,
                 BodyContentType: bodyContentType,
                 BccRecipients: ["blind@odmon.example"]);
+
+        private static string DirectInsuranceBody(
+            string claimNumber,
+            string? freeTextTik = null)
+            =>
+                "פרטי צד ג : תביעה - SYNTHETIC-SECONDARY\r\n" +
+                "מספר רכב - 12-345-67\r\n" +
+                $"תיק תביעה מספר : {claimNumber}\r\n" +
+                "תאריך אירוע : 30/08/2026\r\n" +
+                (freeTextTik == null ? "synthetic correspondence" : $"synthetic correspondence {freeTextTik}");
 
         private static IntegrationDbContext CreateDb()
         {
@@ -1897,7 +2115,17 @@ namespace Odmon.Worker.Tests
                 => Task.FromResult(new List<OdcanitCase>());
 
             public Task<List<OdcanitCase>> GetCasesByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct)
-                => Task.FromResult(new List<OdcanitCase>());
+            {
+                var requested = tikCounters.ToHashSet();
+                return Task.FromResult(resolutions
+                    .Where(pair => requested.Contains(pair.Value))
+                    .Select(pair => new OdcanitCase
+                    {
+                        TikCounter = pair.Value,
+                        TikNumber = pair.Key
+                    })
+                    .ToList());
+            }
 
             public Task<List<OdcanitDiaryEvent>> GetDiaryEventsByTikCountersAsync(IEnumerable<int> tikCounters, CancellationToken ct)
                 => Task.FromResult(new List<OdcanitDiaryEvent>());
@@ -1918,7 +2146,9 @@ namespace Odmon.Worker.Tests
         }
 
         private sealed class FakePrimaryResolver(
-            EmailCaseResolutionSnapshot? snapshot = null)
+            EmailCaseResolutionSnapshot? snapshot = null,
+            IReadOnlyDictionary<string, int>? resolutions = null,
+            IReadOnlyDictionary<string, IReadOnlyList<int>>? ambiguousResolutions = null)
             : IEmailCasePrimaryResolver
         {
             public int CallCount { get; private set; }
@@ -1928,7 +2158,31 @@ namespace Odmon.Worker.Tests
                 CancellationToken cancellationToken)
             {
                 CallCount++;
-                return Task.FromResult(snapshot ?? EmailCaseResolutionSnapshot.Empty);
+                if (snapshot != null)
+                    return Task.FromResult(snapshot);
+
+                var tikResults = evidence.InternalTikNumbers
+                    .Select(value => value.NormalizedValue)
+                    .Distinct(StringComparer.Ordinal)
+                    .Select(value =>
+                    {
+                        if (ambiguousResolutions?.TryGetValue(value, out var ambiguous) == true)
+                        {
+                            return new EvidenceResolutionResult(
+                                EmailEvidenceType.InternalTikNumber,
+                                value,
+                                ambiguous);
+                        }
+
+                        return new EvidenceResolutionResult(
+                            EmailEvidenceType.InternalTikNumber,
+                            value,
+                            resolutions?.TryGetValue(value, out var counter) == true
+                                ? [counter]
+                                : []);
+                    })
+                    .ToArray();
+                return Task.FromResult(new EmailCaseResolutionSnapshot(tikResults, [], []));
             }
         }
 
@@ -1971,36 +2225,37 @@ namespace Odmon.Worker.Tests
                 CancellationToken cancellationToken)
                 => EmptyPrimary();
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByVehicleAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByVehicleAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
             {
                 SupportingCallCount++;
                 var candidates = candidateTikCounters.ToHashSet();
-                return Task.FromResult<IReadOnlySet<int>>(
-                    vehicleMatches.Where(candidates.Contains).ToHashSet());
+                return Task.FromResult(new SupportingEvidenceFilterResult(
+                    candidates,
+                    vehicleMatches.Where(candidates.Contains).ToHashSet()));
             }
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByEventDateAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByEventDateAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => EmptySet();
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByClientAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByClientAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => EmptySet();
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByInsuredNameAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByInsuredNameAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
                 => EmptySet();
 
-            public Task<IReadOnlySet<int>> FilterCandidatesByDriverPhoneAsync(
+            public Task<SupportingEvidenceFilterResult> FilterCandidatesByDriverPhoneAsync(
                 IEnumerable<int> candidateTikCounters,
                 IEnumerable<string> normalizedValues,
                 CancellationToken cancellationToken)
@@ -2009,8 +2264,8 @@ namespace Odmon.Worker.Tests
             private static Task<IReadOnlyList<EvidenceResolutionResult>> EmptyPrimary()
                 => Task.FromResult<IReadOnlyList<EvidenceResolutionResult>>([]);
 
-            private static Task<IReadOnlySet<int>> EmptySet()
-                => Task.FromResult<IReadOnlySet<int>>(new HashSet<int>());
+            private static Task<SupportingEvidenceFilterResult> EmptySet()
+                => Task.FromResult(SupportingEvidenceFilterResult.Empty);
         }
 
         private sealed class FakeFilingGraphClient(params EmailAutomationMessage[] messages)
