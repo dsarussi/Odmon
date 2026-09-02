@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.RegularExpressions;
 using Odmon.Worker.Models;
 
@@ -56,6 +57,13 @@ namespace Odmon.Worker.Services
         private static readonly Regex DirectInsuranceWebAssetRegex = CreateRegex(
             @"https?://(?:www\.)?555\.co\.il(?:[/\s""'<>]|$)",
             RegexOptions.IgnoreCase);
+        private static readonly Regex HtmlExecutableContentRegex = CreateRegex(
+            @"<\s*(?:script|style)\b[^>]*>.*?<\s*/\s*(?:script|style)\s*>",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        private static readonly Regex HtmlStructuralSeparatorRegex = CreateRegex(
+            @"<\s*/?\s*(?:td|th|tr|table|div|p|br)\b[^>]*>",
+            RegexOptions.IgnoreCase);
+        private static readonly Regex HtmlTagRegex = CreateRegex(@"<[^>]+>");
 
         private static readonly Regex CourtRegex = CreateRegex(
             @"(?:(?:מספר|מס\s*['׳’])\s*הליך(?:\s*בית\s*משפט)?|(?:מספר|מס\s*['׳’])\s*תיק\s*בית\s*משפט|תיק\s*בית\s*משפט\s*(?:מספר|מס\s*['׳’]))\s*[.:：#\-–—]?\s*(?<value>[\p{L}\p{N}][\p{L}\p{N}._/\-]{0,63})",
@@ -107,9 +115,6 @@ namespace Odmon.Worker.Services
                 })
                 .ToArray();
 
-            var sourceTemplate = IsDirectInsuranceTemplate(subject, normalizedBody)
-                ? EmailSourceTemplate.DirectInsurance
-                : EmailSourceTemplate.Generic;
             var detectedSourceTemplate = IsDirectInsuranceSource(
                     senderIdentity,
                     subject,
@@ -118,7 +123,7 @@ namespace Odmon.Worker.Services
                 ? EmailSourceTemplate.DirectInsurance
                 : EmailSourceTemplate.Generic;
             var preferredClaims = new List<EmailEvidenceValue>();
-            if (sourceTemplate == EmailSourceTemplate.DirectInsurance)
+            if (detectedSourceTemplate == EmailSourceTemplate.DirectInsurance)
             {
                 AddMatches(
                     DirectInsurancePreferredClaimRegex,
@@ -138,7 +143,36 @@ namespace Odmon.Worker.Services
                     static value => NormalizeIdentifier(value),
                     preferredClaims,
                     maximumCandidates);
+
+                var structuredBody = NormalizeHtmlStructure(rawBody);
+                if (!string.IsNullOrWhiteSpace(structuredBody) &&
+                    !string.Equals(structuredBody, normalizedBody, StringComparison.Ordinal))
+                {
+                    AddMatches(
+                        DirectInsurancePreferredClaimRegex,
+                        structuredBody,
+                        EmailEvidenceType.ClaimNumber,
+                        EmailEvidenceSource.Body,
+                        EmailEvidenceExtractionKind.ExplicitLabel,
+                        static value => NormalizeIdentifier(value),
+                        preferredClaims,
+                        maximumCandidates);
+                }
             }
+
+            var distinctPreferredClaims = preferredClaims
+                .DistinctBy(value => new
+                {
+                    value.NormalizedValue,
+                    value.Source,
+                    value.ExtractionKind
+                })
+                .ToArray();
+            var sourceTemplate = IsDirectInsuranceTemplate(subject, normalizedBody) ||
+                                 (detectedSourceTemplate == EmailSourceTemplate.DirectInsurance &&
+                                  distinctPreferredClaims.Length > 0)
+                ? EmailSourceTemplate.DirectInsurance
+                : EmailSourceTemplate.Generic;
 
             return new EmailCaseEvidence(
                 OfType(distinct, EmailEvidenceType.InternalTikNumber),
@@ -152,15 +186,21 @@ namespace Odmon.Worker.Services
             {
                 SourceTemplate = sourceTemplate,
                 DetectedSourceTemplate = detectedSourceTemplate,
-                PreferredClaimNumbers = preferredClaims
-                    .DistinctBy(value => new
-                    {
-                        value.NormalizedValue,
-                        value.Source,
-                        value.ExtractionKind
-                    })
-                    .ToArray()
+                PreferredClaimNumbers = distinctPreferredClaims
             };
+        }
+
+        private static string? NormalizeHtmlStructure(string? rawBody)
+        {
+            if (string.IsNullOrWhiteSpace(rawBody) || !rawBody.Contains('<'))
+                return null;
+
+            var withoutExecutableContent = HtmlExecutableContentRegex.Replace(rawBody, " ");
+            var withStructuralSeparators = HtmlStructuralSeparatorRegex.Replace(
+                withoutExecutableContent,
+                "\n");
+            var withoutTags = HtmlTagRegex.Replace(withStructuralSeparators, " ");
+            return WebUtility.HtmlDecode(withoutTags);
         }
 
         private static bool IsDirectInsuranceTemplate(string? subject, string? normalizedBody)

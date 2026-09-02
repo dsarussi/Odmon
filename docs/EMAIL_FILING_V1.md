@@ -207,11 +207,14 @@ describes that deployment and is not a universal default for other offices:
 
 Migration `20260901113438_AddEmailFilingAuthorityReviewTelemetry` adds structured,
 privacy-safe authority-review fields and candidate TikCounter rows. The source
-classification is diagnostic only: strong outer/original sender-domain signals
-and deterministic Direct Insurance template combinations may identify
-`DIRECT_INSURANCE`, while the existing stricter structured-template marker still
-controls the unchanged Direct authority route. No sender, claim, vehicle, name,
-date, or other extracted value is stored in the new telemetry.
+classification uses strong outer/original sender-domain signals and deterministic
+Direct Insurance template combinations to identify `DIRECT_INSURANCE`. Source
+recognition alone grants no authority. The Direct authority route additionally
+requires a claim extracted from the specifically labelled `תיק תביעה מספר`
+field; a generic `תביעה - X` occurrence is never preferred. HTML table-cell
+boundaries are preserved transiently while associating that label with its
+value. No sender, claim, vehicle, name, date, or other extracted value is stored
+in the new telemetry.
 
 Recent blocked authority decisions can be reviewed without parsing the legacy
 `ObserverClassifications` string:

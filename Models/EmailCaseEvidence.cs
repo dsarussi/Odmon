@@ -56,14 +56,16 @@ namespace Odmon.Worker.Models
         IReadOnlyList<EmailEvidenceValue> DriverPhones)
     {
         /// <summary>
-        /// Strict structured-template classification used by the existing
-        /// Direct Insurance authority route. Its semantics must remain stable.
+        /// Classification used by the Direct Insurance authority route. A
+        /// recognized Direct source still requires the specifically labelled
+        /// preferred claim field before this can grant Direct authority.
         /// </summary>
         public EmailSourceTemplate SourceTemplate { get; init; } = EmailSourceTemplate.Generic;
 
         /// <summary>
         /// Privacy-safe source classification for diagnostics. It may use
-        /// strong sender/forwarded-source indicators but grants no authority.
+        /// strong sender/forwarded-source indicators but grants no authority by
+        /// itself.
         /// </summary>
         public EmailSourceTemplate DetectedSourceTemplate { get; init; } = EmailSourceTemplate.Generic;
 

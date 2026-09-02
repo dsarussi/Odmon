@@ -277,7 +277,7 @@ namespace Odmon.Worker.Tests
                 "Synthetic Employee - ביטוח ישיר");
 
             Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.DetectedSourceTemplate);
-            Assert.Equal(EmailSourceTemplate.Generic, evidence.SourceTemplate);
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.SourceTemplate);
         }
 
         [Fact]
@@ -294,7 +294,41 @@ namespace Odmon.Worker.Tests
                 $"<html><img src=\"https://www.555.co.il/assets/direct-logo.png\">{body}</html>");
 
             Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.DetectedSourceTemplate);
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.SourceTemplate);
+        }
+
+        [Fact]
+        public void RecognizedDirectHtmlTableAssociatesPreferredClaimLabelWithAdjacentCell()
+        {
+            const string rawBody =
+                "<table><tr><td>תיק תביעה מספר</td><td>SYNTHETIC-CLAIM</td></tr></table>";
+            var normalizedBody = EmailFilingService.NormalizeBodyForDetection(rawBody, "html");
+
+            var evidence = Extract(
+                "FW: synthetic Direct request",
+                normalizedBody,
+                "unit.test@5555555.co.il",
+                rawBody);
+
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.DetectedSourceTemplate);
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.SourceTemplate);
+            var preferred = Assert.Single(evidence.PreferredClaimNumbers);
+            Assert.Equal("SYNTHETIC-CLAIM", preferred.NormalizedValue);
+            Assert.Equal(EmailEvidenceSource.Body, preferred.Source);
+            Assert.Equal(EmailEvidenceExtractionKind.ExplicitLabel, preferred.ExtractionKind);
+        }
+
+        [Fact]
+        public void GenericThirdPartyClaimTextIsNeverPreferredEvenForRecognizedDirectSender()
+        {
+            var evidence = Extract(
+                "synthetic Direct request",
+                "פרטי צד ג : תביעה - SYNTHETIC-SECONDARY",
+                "unit.test@5555555.co.il");
+
+            Assert.Equal(EmailSourceTemplate.DirectInsurance, evidence.DetectedSourceTemplate);
             Assert.Equal(EmailSourceTemplate.Generic, evidence.SourceTemplate);
+            Assert.Empty(evidence.PreferredClaimNumbers);
         }
 
         [Fact]

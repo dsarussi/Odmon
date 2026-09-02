@@ -743,6 +743,149 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
+        public async Task RecognizedDirectHtmlPreferredClaimCanAuthorizeUniqueClaim()
+        {
+            await using var db = CreateDb();
+            var writer = new FakeDocumentWriter();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [],
+                [new(EmailEvidenceType.ClaimNumber, "SYNTHETIC-CLAIM-A", [501])],
+                []);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["1/100"] = 501 },
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                documentWriter: writer);
+            const string body =
+                "<table><tr><td>תיק תביעה מספר</td>" +
+                "<td>SYNTHETIC-CLAIM-A</td></tr></table>";
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message(
+                    "FW: synthetic Direct request",
+                    body,
+                    "html",
+                    "unit.test@5555555.co.il"),
+                CancellationToken.None);
+
+            Assert.Equal(501, Assert.Single(diagnostic!.Targets).TikCounter);
+            Assert.Equal([501], writer.WrittenTikCounters);
+            var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
+            Assert.True(run.PreferredClaimUsed);
+            Assert.Equal(EmailFilingSourceTemplateKinds.DirectInsurance, run.SourceTemplateKind);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.AllowedDirectUniqueClaim,
+                run.AuthorityDecisionClass);
+        }
+
+        [Fact]
+        public async Task RecognizedDirectHtmlPreferredClaimNotFoundRemainsBlocked()
+        {
+            await using var db = CreateDb();
+            var writer = new FakeDocumentWriter();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [],
+                [new(EmailEvidenceType.ClaimNumber, "SYNTHETIC-NOT-FOUND", [])],
+                []);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>(),
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                primaryResolver: new FakePrimaryResolver(snapshot),
+                documentWriter: writer);
+            const string body =
+                "<table><tr><td>תיק תביעה מספר</td>" +
+                "<td>SYNTHETIC-NOT-FOUND</td></tr></table>";
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message(
+                    "FW: synthetic Direct request",
+                    body,
+                    "html",
+                    "unit.test@5555555.co.il"),
+                CancellationToken.None);
+
+            Assert.Empty(diagnostic!.Targets);
+            Assert.Empty(writer.WrittenTikCounters);
+            var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
+            Assert.True(run.PreferredClaimUsed);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.BlockedNoSafeAuthority,
+                run.AuthorityDecisionClass);
+        }
+
+        [Fact]
+        public async Task DirectGenericClaimTextDoesNotBecomePreferredAuthority()
+        {
+            await using var db = CreateDb();
+            var service = CreateService(
+                db,
+                new Dictionary<string, int>(),
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true);
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message(
+                    "synthetic Direct correspondence",
+                    "פרטי צד ג : תביעה - SYNTHETIC-SECONDARY",
+                    sender: "unit.test@5555555.co.il"),
+                CancellationToken.None);
+
+            Assert.Empty(diagnostic!.Targets);
+            var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
+            Assert.False(run.PreferredClaimUsed);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.BlockedNoSafeAuthority,
+                run.AuthorityDecisionClass);
+        }
+
+        [Fact]
+        public async Task IncidentalDirectMentionDoesNotWidenGenericClaimAuthority()
+        {
+            await using var db = CreateDb();
+            var snapshot = new EmailCaseResolutionSnapshot(
+                [],
+                [new(EmailEvidenceType.ClaimNumber, "SYNTHETIC-CLAIM-A", [501])],
+                []);
+            var service = CreateService(
+                db,
+                new Dictionary<string, int> { ["1/100"] = 501 },
+                dryRun: false,
+                realWriteEnabled: true,
+                allowAllResolvedTikNumbers: true,
+                primaryResolver: new FakePrimaryResolver(snapshot));
+
+            var diagnostic = await service.ProcessAsync(
+                "mailbox@odmon.example",
+                [],
+                Message(
+                    "מספר תביעה: SYNTHETIC-CLAIM-A",
+                    "casual mention: ביטוח ישיר",
+                    sender: "sender@odmon.example"),
+                CancellationToken.None);
+
+            Assert.Empty(diagnostic!.Targets);
+            var run = Assert.IsType<EmailFilingResolutionRun>(diagnostic.ResolutionRun);
+            Assert.Equal(EmailFilingSourceTemplateKinds.Generic, run.SourceTemplateKind);
+            Assert.False(run.PreferredClaimUsed);
+            Assert.Equal(
+                EmailFilingAuthorityDecisionClasses.BlockedNoSafeAuthority,
+                run.AuthorityDecisionClass);
+        }
+
+        [Fact]
         public async Task UniqueExactCourtCaseNumberIsAuthorizedForRealWrite()
         {
             await using var db = CreateDb();
