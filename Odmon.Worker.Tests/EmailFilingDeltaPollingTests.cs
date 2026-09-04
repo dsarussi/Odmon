@@ -1,4 +1,6 @@
+using System.Text;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Odmon.Worker.Configuration;
 using Odmon.Worker.Data;
 using Odmon.Worker.Models;
@@ -314,6 +316,73 @@ public sealed partial class EmailFilingTests
             Assert.NotEqual(fingerprint, EmailFilingPollingService.CreateContentFingerprint(changed, "synthetic-key"));
     }
 
+    [Fact]
+    public async Task DeltaMalformedMimeIsRecordedOnceAndDoesNotBlockLaterMessages()
+    {
+        await using var db = CreateDb();
+        var poison = Message("9/1984") with
+        {
+            Id = "graph-poison",
+            InternetMessageId = "<poison@odmon.example>"
+        };
+        var valid = Message("9/1984") with
+        {
+            Id = "graph-valid",
+            InternetMessageId = "<valid@odmon.example>"
+        };
+        var graph = new ScriptedFilingGraphClient();
+        graph.SetMime(poison.Id,
+            "From: Sender <>\r\n" +
+            "To: Recipient <recipient@odmon.invalid>\r\n" +
+            "Subject: Synthetic\r\n\r\nBody");
+        graph.SetMime(valid.Id,
+            "Date: Thu, 04 Sep 2026 10:00:00 +0000\r\n" +
+            "From: Sender <sender@odmon.invalid>\r\n" +
+            "To: Recipient <recipient@odmon.invalid>\r\n" +
+            "Subject: Synthetic\r\nMessage-ID: <valid@odmon.invalid>\r\n" +
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nBody");
+        var writer = new FakeDocumentWriter();
+        var service = CreateService(
+            db,
+            new Dictionary<string, int> { ["9/1984"] = 40514 },
+            dryRun: false,
+            realWriteEnabled: true,
+            graphClient: graph,
+            msgGenerator: new EmailMsgGenerator(Options.Create(new EmailFilingSettings
+            {
+                MaxMimeMessageBytes = 52_428_800,
+                MaxMimeAttachmentCount = 100
+            })),
+            documentWriter: writer);
+        var polling = CreatePollingService(db, graph, DeltaSettings(), ReceivedUtc, service);
+        graph.Add(null, new([poison, valid], null, "delta-1"));
+
+        await polling.RunAsync(CancellationToken.None);
+
+        Assert.Equal("delta-1", (await db.EmailFilingMailboxStates.AsNoTracking().SingleAsync()).DeltaLink);
+        Assert.Equal(2, db.EmailFilingResolutionRuns.Count());
+        Assert.Equal(2, db.EmailFilingDiagnostics.Count(row => row.ProcessedContentFingerprint != null));
+        Assert.Contains(db.EmailFilingDiagnostics, row => row.FinalDecision == EmailFilingConstants.MimeFailed);
+        Assert.Contains(db.EmailFilingDiagnostics, row => row.FinalDecision == EmailFilingConstants.Filed);
+        Assert.Single(db.EmailFilingDedups);
+        Assert.Single(writer.CreatedTikCounters);
+
+        // Graph may replay both items. Their completed content fingerprints
+        // keep them out of resolution and the completed delta still advances.
+        graph.Add("delta-1", new([poison, valid], null, "delta-2"));
+        await polling.RunAsync(CancellationToken.None);
+        Assert.Equal(2, db.EmailFilingResolutionRuns.Count());
+        Assert.Equal("delta-2", (await db.EmailFilingMailboxStates.AsNoTracking().SingleAsync()).DeltaLink);
+
+        // A meaningful content change makes the failed message eligible again.
+        var changedPoison = poison with { Body = "Changed synthetic body" };
+        graph.Add("delta-2", new([changedPoison], null, "delta-3"));
+        await polling.RunAsync(CancellationToken.None);
+        Assert.Equal(3, db.EmailFilingResolutionRuns.Count());
+        Assert.Equal(2, db.EmailFilingDiagnostics.Count(row => row.FinalDecision == EmailFilingConstants.MimeFailed));
+        Assert.Single(db.EmailFilingDedups);
+    }
+
     private static EmailFilingSettings DeltaSettings(int maxMessages = 50) => new()
     {
         Enabled = true, DryRun = true, ResolutionPhantomEnabled = true,
@@ -324,11 +393,14 @@ public sealed partial class EmailFilingTests
     private sealed class ScriptedFilingGraphClient : IEmailFilingGraphClient
     {
         private readonly Queue<(string? Cursor, Func<EmailAutomationDeltaPage> Response)> _steps = new();
+        private readonly Dictionary<string, byte[]> _mimeByMessageId = new(StringComparer.Ordinal);
         public List<string?> RequestedCursors { get; } = [];
         public Action<string?>? BeforeRequest { get; set; }
 
         public void Add(string? cursor, EmailAutomationDeltaPage page) => AddResponse(cursor, () => page);
         public void AddResponse(string? cursor, Func<EmailAutomationDeltaPage> response) => _steps.Enqueue((cursor, response));
+        public void SetMime(string messageId, string mime)
+            => _mimeByMessageId[messageId] = Encoding.UTF8.GetBytes(mime);
 
         public Task<EmailAutomationDeltaPage> GetDeltaPageAsync(
             string mailbox, string folderId, string? deltaLink, DateTime processingFromUtc,
@@ -346,6 +418,8 @@ public sealed partial class EmailFilingTests
         }
 
         public Task<byte[]> GetMimeAsync(string mailbox, string messageId, CancellationToken cancellationToken)
-            => throw new InvalidOperationException("No MIME fetch expected in this test.");
+            => Task.FromResult(_mimeByMessageId.TryGetValue(messageId, out var mime)
+                ? mime
+                : throw new InvalidOperationException("No MIME response configured for this synthetic message."));
     }
 }

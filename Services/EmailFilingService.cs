@@ -376,26 +376,48 @@ namespace Odmon.Worker.Services
             if (readyTargets.Length > 0)
             {
                 IEmailMsgArtifact artifact;
+                byte[] mime;
                 try
                 {
-                    var mime = await _graphClient.GetMimeAsync(
+                    mime = await _graphClient.GetMimeAsync(
                         diagnostic.Mailbox,
                         message.Id,
                         cancellationToken);
-                    artifact = await _msgGenerator.GenerateAsync(mime, cancellationToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    foreach (var target in readyTargets)
-                        target.Decision = EmailFilingConstants.MimeFailed;
-                    diagnostic.FinalDecision = EmailFilingConstants.MimeFailed;
-                    await _db.SaveChangesAsync(cancellationToken);
-                    _logger.LogError(
-                        "EMAILFILING MIME preparation failed. TargetCount={TargetCount}, ErrorCategory={ErrorCategory}",
-                        readyTargets.Length,
-                        ex.GetType().Name);
+                    await RecordMimeFailureAsync(
+                        diagnostic,
+                        readyTargets,
+                        ex.GetType().Name,
+                        cancellationToken);
                     throw new EmailFilingProcessingException(
-                        "Email MIME retrieval or MSG generation failed.",
+                        "Email MIME retrieval failed.",
+                        ex);
+                }
+
+                try
+                {
+                    artifact = await _msgGenerator.GenerateAsync(mime, cancellationToken);
+                }
+                catch (EmailMsgContentException ex)
+                {
+                    await RecordMimeFailureAsync(
+                        diagnostic,
+                        readyTargets,
+                        ex.Category,
+                        cancellationToken);
+                    return diagnostic;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    await RecordMimeFailureAsync(
+                        diagnostic,
+                        readyTargets,
+                        ex.GetType().Name,
+                        cancellationToken);
+                    throw new EmailFilingProcessingException(
+                        "Email MSG generation failed.",
                         ex);
                 }
 
@@ -492,6 +514,22 @@ namespace Odmon.Worker.Services
             }
 
             return diagnostic;
+        }
+
+        private async Task RecordMimeFailureAsync(
+            EmailFilingDiagnostic diagnostic,
+            IReadOnlyList<EmailFilingTargetDiagnostic> readyTargets,
+            string errorCategory,
+            CancellationToken cancellationToken)
+        {
+            foreach (var target in readyTargets)
+                target.Decision = EmailFilingConstants.MimeFailed;
+            diagnostic.FinalDecision = EmailFilingConstants.MimeFailed;
+            await _db.SaveChangesAsync(cancellationToken);
+            _logger.LogError(
+                "EMAILFILING MIME preparation failed. TargetCount={TargetCount}, ErrorCategory={ErrorCategory}",
+                readyTargets.Count,
+                errorCategory);
         }
 
         private static long ElapsedMilliseconds(long startedTimestamp)

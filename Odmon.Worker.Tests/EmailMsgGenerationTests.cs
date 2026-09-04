@@ -77,7 +77,7 @@ namespace Odmon.Worker.Tests
             var mime = CreateSyntheticMimeBytes();
             var generator = CreateGenerator(maxMimeMessageBytes: mime.Length - 1);
 
-            await Assert.ThrowsAsync<InvalidDataException>(() => generator.GenerateAsync(
+            await Assert.ThrowsAsync<EmailMsgContentException>(() => generator.GenerateAsync(
                 mime,
                 CancellationToken.None));
         }
@@ -87,7 +87,7 @@ namespace Odmon.Worker.Tests
         {
             var generator = CreateGenerator(maxMimeAttachmentCount: 1);
 
-            await Assert.ThrowsAsync<InvalidDataException>(() => generator.GenerateAsync(
+            await Assert.ThrowsAsync<EmailMsgContentException>(() => generator.GenerateAsync(
                 CreateSyntheticMimeBytes(),
                 CancellationToken.None));
         }
@@ -117,6 +117,57 @@ namespace Odmon.Worker.Tests
             Assert.DoesNotContain("..", attachment.FileName, StringComparison.Ordinal);
             Assert.DoesNotContain('\\', attachment.FileName);
             Assert.DoesNotContain('/', attachment.FileName);
+        }
+
+        [Fact]
+        public async Task InlinePartWithoutContentIdIsPreservedAsRegularAttachment()
+        {
+            var mime = CreateInlineMimeBytes(includeContentId: false);
+
+            var neutral = await NeutralEmailMimeReader.ReadAsync(
+                mime,
+                maximumAttachmentCount: 10,
+                CancellationToken.None);
+            var attachment = Assert.Single(neutral.Attachments);
+            Assert.False(attachment.IsInline);
+            Assert.Null(attachment.ContentId);
+            Assert.Equal("image.png", attachment.FileName);
+
+            await using var artifact = await CreateGenerator().GenerateAsync(
+                mime,
+                CancellationToken.None);
+            Assert.True(File.Exists(artifact.FilePath));
+        }
+
+        [Fact]
+        public async Task InlinePartWithContentIdRemainsInline()
+        {
+            var neutral = await NeutralEmailMimeReader.ReadAsync(
+                CreateInlineMimeBytes(includeContentId: true),
+                maximumAttachmentCount: 10,
+                CancellationToken.None);
+
+            var attachment = Assert.Single(neutral.Attachments);
+            Assert.True(attachment.IsInline);
+            Assert.Equal("image@odmon.invalid", attachment.ContentId);
+        }
+
+        [Fact]
+        public async Task MalformedMimeIsClassifiedAsContentFailure()
+        {
+            var generator = CreateGenerator();
+
+            var exception = await Assert.ThrowsAsync<EmailMsgContentException>(() =>
+                generator.GenerateAsync(
+                    Encoding.UTF8.GetBytes(
+                        "From: Sender <>\r\n" +
+                        "To: Recipient <recipient@odmon.invalid>\r\n" +
+                        "Subject: Synthetic\r\n\r\nBody"),
+                    CancellationToken.None));
+
+            Assert.Equal(EmailMsgContentException.UnprocessableMimeContent, exception.Category);
+            Assert.IsType<InvalidDataException>(exception.InnerException);
+            Assert.DoesNotContain("recipient@odmon.invalid", exception.Message, StringComparison.Ordinal);
         }
 
         private static EmailMsgGenerator CreateGenerator(
@@ -158,6 +209,26 @@ namespace Odmon.Worker.Tests
             using var output = new MemoryStream();
             message.WriteTo(output);
             return output.ToArray();
+        }
+
+        private static byte[] CreateInlineMimeBytes(bool includeContentId)
+        {
+            var contentId = includeContentId
+                ? "Content-ID: <image@odmon.invalid>\r\n"
+                : string.Empty;
+            return Encoding.UTF8.GetBytes(
+                "Date: Thu, 04 Sep 2026 10:00:00 +0000\r\n" +
+                "From: Sender <sender@odmon.invalid>\r\n" +
+                "To: Recipient <recipient@odmon.invalid>\r\n" +
+                "Subject: Synthetic\r\n" +
+                "Message-ID: <synthetic@odmon.invalid>\r\n" +
+                "Content-Type: multipart/mixed; boundary=synthetic-boundary\r\n\r\n" +
+                "--synthetic-boundary\r\nContent-Type: text/plain\r\n\r\nBody\r\n" +
+                "--synthetic-boundary\r\nContent-Type: image/png\r\n" +
+                "Content-Disposition: inline; filename=image.png\r\n" +
+                contentId +
+                "Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n" +
+                "--synthetic-boundary--\r\n");
         }
     }
 }

@@ -7,6 +7,19 @@ using MsgSender = MsgKit.Sender;
 
 namespace Odmon.Worker.Services
 {
+    public sealed class EmailMsgContentException : Exception
+    {
+        internal const string UnprocessableMimeContent = "UnprocessableMimeContent";
+
+        internal EmailMsgContentException(string category, Exception? innerException = null)
+            : base("Email MIME content cannot be converted to a valid Outlook MSG.", innerException)
+        {
+            Category = category;
+        }
+
+        public string Category { get; }
+    }
+
     internal sealed record NeutralEmailAddress(string Address, string DisplayName);
 
     internal sealed record NeutralEmailAttachment(
@@ -66,8 +79,11 @@ namespace Odmon.Worker.Services
                 using var data = new MemoryStream();
                 part.Content.DecodeTo(data);
                 var contentId = NormalizeContentId(part.ContentId);
-                var inline = IsInline(part) ||
-                             (!string.IsNullOrWhiteSpace(contentId) &&
+                // MsgKit requires every inline attachment to have a Content-ID.
+                // A part without one cannot be referenced safely from HTML, so
+                // preserve its bytes as a regular attachment.
+                var inline = !string.IsNullOrWhiteSpace(contentId) &&
+                             (IsInline(part) ||
                               (message.HtmlBody?.Contains(
                                   "cid:" + contentId,
                                   StringComparison.OrdinalIgnoreCase) ?? false));
@@ -279,20 +295,31 @@ namespace Odmon.Worker.Services
                 mimeBytes.Length == 0 ||
                 mimeBytes.LongLength > _settings.MaxMimeMessageBytes)
             {
-                throw new InvalidDataException(
-                    "Email MIME is empty or exceeds the configured size limit.");
+                throw new EmailMsgContentException(
+                    EmailMsgContentException.UnprocessableMimeContent);
             }
 
             if (_settings.MaxMimeAttachmentCount <= 0)
                 throw new InvalidOperationException("Email MIME attachment-count limit must be positive.");
 
-            var neutral = await NeutralEmailMimeReader.ReadAsync(
-                mimeBytes,
-                _settings.MaxMimeAttachmentCount,
-                cancellationToken);
-            var bytes = OutlookMsgWriter.Generate(neutral);
+            byte[] bytes;
+            try
+            {
+                var neutral = await NeutralEmailMimeReader.ReadAsync(
+                    mimeBytes,
+                    _settings.MaxMimeAttachmentCount,
+                    cancellationToken);
+                bytes = OutlookMsgWriter.Generate(neutral);
+            }
+            catch (Exception ex) when (IsContentFailure(ex))
+            {
+                throw new EmailMsgContentException(
+                    EmailMsgContentException.UnprocessableMimeContent,
+                    ex);
+            }
             if (bytes.LongLength > _settings.MaxMimeMessageBytes)
-                throw new InvalidDataException("Generated MSG exceeds the configured size limit.");
+                throw new EmailMsgContentException(
+                    EmailMsgContentException.UnprocessableMimeContent);
             var directory = Path.Combine(Path.GetTempPath(), TempDirectoryName);
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, $"{Guid.NewGuid():N}.msg");
@@ -307,6 +334,9 @@ namespace Odmon.Worker.Services
                 throw;
             }
         }
+
+        private static bool IsContentFailure(Exception exception)
+            => exception is InvalidDataException or FormatException or ArgumentException or ParseException;
 
         private sealed class TemporaryEmailMsgArtifact(string filePath) : IEmailMsgArtifact
         {
