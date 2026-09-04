@@ -10,7 +10,7 @@ using Xunit;
 
 namespace Odmon.Worker.Tests
 {
-    public sealed class EmailFilingTests
+    public sealed partial class EmailFilingTests
     {
         private static readonly DateTime ReceivedUtc =
             new(2026, 8, 26, 9, 15, 0, DateTimeKind.Utc);

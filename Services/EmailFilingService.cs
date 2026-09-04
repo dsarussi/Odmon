@@ -1027,7 +1027,7 @@ namespace Odmon.Worker.Services
             return EmailFilingConstants.NotAllowlisted;
         }
 
-        private string CreateMessageFingerprint(string mailbox, EmailAutomationMessage message)
+        internal string CreateMessageFingerprint(string mailbox, EmailAutomationMessage message)
         {
             var stableIdentifier = !string.IsNullOrWhiteSpace(message.InternetMessageId)
                 ? $"internet:{message.InternetMessageId.Trim()}"

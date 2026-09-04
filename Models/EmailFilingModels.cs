@@ -6,6 +6,8 @@ namespace Odmon.Worker.Models
         public string Mailbox { get; set; } = string.Empty;
         public string FolderId { get; set; } = string.Empty;
         public string? DeltaLink { get; set; }
+        // A completed page checkpoint; DeltaLink remains the last completed round.
+        public string? NextLink { get; set; }
         public DateTime ProcessingFromUtc { get; set; }
         public DateTime? LastSuccessfulSyncUtc { get; set; }
         public DateTime CreatedAtUtc { get; set; }
@@ -17,6 +19,8 @@ namespace Odmon.Worker.Models
         public long Id { get; set; }
         public string Mailbox { get; set; } = string.Empty;
         public string MessageFingerprint { get; set; } = string.Empty;
+        // Keyed digest only. Set by polling after ProcessAsync returns successfully.
+        public string? ProcessedContentFingerprint { get; set; }
         public DateTime? ReceivedDateTimeUtc { get; set; }
         public int TikCandidateCount { get; set; }
         public int ResolvedTikCount { get; set; }

@@ -325,6 +325,7 @@ namespace Odmon.Worker.Data
                 b.HasIndex(x => x.FinalDecision);
                 b.Property(x => x.Mailbox).HasMaxLength(320).IsRequired();
                 b.Property(x => x.MessageFingerprint).HasMaxLength(64).IsRequired();
+                b.Property(x => x.ProcessedContentFingerprint).HasMaxLength(64);
                 b.Property(x => x.ObserverClassifications).HasMaxLength(256).IsRequired();
                 b.Property(x => x.FinalDecision).HasMaxLength(64).IsRequired();
             });
@@ -337,6 +338,7 @@ namespace Odmon.Worker.Data
                 b.Property(x => x.Mailbox).HasMaxLength(320).IsRequired();
                 b.Property(x => x.FolderId).HasMaxLength(256).IsRequired();
                 b.Property(x => x.DeltaLink).HasColumnType("nvarchar(max)");
+                b.Property(x => x.NextLink).HasColumnType("nvarchar(max)");
             });
 
             modelBuilder.Entity<EmailFilingCandidateDiagnostic>(b =>
