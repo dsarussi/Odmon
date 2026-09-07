@@ -226,6 +226,15 @@ namespace Odmon.Worker.Models
         /// <summary>UserData "כתובת חברת ביטוח 2".</summary>
         [NotMapped]
         public string? InsuranceCompany2Address { get; set; }
+        /// <summary>UserData "חברת ביטוח תובעת 1" from the legal case-details page.</summary>
+        [NotMapped]
+        public string? PlaintiffInsuranceCompany1 { get; set; }
+        /// <summary>UserData "חברת ביטוח נתבעת 1" from the legal case-details page.</summary>
+        [NotMapped]
+        public string? DefendantInsuranceCompany1 { get; set; }
+        /// <summary>UserData "חברת ביטוח נתבעת 2" from the legal case-details page.</summary>
+        [NotMapped]
+        public string? DefendantInsuranceCompany2 { get; set; }
         /// <summary>UserData "סוג הליך".</summary>
         [NotMapped]
         public string? ProceedingType { get; set; }

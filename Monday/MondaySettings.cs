@@ -103,6 +103,12 @@ namespace Odmon.Worker.Monday
         public string? InsuranceCompany2ColumnId { get; set; } = "text_mm1gy0q4";
         /// <summary>כתובת חברת ביטוח 2 — second insurance company address text column.</summary>
         public string? InsuranceCompany2AddressColumnId { get; set; } = "text_mm1gmta2";
+        /// <summary>חברת ביטוח תובעת 1 — first plaintiff insurance company text column.</summary>
+        public string? PlaintiffInsuranceCompany1ColumnId { get; set; } = "text_mm6yc7kc";
+        /// <summary>חברת ביטוח נתבעת 1 — first defendant insurance company text column.</summary>
+        public string? DefendantInsuranceCompany1ColumnId { get; set; } = "text_mm6yyakt";
+        /// <summary>חברת ביטוח נתבעת 2 — second defendant insurance company text column.</summary>
+        public string? DefendantInsuranceCompany2ColumnId { get; set; } = "text_mm6y9w3f";
         /// <summary>סוג הליך — proceeding type text column.</summary>
         public string? ProceedingTypeColumnId { get; set; } = "text_mm1gsp8k";
         /// <summary>סכום לתשלום — payment due amount numeric column.</summary>

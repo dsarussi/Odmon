@@ -825,6 +825,13 @@ namespace Odmon.Worker.OdcanitAccess
 
         internal static bool ApplyUserDataField(OdcanitCase odcanitCase, OdcanitUserData row)
         {
+            if (IsInsurancePartyField(row.FieldName) &&
+                (!string.Equals(row.PageName, LegalUserDataPageName, StringComparison.Ordinal) ||
+                 !IsExactInsurancePartyField(row.FieldName)))
+            {
+                return false;
+            }
+
             var key = NormalizeUserFieldName(row.FieldName);
             if (key == null || !UserDataFieldHandlers.TryGetValue(key, out var handler))
             {
@@ -834,6 +841,18 @@ namespace Odmon.Worker.OdcanitAccess
             handler(odcanitCase, row);
             return true;
         }
+
+        private static bool IsInsurancePartyField(string? fieldName)
+        {
+            var normalized = NormalizeUserFieldName(fieldName);
+            return normalized is "חברת ביטוח תובעת 1" or "חברת ביטוח נתבעת 1" or "חברת ביטוח נתבעת 2";
+        }
+
+        private static bool IsExactInsurancePartyField(string? fieldName)
+            => fieldName is "חברת ביטוח תובעת 1" or "חברת ביטוח נתבעת 1" or "חברת ביטוח נתבעת 2";
+
+        private static string? TrimUserDataText(string? value)
+            => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
         private static Dictionary<string, Action<OdcanitCase, OdcanitUserData>> BuildUserDataFieldHandlers()
         {
@@ -1006,6 +1025,9 @@ namespace Odmon.Worker.OdcanitAccess
             Add("כתובת חברת ביטוח 1", (c, row) => c.InsuranceCompany1Address = row.strData);
             Add("חברת ביטוח 2", (c, row) => c.InsuranceCompany2 = row.strData);
             Add("כתובת חברת ביטוח 2", (c, row) => c.InsuranceCompany2Address = row.strData);
+            Add("חברת ביטוח תובעת 1", (c, row) => c.PlaintiffInsuranceCompany1 = TrimUserDataText(row.strData));
+            Add("חברת ביטוח נתבעת 1", (c, row) => c.DefendantInsuranceCompany1 = TrimUserDataText(row.strData));
+            Add("חברת ביטוח נתבעת 2", (c, row) => c.DefendantInsuranceCompany2 = TrimUserDataText(row.strData));
             Add("סוג הליך", (c, row) => c.ProceedingType = row.strData);
 
             return dict;

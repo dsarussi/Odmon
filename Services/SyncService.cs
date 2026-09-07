@@ -1207,6 +1207,7 @@ namespace Odmon.Worker.Services
             TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany1AddressColumnId, c.InsuranceCompany1Address);
             TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany2ColumnId, c.InsuranceCompany2);
             TryAddStringColumn(columnValues, _mondaySettings.InsuranceCompany2AddressColumnId, c.InsuranceCompany2Address);
+            AddInsurancePartyColumns(columnValues, _mondaySettings, c);
             TryAddStringColumn(columnValues, _mondaySettings.ProceedingTypeColumnId, c.ProceedingType);
             TryAddDecimalColumn(columnValues, _mondaySettings.PaymentDueAmountColumnId, c.PaymentDueAmount);
             TryAddDecimalColumn(columnValues, _mondaySettings.ThirdPartyClaimAmountColumnId, c.ThirdPartyClaimAmount);
@@ -1354,6 +1355,16 @@ namespace Odmon.Worker.Services
             }
 
             columnValues[columnId] = value;
+        }
+
+        internal static void AddInsurancePartyColumns(
+            Dictionary<string, object> columnValues,
+            MondaySettings settings,
+            OdcanitCase c)
+        {
+            TryAddStringColumn(columnValues, settings.PlaintiffInsuranceCompany1ColumnId, c.PlaintiffInsuranceCompany1);
+            TryAddStringColumn(columnValues, settings.DefendantInsuranceCompany1ColumnId, c.DefendantInsuranceCompany1);
+            TryAddStringColumn(columnValues, settings.DefendantInsuranceCompany2ColumnId, c.DefendantInsuranceCompany2);
         }
 
         private static void TryAddLongTextColumn(Dictionary<string, object> columnValues, string? columnId, string? value)
@@ -3432,6 +3443,9 @@ namespace Odmon.Worker.Services
             AppendStr(sb, c.InsuranceCompany1Address);
             AppendStr(sb, c.InsuranceCompany2);
             AppendStr(sb, c.InsuranceCompany2Address);
+            AppendStr(sb, c.PlaintiffInsuranceCompany1);
+            AppendStr(sb, c.DefendantInsuranceCompany1);
+            AppendStr(sb, c.DefendantInsuranceCompany2);
             AppendStr(sb, c.ProceedingType);
             AppendDec(sb, c.PaymentDueAmount);
             AppendStr(sb, c.CaseFolderId);
