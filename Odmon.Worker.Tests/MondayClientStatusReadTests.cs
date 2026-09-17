@@ -118,6 +118,26 @@ public sealed class MondayClientStatusReadTests
     }
 
     [Fact]
+    public async Task UpdateHearingStatus_HttpFailureWithoutGraphQlErrorsIsRejected()
+    {
+        var handler = new RecordingHandler(
+            "{\"data\":null}",
+            HttpStatusCode.ServiceUnavailable);
+        var client = CreateClient(handler);
+
+        var exception = await Assert.ThrowsAsync<MondayApiException>(() =>
+            client.UpdateHearingStatusAsync(
+                7000000001,
+                7000000002,
+                "Synthetic label",
+                "synthetic_status",
+                CancellationToken.None));
+
+        Assert.Equal("HTTP_503", exception.ErrorCode);
+        Assert.Equal(503, exception.HttpStatusCode);
+    }
+
+    [Fact]
     public async Task UpdateHearingStatus_MismatchedMutationIdentityIsRejected()
     {
         var handler = new RecordingHandler(

@@ -166,6 +166,8 @@ hostBuilder.ConfigureServices((context, services) =>
     services.AddScoped<MondayMappingReadService>();
     services.AddScoped<MondayItemMappingIntegrityService>();
     services.AddScoped<HearingApprovalSyncService>();
+    services.AddSingleton<IHearingStatusDelay, HearingStatusDelay>();
+    services.AddScoped<HearingStatusWorkflowService>();
     services.AddScoped<HearingNearestSyncService>();
     services.AddScoped<TokenResolverService>();
     services.AddScoped<NispahWriterService>();

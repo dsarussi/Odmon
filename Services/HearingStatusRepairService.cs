@@ -16,8 +16,8 @@ internal sealed record HearingStatusRepairTarget(long MondayItemId, int Expected
 {
     public string ExpectedLabel => ExpectedMeetStatus switch
     {
-        1 => HearingStatusRepairService.CancelledLabel,
-        2 => HearingStatusRepairService.TransferredLabel,
+        1 => HearingStatusWorkflowService.CancelledLabel,
+        2 => HearingStatusWorkflowService.TransferredLabel,
         _ => throw new InvalidOperationException("Unsupported repair status.")
     };
 }
@@ -27,7 +27,9 @@ internal sealed record HearingStatusRepairSummary(
     int SourceValidated,
     int Planned,
     int AlreadyCorrect,
+    int ProtectedWorkflowStatus,
     int Updated,
+    int AdvancedAfterMutation,
     int ValidationFailed,
     int MondayFailed,
     int VerificationFailed,
@@ -39,16 +41,6 @@ internal sealed record HearingStatusRepairSummary(
 
 internal sealed record HearingStatusRepairItemFailure(long MondayItemId, string ReasonCode);
 
-internal interface IHearingStatusRepairDelay
-{
-    Task DelayAsync(TimeSpan delay, CancellationToken ct);
-}
-
-internal sealed class HearingStatusRepairDelay : IHearingStatusRepairDelay
-{
-    public Task DelayAsync(TimeSpan delay, CancellationToken ct) => Task.Delay(delay, ct);
-}
-
 /// <summary>
 /// One-off, allow-listed repair for the hearing status column only. This service
 /// never writes IntegrationDb and deliberately leaves full hearing snapshots
@@ -58,11 +50,8 @@ internal sealed class HearingStatusRepairService
 {
     internal const long TargetBoardId = 5035534500;
     internal const string StatusColumnId = "color_mkzqbrta";
-    internal const string CancelledLabel = "מבוטל";
-    internal const string TransferredLabel = "הועבר";
-    private const int MutationAttempts = 3;
-    private const int VerificationAttempts = 3;
-    private static readonly TimeSpan MutationInterval = TimeSpan.FromSeconds(2);
+    internal const string CancelledLabel = HearingStatusWorkflowService.CancelledLabel;
+    internal const string TransferredLabel = HearingStatusWorkflowService.TransferredLabel;
 
     private static readonly TimeZoneInfo IsraelTimeZone =
         TimeZoneInfo.FindSystemTimeZoneById("Israel Standard Time");
@@ -122,28 +111,25 @@ internal sealed class HearingStatusRepairService
 
     private readonly MondayMappingReadService _mappingReader;
     private readonly IOdcanitReader _odcanitReader;
-    private readonly IMondayClient _mondayClient;
     private readonly IMondayMetadataProvider _metadataProvider;
+    private readonly HearingStatusWorkflowService _statusWorkflow;
     private readonly IConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
-    private readonly IHearingStatusRepairDelay _delay;
 
     public HearingStatusRepairService(
         MondayMappingReadService mappingReader,
         IOdcanitReader odcanitReader,
-        IMondayClient mondayClient,
         IMondayMetadataProvider metadataProvider,
+        HearingStatusWorkflowService statusWorkflow,
         IConfiguration configuration,
-        TimeProvider timeProvider,
-        IHearingStatusRepairDelay delay)
+        TimeProvider timeProvider)
     {
         _mappingReader = mappingReader;
         _odcanitReader = odcanitReader;
-        _mondayClient = mondayClient;
         _metadataProvider = metadataProvider;
+        _statusWorkflow = statusWorkflow;
         _configuration = configuration;
         _timeProvider = timeProvider;
-        _delay = delay;
     }
 
     internal static IReadOnlyList<HearingStatusRepairTarget> GetTargets() => Targets;
@@ -254,6 +240,7 @@ internal sealed class HearingStatusRepairService
 
         var sourceValidated = 0;
         var alreadyCorrect = 0;
+        var protectedWorkflowStatus = 0;
         var planned = new List<HearingStatusRepairTarget>();
         foreach (var target in Targets)
         {
@@ -267,77 +254,81 @@ internal sealed class HearingStatusRepairService
             }
 
             sourceValidated++;
-            try
+            var statusResult = await _statusWorkflow.ReconcileAsync(
+                TargetBoardId,
+                target.MondayItemId,
+                StatusColumnId,
+                target.ExpectedMeetStatus,
+                live: false,
+                ct);
+            switch (statusResult.Outcome)
             {
-                var liveValue = await _mondayClient.GetItemStatusValueAsync(
-                    TargetBoardId,
-                    target.MondayItemId,
-                    StatusColumnId,
-                    ct);
-                if (liveValue == null ||
-                    liveValue.BoardId != TargetBoardId ||
-                    liveValue.ItemId != target.MondayItemId ||
-                    !string.Equals(liveValue.State, "active", StringComparison.OrdinalIgnoreCase))
-                {
-                    failures.TryAdd(target.MondayItemId, "monday_item_missing_inactive_or_identity_mismatch");
-                    continue;
-                }
-
-                if (string.Equals(liveValue.Label, target.ExpectedLabel, StringComparison.Ordinal))
-                {
+                case HearingStatusWorkflowOutcome.AlreadyCorrect:
                     alreadyCorrect++;
-                    continue;
-                }
-
-                planned.Add(target);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-                failures.TryAdd(target.MondayItemId, "monday_status_read_failed");
+                    break;
+                case HearingStatusWorkflowOutcome.ProtectedWorkflowStatus:
+                    protectedWorkflowStatus++;
+                    break;
+                case HearingStatusWorkflowOutcome.Planned:
+                    planned.Add(target);
+                    break;
+                default:
+                    failures.TryAdd(
+                        target.MondayItemId,
+                        statusResult.ReasonCode ?? "monday_status_validation_failed");
+                    break;
             }
         }
 
         var updated = 0;
+        var advancedAfterMutation = 0;
         var mondayFailed = 0;
         var verificationFailed = 0;
         var mondayFailures = new List<HearingStatusRepairItemFailure>();
         var verificationFailures = new List<HearingStatusRepairItemFailure>();
         if (mode == HearingStatusRepairMode.Live)
         {
-            for (var index = 0; index < planned.Count; index++)
+            foreach (var target in planned)
             {
-                var target = planned[index];
                 ct.ThrowIfCancellationRequested();
-                if (index > 0)
+                var statusResult = await _statusWorkflow.ReconcileAsync(
+                    TargetBoardId,
+                    target.MondayItemId,
+                    StatusColumnId,
+                    target.ExpectedMeetStatus,
+                    live: true,
+                    ct);
+                switch (statusResult.Outcome)
                 {
-                    await _delay.DelayAsync(MutationInterval, ct);
-                }
-
-                var mutationFailure = await MutateWithRetryAsync(target, ct);
-                if (mutationFailure != null)
-                {
-                    mondayFailed++;
-                    mondayFailures.Add(new HearingStatusRepairItemFailure(
-                        target.MondayItemId,
-                        mutationFailure));
-                    continue;
-                }
-
-                var verificationFailure = await VerifyMutationAsync(target, ct);
-                if (verificationFailure == null)
-                {
-                    updated++;
-                }
-                else
-                {
-                    verificationFailed++;
-                    verificationFailures.Add(new HearingStatusRepairItemFailure(
-                        target.MondayItemId,
-                        verificationFailure));
+                    case HearingStatusWorkflowOutcome.Updated:
+                        updated++;
+                        break;
+                    case HearingStatusWorkflowOutcome.AdvancedAfterMutation:
+                        advancedAfterMutation++;
+                        break;
+                    case HearingStatusWorkflowOutcome.AlreadyCorrect:
+                        alreadyCorrect++;
+                        break;
+                    case HearingStatusWorkflowOutcome.ProtectedWorkflowStatus:
+                        protectedWorkflowStatus++;
+                        break;
+                    case HearingStatusWorkflowOutcome.MondayFailed:
+                        mondayFailed++;
+                        mondayFailures.Add(new HearingStatusRepairItemFailure(
+                            target.MondayItemId,
+                            statusResult.ReasonCode ?? "MONDAY_FAILED"));
+                        break;
+                    case HearingStatusWorkflowOutcome.VerificationFailed:
+                        verificationFailed++;
+                        verificationFailures.Add(new HearingStatusRepairItemFailure(
+                            target.MondayItemId,
+                            statusResult.ReasonCode ?? "VERIFICATION_FAILED"));
+                        break;
+                    default:
+                        failures.TryAdd(
+                            target.MondayItemId,
+                            statusResult.ReasonCode ?? "monday_status_validation_failed");
+                        break;
                 }
             }
         }
@@ -347,7 +338,9 @@ internal sealed class HearingStatusRepairService
             SourceValidated: sourceValidated,
             Planned: planned.Count,
             AlreadyCorrect: alreadyCorrect,
+            ProtectedWorkflowStatus: protectedWorkflowStatus,
             Updated: updated,
+            AdvancedAfterMutation: advancedAfterMutation,
             ValidationFailed: failures.Count,
             MondayFailed: mondayFailed,
             VerificationFailed: verificationFailed,
@@ -359,103 +352,6 @@ internal sealed class HearingStatusRepairService
                 .ToArray(),
             MondayFailures: mondayFailures,
             VerificationFailures: verificationFailures);
-    }
-
-    private async Task<string?> MutateWithRetryAsync(
-        HearingStatusRepairTarget target,
-        CancellationToken ct)
-    {
-        for (var attempt = 1; attempt <= MutationAttempts; attempt++)
-        {
-            try
-            {
-                await _mondayClient.UpdateHearingStatusAsync(
-                    TargetBoardId,
-                    target.MondayItemId,
-                    target.ExpectedLabel,
-                    StatusColumnId,
-                    ct);
-                return null;
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (MondayApiException ex) when (ex.IsRetryableRateLimit() && attempt < MutationAttempts)
-            {
-                await _delay.DelayAsync(GetRetryDelay(ex, attempt), ct);
-            }
-            catch (MondayApiException ex)
-            {
-                return ex.IsRetryableRateLimit()
-                    ? $"RETRY_EXHAUSTED_{ex.ErrorCode}"
-                    : ex.ErrorCode;
-            }
-            catch
-            {
-                return "MUTATION_EXCEPTION";
-            }
-        }
-
-        return "RETRY_EXHAUSTED";
-    }
-
-    private async Task<string?> VerifyMutationAsync(
-        HearingStatusRepairTarget target,
-        CancellationToken ct)
-    {
-        var failureCode = "READBACK_MISMATCH";
-        for (var attempt = 1; attempt <= VerificationAttempts; attempt++)
-        {
-            try
-            {
-                var liveValue = await _mondayClient.GetItemStatusValueAsync(
-                    TargetBoardId,
-                    target.MondayItemId,
-                    StatusColumnId,
-                    ct);
-                if (liveValue != null &&
-                    liveValue.BoardId == TargetBoardId &&
-                    liveValue.ItemId == target.MondayItemId &&
-                    string.Equals(liveValue.State, "active", StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(liveValue.Label, target.ExpectedLabel, StringComparison.Ordinal))
-                {
-                    return null;
-                }
-
-                failureCode = liveValue == null ||
-                              liveValue.BoardId != TargetBoardId ||
-                              liveValue.ItemId != target.MondayItemId ||
-                              !string.Equals(liveValue.State, "active", StringComparison.OrdinalIgnoreCase)
-                    ? "READBACK_ITEM_INVALID"
-                    : "READBACK_MISMATCH";
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (MondayApiException ex)
-            {
-                failureCode = $"READBACK_{ex.ErrorCode}";
-            }
-            catch
-            {
-                failureCode = "READBACK_EXCEPTION";
-            }
-
-            if (attempt < VerificationAttempts)
-            {
-                await _delay.DelayAsync(TimeSpan.FromSeconds(attempt), ct);
-            }
-        }
-
-        return failureCode;
-    }
-
-    private static TimeSpan GetRetryDelay(MondayApiException exception, int attempt)
-    {
-        var requestedSeconds = exception.RetryAfter?.TotalSeconds ?? Math.Pow(2, attempt);
-        return TimeSpan.FromSeconds(Math.Clamp(requestedSeconds, 1, 60));
     }
 
     private async Task ValidateMondayMetadataAsync(CancellationToken ct)
@@ -471,10 +367,6 @@ internal sealed class HearingStatusRepairService
             TargetBoardId,
             StatusColumnId,
             ct);
-        if (!labels.Contains(CancelledLabel) || !labels.Contains(TransferredLabel))
-        {
-            throw new InvalidOperationException(
-                "Hearing status repair preflight failed: required Monday labels are missing.");
-        }
+        HearingStatusWorkflowService.ValidateManagedLabels(labels);
     }
 }

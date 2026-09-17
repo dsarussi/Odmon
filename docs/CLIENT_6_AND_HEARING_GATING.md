@@ -13,8 +13,11 @@ This document describes the implementation of:
 - Once a valid `MondayItemMapping` exists on the target board, that mapping remains eligible for hearing reconciliation regardless of readiness or mapping creation time.
 - Selection prefers future hearings using the existing order: active, cancelled, then transferred. If no future candidate exists, the most recent elapsed cancelled or transferred hearing inside `HearingNearest:RecoveryLookbackDays` may be selected. Past active hearings are never recovery candidates.
 - The recovery lookback defaults to 30 days, accepts a configured range of 0-365 days, and ignores historical cancelled/transferred rows older than the resulting cutoff.
-- `MeetStatus=0` never writes the Monday hearing-status column. Only cancelled (`1`) and transferred (`2`) statuses are written.
-- A required status label must be present before any reconciliation mutations run. The snapshot advances only after every planned Monday mutation completes successfully. Failed or silently unavailable required mutations leave the previous snapshot intact for retry, and dry-run never advances it.
+- `MeetStatus=0` never writes the Monday hearing-status column. Cancelled (`1`) requests the initial label `מבוטל`; transferred (`2`) requests `הועבר`.
+- The hearing-status column is a workflow, not a source mirror. Before deciding, reconciliation reads the live value. Blank, `דיון לא בוטל`, `מבוטל`, and `הועבר` are system-managed initial states; every other non-empty value is a protected downstream workflow state and is never overwritten.
+- All managed labels must exist in Monday metadata before mutations begin. A mutation is successful only after read-back returns the requested label or a protected value showing that an automation advanced the workflow.
+- `HearingNearest:Mode` is fail-closed: `Disabled` performs no reconciliation, `StatusOnly` permits only the hearing-status mutation, and `Full` also permits the established date/details path. The repository default is `Disabled`; production recovery should begin with `StatusOnly` and `HearingNearest:DryRun=true`.
+- In status-only mode, snapshots record only mapping identity and selected source status. Date, judge, and city remain unbaselined so a later separately approved full reconciliation can still detect them. Snapshots advance only after every permitted action succeeds, and dry-run never advances them.
 
 ## Implementation Details
 
@@ -453,8 +456,8 @@ if (statusChanged && meetStatus != 0 && !string.IsNullOrWhiteSpace(statusColumnI
 | MeetStatus | Monday Label | Update Behavior |
 |------------|--------------|-----------------|
 | 0 (פעיל) | "פעיל" | ❌ Column OMITTED (preserve manual values) |
-| 1 (מבוטל) | "מבוטל" | ✅ Set `{"label": "מבוטל"}` |
-| 2 (הועבר) | "הועבר" | ✅ Set `{"label": "הועבר"}` |
+| 1 (מבוטל) | "מבוטל" | ✅ Transition only from a blank/system-managed initial value; protect downstream workflow labels |
+| 2 (הועבר) | "הועבר" | ✅ Transition only from a blank/system-managed initial value; protect downstream workflow labels |
 
 ## Configuration
 
@@ -483,6 +486,8 @@ public string? HearingStatusColumnId { get; set; } = "color_mkzqbrta";
     "DryRun": false
   },
   "HearingNearest": {
+    "Mode": "Disabled",
+    "DryRun": true,
     "RecoveryLookbackDays": 30
   }
 }
@@ -542,6 +547,8 @@ public string? HearingStatusColumnId { get; set; } = "color_mkzqbrta";
 - MeetStatus = 2 → Set "הועבר"
 - MeetStatus = 0 → Omit column (preserve manual values)
 - Status can be updated even without judge/city data
+- Unknown non-empty Monday labels are protected downstream workflow states
+- Status-only mode cannot write date, time, judge, city, or hearing details
 
 ### ✅ Enhanced Logging
 - Effective court city selection logged

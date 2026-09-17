@@ -135,6 +135,50 @@ public sealed class HearingStatusRepairServiceTests
         Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
     }
 
+    [Theory]
+    [InlineData("נהג קיבל - דיון בוטל")]
+    [InlineData("Synthetic downstream workflow")]
+    public async Task ProtectedWorkflowValue_IsReportedAndNeverPlannedOrMutated(string protectedLabel)
+    {
+        var protectedItem = HearingStatusRepairService.GetTargets()[0];
+        await using var scenario = await CreateScenarioAsync(
+            currentLabels: new Dictionary<long, string?>
+            {
+                [protectedItem.MondayItemId] = protectedLabel
+            });
+
+        var summary = await scenario.Service.RunAsync(
+            HearingStatusRepairMode.Live,
+            CancellationToken.None);
+
+        Assert.Equal(1, summary.ProtectedWorkflowStatus);
+        Assert.Equal(48, summary.Planned);
+        Assert.Equal(48, summary.Updated);
+        Assert.DoesNotContain(scenario.Monday.StatusMutations, mutation =>
+            mutation.ItemId == protectedItem.MondayItemId);
+    }
+
+    [Fact]
+    public async Task AutomationAdvancementAfterMutation_IsSuccessfulAndAccountedSeparately()
+    {
+        var advancedItem = HearingStatusRepairService.GetTargets()[0];
+        await using var scenario = await CreateScenarioAsync(
+            postMutationLabels: new Dictionary<long, string?>
+            {
+                [advancedItem.MondayItemId] = "Synthetic advanced workflow"
+            });
+
+        var summary = await scenario.Service.RunAsync(
+            HearingStatusRepairMode.Live,
+            CancellationToken.None);
+
+        Assert.Equal(49, summary.Planned);
+        Assert.Equal(48, summary.Updated);
+        Assert.Equal(1, summary.AdvancedAfterMutation);
+        Assert.Equal(0, summary.MondayFailed);
+        Assert.Equal(0, summary.VerificationFailed);
+    }
+
     [Fact]
     public async Task RuntimeValidation_SkipsChangedStatusAndInactiveItem()
     {
@@ -249,7 +293,7 @@ public sealed class HearingStatusRepairServiceTests
         Assert.Equal(1, summary.VerificationFailed);
         var failure = Assert.Single(summary.VerificationFailures);
         Assert.Equal(itemId, failure.MondayItemId);
-        Assert.Equal("READBACK_MISMATCH", failure.ReasonCode);
+        Assert.Equal("READBACK_MANAGED_MISMATCH", failure.ReasonCode);
     }
 
     [Fact]
@@ -284,7 +328,8 @@ public sealed class HearingStatusRepairServiceTests
         IEnumerable<string>? allowedLabels = null,
         long? failedMutationItemId = null,
         IReadOnlyDictionary<long, Queue<Exception>>? mutationFailures = null,
-        IReadOnlySet<long>? suppressMutationPersistence = null)
+        IReadOnlySet<long>? suppressMutationPersistence = null,
+        IReadOnlyDictionary<long, string?>? postMutationLabels = null)
     {
         var options = new DbContextOptionsBuilder<IntegrationDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
@@ -309,10 +354,12 @@ public sealed class HearingStatusRepairServiceTests
             inactiveItemIds,
             failedMutationItemId,
             mutationFailures,
-            suppressMutationPersistence);
+            suppressMutationPersistence,
+            postMutationLabels);
         var delay = new FakeDelay();
         var metadata = new FakeMetadataProvider(allowedLabels ??
         [
+            HearingStatusWorkflowService.ActiveBaselineLabel,
             HearingStatusRepairService.CancelledLabel,
             HearingStatusRepairService.TransferredLabel
         ]);
@@ -326,11 +373,10 @@ public sealed class HearingStatusRepairServiceTests
         var service = new HearingStatusRepairService(
             mappingReader,
             reader,
-            monday,
             metadata,
+            new HearingStatusWorkflowService(monday, delay),
             config,
-            new FixedTimeProvider(NowUtc),
-            delay);
+            new FixedTimeProvider(NowUtc));
         return new Scenario(db, service, monday, delay);
     }
 
@@ -352,7 +398,7 @@ public sealed class HearingStatusRepairServiceTests
         public override DateTimeOffset GetUtcNow() => now;
     }
 
-    internal sealed class FakeDelay : IHearingStatusRepairDelay
+    internal sealed class FakeDelay : IHearingStatusDelay
     {
         public List<TimeSpan> Delays { get; } = new();
         public Task DelayAsync(TimeSpan delay, CancellationToken ct)
@@ -415,19 +461,22 @@ public sealed class HearingStatusRepairServiceTests
         private readonly long? _failedMutationItemId;
         private readonly IReadOnlyDictionary<long, Queue<Exception>> _mutationFailures;
         private readonly IReadOnlySet<long> _suppressMutationPersistence;
+        private readonly IReadOnlyDictionary<long, string?> _postMutationLabels;
 
         public FakeMondayClient(
             IReadOnlyDictionary<long, string?>? currentLabels,
             IReadOnlySet<long>? inactiveItemIds,
             long? failedMutationItemId,
             IReadOnlyDictionary<long, Queue<Exception>>? mutationFailures,
-            IReadOnlySet<long>? suppressMutationPersistence)
+            IReadOnlySet<long>? suppressMutationPersistence,
+            IReadOnlyDictionary<long, string?>? postMutationLabels)
         {
             _currentLabels = currentLabels?.ToDictionary(pair => pair.Key, pair => pair.Value) ?? new();
             _inactiveItemIds = inactiveItemIds ?? new HashSet<long>();
             _failedMutationItemId = failedMutationItemId;
             _mutationFailures = mutationFailures ?? new Dictionary<long, Queue<Exception>>();
             _suppressMutationPersistence = suppressMutationPersistence ?? new HashSet<long>();
+            _postMutationLabels = postMutationLabels ?? new Dictionary<long, string?>();
         }
 
         public List<(long BoardId, long ItemId, string Label, string ColumnId)> StatusMutations { get; } = new();
@@ -453,7 +502,9 @@ public sealed class HearingStatusRepairServiceTests
             }
             if (!_suppressMutationPersistence.Contains(itemId))
             {
-                _currentLabels[itemId] = label;
+                _currentLabels[itemId] = _postMutationLabels.TryGetValue(itemId, out var postMutationLabel)
+                    ? postMutationLabel
+                    : label;
             }
             return Task.CompletedTask;
         }

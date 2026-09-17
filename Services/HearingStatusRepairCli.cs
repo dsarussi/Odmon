@@ -148,7 +148,9 @@ internal static class HearingStatusRepairCli
         output.WriteLine($"SourceValidated={summary.SourceValidated}");
         output.WriteLine($"Planned={summary.Planned}");
         output.WriteLine($"AlreadyCorrect={summary.AlreadyCorrect}");
+        output.WriteLine($"ProtectedWorkflowStatus={summary.ProtectedWorkflowStatus}");
         output.WriteLine($"Updated={summary.Updated}");
+        output.WriteLine($"AdvancedAfterMutation={summary.AdvancedAfterMutation}");
         output.WriteLine($"ValidationFailed={summary.ValidationFailed}");
         output.WriteLine($"MondayFailed={summary.MondayFailed}");
         output.WriteLine($"VerificationFailed={summary.VerificationFailed}");
@@ -179,7 +181,9 @@ internal static class HearingStatusRepairCli
         output.WriteLine("SourceValidated=0");
         output.WriteLine("Planned=0");
         output.WriteLine("AlreadyCorrect=0");
+        output.WriteLine("ProtectedWorkflowStatus=0");
         output.WriteLine("Updated=0");
+        output.WriteLine("AdvancedAfterMutation=0");
         output.WriteLine($"ValidationFailed={targets.Count}");
         output.WriteLine("MondayFailed=0");
         output.WriteLine("VerificationFailed=0");
@@ -225,7 +229,8 @@ internal static class HearingStatusRepairCli
                 services.AddHttpClient<IMondayMetadataProvider, MondayMetadataProvider>(client =>
                     client.BaseAddress = new Uri("https://api.monday.com/v2/"));
                 services.AddSingleton(TimeProvider.System);
-                services.AddSingleton<IHearingStatusRepairDelay, HearingStatusRepairDelay>();
+                services.AddSingleton<IHearingStatusDelay, HearingStatusDelay>();
+                services.AddScoped<HearingStatusWorkflowService>();
                 services.AddScoped<HearingStatusRepairService>();
             })
             .Build();
