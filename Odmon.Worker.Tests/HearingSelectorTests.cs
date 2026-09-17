@@ -189,6 +189,55 @@ namespace Odmon.Worker.Tests
             Assert.Empty(result);
         }
 
+        [Fact]
+        public void PickNearestUpcomingHearing_RecentlyElapsedCancelled_SelectsRecoveryCandidate()
+        {
+            var now = new DateTime(2026, 8, 20, 10, 0, 0);
+            var cancelled = NewEvent(tikCounter: 101, start: now.AddDays(-2), meetStatus: 1);
+
+            var result = HearingSelector.PickNearestUpcomingHearing(
+                new[] { cancelled }, now, TimeSpan.FromDays(30));
+
+            Assert.Same(cancelled, result[101]);
+        }
+
+        [Fact]
+        public void PickNearestUpcomingHearing_RecentlyElapsedTransferred_SelectsRecoveryCandidate()
+        {
+            var now = new DateTime(2026, 8, 20, 10, 0, 0);
+            var transferred = NewEvent(tikCounter: 102, start: now.AddHours(-3), meetStatus: 2);
+
+            var result = HearingSelector.PickNearestUpcomingHearing(
+                new[] { transferred }, now, TimeSpan.FromDays(30));
+
+            Assert.Same(transferred, result[102]);
+        }
+
+        [Fact]
+        public void PickNearestUpcomingHearing_PastActive_IsNeverRecoveryCandidate()
+        {
+            var now = new DateTime(2026, 8, 20, 10, 0, 0);
+            var active = NewEvent(tikCounter: 103, start: now.AddHours(-1), meetStatus: 0);
+
+            var result = HearingSelector.PickNearestUpcomingHearing(
+                new[] { active }, now, TimeSpan.FromDays(30));
+
+            Assert.Empty(result);
+        }
+
+        [Fact]
+        public void PickNearestUpcomingHearing_ElapsedOutsideLookback_IsNotSelected()
+        {
+            var now = new DateTime(2026, 8, 20, 10, 0, 0);
+            var cancelled = NewEvent(tikCounter: 104, start: now.AddDays(-31), meetStatus: 1);
+            var transferred = NewEvent(tikCounter: 105, start: now.AddDays(-31), meetStatus: 2);
+
+            var result = HearingSelector.PickNearestUpcomingHearing(
+                new[] { cancelled, transferred }, now, TimeSpan.FromDays(30));
+
+            Assert.Empty(result);
+        }
+
         private static OdcanitDiaryEvent NewEvent(int? tikCounter, DateTime? start, int meetStatus = 0)
         {
             return new OdcanitDiaryEvent

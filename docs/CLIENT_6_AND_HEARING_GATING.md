@@ -7,6 +7,15 @@ This document describes the implementation of:
 2. **Hearing update gating**: Only update hearing date/hour when BOTH JudgeName AND EffectiveCourtCity exist
 3. **Independent hearing status updates**: Status can be updated even without judge/city data
 
+## Reconciliation Eligibility and Recovery
+
+- `ReadyForMonday` and `ListenerState.StartedAtUtc` gate onboarding and new-item creation only.
+- Once a valid `MondayItemMapping` exists on the target board, that mapping remains eligible for hearing reconciliation regardless of readiness or mapping creation time.
+- Selection prefers future hearings using the existing order: active, cancelled, then transferred. If no future candidate exists, the most recent elapsed cancelled or transferred hearing inside `HearingNearest:RecoveryLookbackDays` may be selected. Past active hearings are never recovery candidates.
+- The recovery lookback defaults to 30 days, accepts a configured range of 0-365 days, and ignores historical cancelled/transferred rows older than the resulting cutoff.
+- `MeetStatus=0` never writes the Monday hearing-status column. Only cancelled (`1`) and transferred (`2`) statuses are written.
+- A required status label must be present before any reconciliation mutations run. The snapshot advances only after every planned Monday mutation completes successfully. Failed or silently unavailable required mutations leave the previous snapshot intact for retry, and dry-run never advances it.
+
 ## Implementation Details
 
 ### 1. Client 6 Special Behavior
@@ -472,6 +481,9 @@ public string? HearingStatusColumnId { get; set; } = "color_mkzqbrta";
   "OdcanitWrites": {
     "Enable": true,
     "DryRun": false
+  },
+  "HearingNearest": {
+    "RecoveryLookbackDays": 30
   }
 }
 ```

@@ -338,7 +338,7 @@ namespace Odmon.Worker.Services
 
             // ── ReadyForMonday gating: cases not ready are out-of-scope for Monday sync ──
             var beforeReadyFilter = newOrUpdatedCases.Count;
-            newOrUpdatedCases = newOrUpdatedCases.Where(c => c.IsReadyForMonday).ToList();
+            newOrUpdatedCases = FilterReadyForMonday(newOrUpdatedCases);
             var readyFilteredCount = beforeReadyFilter - newOrUpdatedCases.Count;
             if (readyFilteredCount > 0)
             {
@@ -3582,6 +3582,9 @@ namespace Odmon.Worker.Services
             
             return clientNumberStr == "6";
         }
+
+        internal static List<OdcanitCase> FilterReadyForMonday(IEnumerable<OdcanitCase> cases)
+            => cases.Where(c => c.IsReadyForMonday).ToList();
 
         internal static bool IsClient21(string? clientVisualID)
         {

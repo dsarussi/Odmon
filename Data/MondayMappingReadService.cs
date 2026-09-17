@@ -233,6 +233,14 @@ WHERE m.BoardId = @boardId
         public Task<List<MondayItemMapping>> GetAllByBoardReadOnlyAsync(
             long boardId, CancellationToken ct)
         {
+            if (!_db.Database.IsRelational())
+            {
+                return _db.MondayItemMappings
+                    .AsNoTracking()
+                    .Where(mapping => mapping.BoardId == boardId)
+                    .ToListAsync(ct);
+            }
+
             return _db.MondayItemMappings
                 .FromSqlRaw(
                     "SELECT * FROM dbo.MondayItemMappings WITH (NOLOCK) WHERE BoardId = {0}",

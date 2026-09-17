@@ -23,14 +23,6 @@ namespace Odmon.Worker.Services
     {
         private static readonly TimeZoneInfo IsraelTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Israel Standard Time");
 
-        /// <summary>MeetStatus: 0=active, 1=cancelled, 2=rescheduled.</summary>
-        private static readonly IReadOnlyDictionary<int, string> MeetStatusToLabel = new Dictionary<int, string>
-        {
-            [0] = "פעיל",
-            [1] = "מבוטל",
-            [2] = "הועבר"
-        };
-
         private readonly IOdcanitReader _odcanitReader;
         private readonly IntegrationDbContext _integrationDb;
         private readonly IMondayClient _mondayClient;
@@ -85,73 +77,30 @@ namespace Odmon.Worker.Services
                 "HearingNearest sync: Mode={Mode}, BoardId={BoardId}, Enable={Enable}, DryRun={DryRun}",
                 mode, boardId, enableWrites, dryRun);
 
-            // Load ListenerState T0 to filter out pre-T0 mappings
-            var listenerState = await _integrationDb.ListenerStates
-                .AsNoTracking()
-                .FirstOrDefaultAsync(x => x.Id == 1, ct);
-
-            var allMappings = await _mappingReader.GetAllByBoardReadOnlyAsync(boardId, ct);
-
-            List<MondayItemMapping> mappings;
-            if (listenerState != null)
-            {
-                // Only process mappings created after listener start (T0).
-                // Pre-existing/test mappings (CreatedAtUtc = 2000-01-01) are excluded.
-                mappings = allMappings
-                    .Where(m => m.CreatedAtUtc >= listenerState.StartedAtUtc)
-                    .ToList();
-
-                var excluded = allMappings.Count - mappings.Count;
-                if (excluded > 0)
-                {
-                    _logger.LogInformation(
-                        "HearingNearest: Filtered {Excluded} pre-T0 mappings (CreatedAtUtc < {T0:yyyy-MM-dd HH:mm:ss}). Remaining={Remaining}, BoardId={BoardId}",
-                        excluded, listenerState.StartedAtUtc, mappings.Count, boardId);
-                }
-            }
-            else
-            {
-                // No ListenerState yet — process all mappings (first run / allowlist mode)
-                mappings = allMappings;
-            }
+            // An existing, valid mapping on the target board is the reconciliation boundary.
+            // Listener T0 and ReadyForMonday are onboarding-only concerns and must not
+            // suppress ongoing hearing updates for an item that already exists in Monday.
+            var mappings = await _mappingReader.GetAllByBoardReadOnlyAsync(boardId, ct);
 
             if (mappings.Count == 0)
             {
-                _logger.LogDebug("No eligible Monday mappings for board {BoardId} after T0 filtering; skipping hearing sync.", boardId);
+                _logger.LogDebug("No Monday mappings for board {BoardId}; skipping hearing sync.", boardId);
                 return;
             }
 
-            // ── ReadyForMonday gating: skip hearing sync for cases not ready for Monday ──
             await ValidateMappingIdentityAsync(mappings, boardId, ct);
-
-            var tikCountersForReadyCheck = mappings.Select(m => m.TikCounter).Distinct().ToList();
-            var casesForReadyCheck = await _odcanitReader.GetCasesByTikCountersAsync(tikCountersForReadyCheck, ct);
-            var readyTikCounters = new HashSet<int>(casesForReadyCheck.Where(c => c.IsReadyForMonday).Select(c => c.TikCounter));
-            var beforeReadyFilter = mappings.Count;
-            mappings = mappings.Where(m => readyTikCounters.Contains(m.TikCounter)).ToList();
-            var readyFilteredCount = beforeReadyFilter - mappings.Count;
-            if (readyFilteredCount > 0)
-            {
-                var skippedTikNumbers = tikCountersForReadyCheck
-                    .Where(tc => !readyTikCounters.Contains(tc))
-                    .Select(tc => casesForReadyCheck.FirstOrDefault(c => c.TikCounter == tc)?.TikNumber ?? tc.ToString())
-                    .Take(10)
-                    .ToList();
-                _logger.LogInformation(
-                    "Hearing sync ReadyForMonday gating: filtered {Filtered} mapping(s) (case not ready). Remaining={Remaining}, BoardId={BoardId}, SampleSkipped={Sample}",
-                    readyFilteredCount, mappings.Count, boardId, string.Join(", ", skippedTikNumbers));
-            }
-
-            if (mappings.Count == 0)
-            {
-                _logger.LogDebug("No mappings remain after ReadyForMonday filter; skipping hearing sync. BoardId={BoardId}", boardId);
-                return;
-            }
 
             var tikCounters = mappings.Select(m => m.TikCounter).Distinct().ToList();
             var diaryRows = await _odcanitReader.GetDiaryEventsByTikCountersAsync(tikCounters, ct);
             var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, IsraelTimeZone);
-            var nearestByTik = HearingSelector.PickNearestUpcomingHearing(diaryRows, nowLocal);
+            var recoveryLookbackDays = Math.Clamp(
+                _config.GetValue<int>("HearingNearest:RecoveryLookbackDays", 30),
+                0,
+                365);
+            var nearestByTik = HearingSelector.PickNearestUpcomingHearing(
+                diaryRows,
+                nowLocal,
+                TimeSpan.FromDays(recoveryLookbackDays));
 
             var mappedCases = mappings.Count;
             var selectedActive = nearestByTik.Values.Count(h => (h.MeetStatus ?? 0) == 0);
@@ -220,37 +169,6 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
-                var meetStatus = hearing.MeetStatus ?? 0;
-                var label = GetMeetStatusLabel(meetStatus);
-                if (label == null)
-                {
-                    _logger.LogWarning("Unknown MeetStatus={MeetStatus} for TikCounter={TikCounter}; skipping.", meetStatus, mapping.TikCounter);
-                    continue;
-                }
-
-                if (allowedStatusLabels != null && !allowedStatusLabels.Contains(label))
-                {
-                    _logger.LogWarning(
-                        "Hearing status label '{Label}' not found on Monday column {ColumnId} for board {BoardId}; skipping status update for TikCounter={TikCounter}, MondayItemId={MondayItemId}.",
-                        label, statusColumnId, boardId, mapping.TikCounter, mapping.MondayItemId);
-
-                    await _skipLogger.LogSkipAsync(
-                        mapping.TikCounter,
-                        mapping.TikNumber,
-                        operation: "MondayColumnValueValidation",
-                        reasonCode: "monday_invalid_status_label",
-                        entityId: statusColumnId ?? string.Empty,
-                        rawValue: label,
-                        details: new
-                        {
-                            EntityType = "Status",
-                            BoardId = boardId,
-                            MondayItemId = mapping.MondayItemId,
-                            AllowedLabelCount = allowedStatusLabels?.Count ?? 0
-                        },
-                        ct);
-                }
-
                 var snapshot = await _integrationDb.HearingNearestSnapshots
                     .FirstOrDefaultAsync(s => s.TikCounter == mapping.TikCounter && s.BoardId == boardId, ct);
                 if (snapshot == null)
@@ -261,86 +179,82 @@ namespace Odmon.Worker.Services
                 var startDateUtc = hearing.StartDate!.Value.Kind == DateTimeKind.Utc
                     ? hearing.StartDate.Value
                     : TimeZoneInfo.ConvertTimeToUtc(hearing.StartDate.Value, IsraelTimeZone);
-                
-                // Determine what can be updated based on available data
-                var hasJudgeName = !string.IsNullOrWhiteSpace(hearing.JudgeName);
-                var hasCourtCity = !string.IsNullOrWhiteSpace(effectiveCourtCity);
-                var canUpdateDateHour = hasJudgeName && hasCourtCity;
-                
-                var judgeName = hasJudgeName ? hearing.JudgeName!.Trim() : null;
-                var city = hasCourtCity ? effectiveCourtCity! : null;
-                
-                _logger.LogDebug(
-                    "Hearing update gating: TikCounter={TikCounter}, HasJudgeName={HasJudgeName}, HasCourtCity={HasCourtCity}, CanUpdateDateHour={CanUpdateDateHour}",
-                    mapping.TikCounter,
-                    hasJudgeName,
-                    hasCourtCity,
-                    canUpdateDateHour);
-                
-                // Compute what changed (compare to snapshot)
-                var snapshotStartUtc = snapshot?.NearestStartDateUtc;
-                var snapshotStatus = snapshot?.NearestMeetStatus;
-                var snapshotJudge = snapshot?.JudgeName;
-                var snapshotCity = snapshot?.City;
-                
-                var startDateChanged = snapshotStartUtc == null || Math.Abs((startDateUtc - snapshotStartUtc.Value).TotalMinutes) > 1;
-                var statusChanged = snapshotStatus == null || snapshotStatus.Value != meetStatus;
-                var judgeChanged = hasJudgeName && (snapshotJudge == null || !string.Equals(snapshotJudge, judgeName, StringComparison.Ordinal));
-                var cityChanged = hasCourtCity && (snapshotCity == null || !string.Equals(snapshotCity, city, StringComparison.Ordinal));
-                
-                var plannedSteps = new List<string>();
-                
-                // Status can be updated independently (not blocked by missing judge/city)
-                if (statusChanged)
-                {
-                    plannedSteps.Add($"SetStatus_{label}");
-                }
-                
-                // Judge and city can be updated if they exist and changed
-                if (judgeChanged || cityChanged)
-                {
-                    plannedSteps.Add("UpdateJudgeCity");
-                }
-                
-                // Date/hour can ONLY be updated if BOTH JudgeName and CourtCity exist
-                if (startDateChanged && canUpdateDateHour)
-                {
-                    plannedSteps.Add("UpdateHearingDate");
-                }
-                else if (startDateChanged && !canUpdateDateHour)
+                var plan = HearingNearestSyncServiceHelper.CreatePlan(
+                    hearing,
+                    snapshot,
+                    startDateUtc,
+                    effectiveCourtCity);
+
+                if (plan.DateUpdateBlocked)
                 {
                     _logger.LogDebug(
                         "Hearing date/hour update blocked (missing judge or court city): TikCounter={TikCounter}, TikNumber={TikNumber}, MondayItemId={MondayItemId}, HasJudgeName={HasJudgeName}, HasCourtCity={HasCourtCity}",
                         mapping.TikCounter,
                         mapping.TikNumber,
                         mapping.MondayItemId,
-                        hasJudgeName,
-                        hasCourtCity);
+                        plan.JudgeName != null,
+                        plan.City != null);
                 }
 
-                if (plannedSteps.Count == 0)
+                var hasSnapshotChanges = plan.StatusChanged
+                    || plan.StartDateChanged
+                    || plan.JudgeChanged
+                    || plan.CityChanged;
+                if (!hasSnapshotChanges)
                 {
                     noChange++;
                     _logger.LogDebug(
                         "Hearing sync no-op (no change): TikCounter={TikCounter}, MondayItemId={MondayItemId}, StartDate={StartDate}, MeetStatus={MeetStatus}",
-                        mapping.TikCounter, mapping.MondayItemId, hearing.StartDate!.Value.ToString("yyyy-MM-dd HH:mm"), meetStatus);
+                        mapping.TikCounter, mapping.MondayItemId, hearing.StartDate!.Value.ToString("yyyy-MM-dd HH:mm"), plan.MeetStatus);
                     continue;
                 }
 
-                wouldUpdate++;
+                if (plan.StatusUpdateRequired
+                    && (string.IsNullOrWhiteSpace(statusColumnId)
+                        || allowedStatusLabels == null
+                        || plan.StatusLabel == null
+                        || !allowedStatusLabels.Contains(plan.StatusLabel)))
+                {
+                    _logger.LogWarning(
+                        "Required hearing status label '{Label}' is unavailable on Monday column {ColumnId} for board {BoardId}; reconciliation and snapshot are deferred for TikCounter={TikCounter}, MondayItemId={MondayItemId}.",
+                        plan.StatusLabel ?? "<null>", statusColumnId ?? "<null>", boardId, mapping.TikCounter, mapping.MondayItemId);
+
+                    await _skipLogger.LogSkipAsync(
+                        mapping.TikCounter,
+                        mapping.TikNumber,
+                        operation: "MondayColumnValueValidation",
+                        reasonCode: "monday_invalid_status_label",
+                        entityId: statusColumnId ?? string.Empty,
+                        rawValue: plan.StatusLabel,
+                        details: new
+                        {
+                            EntityType = "Status",
+                            BoardId = boardId,
+                            MondayItemId = mapping.MondayItemId,
+                            AllowedLabelCount = allowedStatusLabels?.Count ?? 0
+                        },
+                        ct);
+                    failed++;
+                    continue;
+                }
+
+                if (plan.HasRequiredMutations)
+                {
+                    wouldUpdate++;
+                }
 
                 _logger.LogDebug(
                     "Hearing sync planned: TikCounter={TikCounter}, TikNumber={TikNumber}, MondayItemId={MondayItemId}, StartDate={StartDate}, MeetStatus={MeetStatus}, Steps=[{Steps}], SnapshotOld=[StartDate={SnapshotStart}, Status={SnapshotStatus}], CanUpdateDateHour={CanUpdateDateHour}",
                     mapping.TikCounter, mapping.TikNumber, mapping.MondayItemId,
-                    hearing.StartDate!.Value.ToString("yyyy-MM-dd HH:mm"), meetStatus, string.Join(", ", plannedSteps),
-                    snapshotStartUtc?.ToString("yyyy-MM-dd HH:mm") ?? "<null>", snapshotStatus?.ToString() ?? "<null>", canUpdateDateHour);
+                    hearing.StartDate!.Value.ToString("yyyy-MM-dd HH:mm"), plan.MeetStatus, string.Join(", ", plan.PlannedSteps),
+                    snapshot?.NearestStartDateUtc?.ToString("yyyy-MM-dd HH:mm") ?? "<null>", snapshot?.NearestMeetStatus?.ToString() ?? "<null>", plan.DateUpdateRequired);
 
 
                 if (!enableWrites || dryRun)
                 {
                     _logger.LogDebug(
                         "Hearing sync dry run: TikCounter={TikCounter}, MondayItemId={MondayItemId}, would execute steps: [{Steps}]",
-                        mapping.TikCounter, mapping.MondayItemId, string.Join(", ", plannedSteps));
+                        mapping.TikCounter, mapping.MondayItemId, string.Join(", ", plan.PlannedSteps));
                     continue;
                 }
 
@@ -352,9 +266,7 @@ namespace Odmon.Worker.Services
                 {
                     await ExecuteHearingUpdatesAsync(
                         boardId, effectiveItemId, mapping.TikCounter,
-                        statusChanged, meetStatus, label, statusColumnId, allowedStatusLabels,
-                        judgeChanged, cityChanged, hasJudgeName, hasCourtCity, judgeName, city,
-                        startDateChanged, canUpdateDateHour, hearing,
+                        plan, statusColumnId, hearing,
                         executedSteps, columnsToUpdate, ct);
                 }
                 catch (MondayApiException apiEx) when (apiEx.IsInactiveItemError())
@@ -373,7 +285,7 @@ namespace Odmon.Worker.Services
                             TikCounter = mapping.TikCounter,
                             TikNumber = mapping.TikNumber,
                             BoardId = boardId,
-                            Operation = "hearing_update_skipped_not_ready_or_inactive",
+                            Operation = "hearing_update_skipped_inactive",
                             ErrorType = "InactiveMondayItem",
                             ErrorMessage = $"Monday item {effectiveItemId} is inactive. Skipped hearing update; no revive. Error: {apiEx.Message}",
                             OccurredAtUtc = DateTime.UtcNow,
@@ -397,7 +309,7 @@ namespace Odmon.Worker.Services
                     failed++;
                     _logger.LogError(ex,
                         "Hearing sync failed: TikCounter={TikCounter}, MondayItemId={MondayItemId}, PlannedSteps=[{Planned}], ExecutedSteps=[{Executed}]",
-                        mapping.TikCounter, effectiveItemId, string.Join(", ", plannedSteps), string.Join(", ", executedSteps));
+                        mapping.TikCounter, effectiveItemId, string.Join(", ", plan.PlannedSteps), string.Join(", ", executedSteps));
                     continue;
                 }
 
@@ -412,20 +324,29 @@ namespace Odmon.Worker.Services
                             TikCounter = mapping.TikCounter,
                             BoardId = boardId,
                             MondayItemId = effectiveItemId,
-                            NearestStartDateUtc = startDateUtc,
-                            NearestMeetStatus = meetStatus,
-                            JudgeName = judgeName,
-                            City = city,
+                            NearestStartDateUtc = plan.DateUpdateBlocked ? null : startDateUtc,
+                            NearestMeetStatus = plan.MeetStatus,
+                            JudgeName = plan.JudgeName,
+                            City = plan.City,
                             LastSyncedAtUtc = nowUtc
                         });
                     }
                     else
                     {
                         snapshot.MondayItemId = effectiveItemId;
-                        snapshot.NearestStartDateUtc = startDateUtc;
-                        snapshot.NearestMeetStatus = meetStatus;
-                        snapshot.JudgeName = judgeName;
-                        snapshot.City = city;
+                        if (!plan.DateUpdateBlocked)
+                        {
+                            snapshot.NearestStartDateUtc = startDateUtc;
+                        }
+                        snapshot.NearestMeetStatus = plan.MeetStatus;
+                        if (plan.JudgeName != null)
+                        {
+                            snapshot.JudgeName = plan.JudgeName;
+                        }
+                        if (plan.City != null)
+                        {
+                            snapshot.City = plan.City;
+                        }
                         snapshot.LastSyncedAtUtc = nowUtc;
                     }
 
@@ -433,7 +354,7 @@ namespace Odmon.Worker.Services
 
                     _logger.LogDebug(
                         "Hearing sync succeeded: TikCounter={TikCounter}, MondayItemId={MondayItemId}, ExecutedSteps=[{Steps}], SnapshotNew=[StartDate={StartDate}, Status={MeetStatus}]",
-                        mapping.TikCounter, effectiveItemId, string.Join(", ", executedSteps), startDateUtc.ToString("yyyy-MM-dd HH:mm"), meetStatus);
+                        mapping.TikCounter, effectiveItemId, string.Join(", ", executedSteps), startDateUtc.ToString("yyyy-MM-dd HH:mm"), plan.MeetStatus);
                 }
                 catch (Exception snapshotEx)
                 {
@@ -462,9 +383,7 @@ namespace Odmon.Worker.Services
         /// </summary>
         private async Task ExecuteHearingUpdatesAsync(
             long boardId, long mondayItemId, int tikCounter,
-            bool statusChanged, int meetStatus, string label, string? statusColumnId, HashSet<string>? allowedStatusLabels,
-            bool judgeChanged, bool cityChanged, bool hasJudgeName, bool hasCourtCity, string? judgeName, string? city,
-            bool startDateChanged, bool canUpdateDateHour, OdcanitDiaryEvent hearing,
+            HearingReconciliationPlan plan, string? statusColumnId, OdcanitDiaryEvent hearing,
             List<string> executedSteps, List<string> columnsToUpdate,
             CancellationToken ct)
         {
@@ -474,35 +393,47 @@ namespace Odmon.Worker.Services
             var hourCol = _mondaySettings.HearingHourColumnId ?? "";
 
             // Update status (independent - not blocked by missing judge/city)
-            if (statusChanged && !string.IsNullOrWhiteSpace(statusColumnId) && allowedStatusLabels != null && allowedStatusLabels.Contains(label))
+            if (plan.StatusUpdateRequired)
             {
-                await _mondayClient.UpdateHearingStatusAsync(boardId, mondayItemId, label, statusColumnId, ct);
-                executedSteps.Add($"SetStatus_{label}");
-                columnsToUpdate.Add(statusColumnId);
+                await _mondayClient.UpdateHearingStatusAsync(
+                    boardId,
+                    mondayItemId,
+                    plan.StatusLabel!,
+                    statusColumnId!,
+                    ct);
+                executedSteps.Add(plan.MeetStatus == 1 ? "SetStatus_Canceled" : "SetStatus_Transferred");
+                columnsToUpdate.Add(statusColumnId!);
 
                 _logger.LogDebug(
                     "Hearing status updated: TikCounter={TikCounter}, MondayItemId={MondayItemId}, MeetStatus={MeetStatus}, Label='{Label}', ColumnId={ColumnId}",
-                    tikCounter, mondayItemId, meetStatus, label, statusColumnId);
+                    tikCounter, mondayItemId, plan.MeetStatus, plan.StatusLabel, statusColumnId);
             }
 
             // Update judge and/or city (if they exist and changed)
-            if (judgeChanged || cityChanged)
+            if (plan.JudgeOrCityUpdateRequired)
             {
-                if (hasJudgeName && !string.IsNullOrWhiteSpace(judgeCol))
+                if (plan.JudgeName != null && !string.IsNullOrWhiteSpace(judgeCol))
                     columnsToUpdate.Add(judgeCol);
-                if (hasCourtCity && !string.IsNullOrWhiteSpace(cityCol))
+                if (plan.City != null && !string.IsNullOrWhiteSpace(cityCol))
                     columnsToUpdate.Add(cityCol);
 
-                await _mondayClient.UpdateHearingDetailsAsync(boardId, mondayItemId, judgeName ?? "", city ?? "", judgeCol, cityCol, ct);
+                await _mondayClient.UpdateHearingDetailsAsync(
+                    boardId,
+                    mondayItemId,
+                    plan.JudgeName ?? "",
+                    plan.City ?? "",
+                    judgeCol,
+                    cityCol,
+                    ct);
                 executedSteps.Add("UpdateJudgeCity");
 
                 _logger.LogDebug(
                     "Hearing details updated: TikCounter={TikCounter}, MondayItemId={MondayItemId}, JudgeName='{JudgeName}', City='{City}'",
-                    tikCounter, mondayItemId, judgeName ?? "<null>", city ?? "<null>");
+                    tikCounter, mondayItemId, plan.JudgeName ?? "<null>", plan.City ?? "<null>");
             }
 
             // Update date/hour ONLY if BOTH judge and city exist (triggers client notifications)
-            if (startDateChanged && canUpdateDateHour)
+            if (plan.DateUpdateRequired)
             {
                 await _mondayClient.UpdateHearingDateAsync(boardId, mondayItemId, hearing.StartDate!.Value, dateCol, hourCol, ct);
                 executedSteps.Add("UpdateHearingDate");
@@ -513,24 +444,6 @@ namespace Odmon.Worker.Services
                     "Hearing date/hour updated: TikCounter={TikCounter}, MondayItemId={MondayItemId}, StartDate={StartDate}",
                     tikCounter, mondayItemId, hearing.StartDate!.Value.ToString("yyyy-MM-dd HH:mm"));
             }
-        }
-
-        private static bool RequiredFieldsPresent(OdcanitDiaryEvent hearing)
-        {
-            return hearing.StartDate.HasValue
-                   && !string.IsNullOrWhiteSpace(hearing.JudgeName)
-                   && !string.IsNullOrWhiteSpace(hearing.City);
-        }
-
-        private static string? GetMeetStatusLabel(int meetStatus)
-        {
-            return meetStatus switch
-            {
-                0 => "\u05e4\u05e2\u05d9\u05dc",
-                1 => "\u05de\u05d1\u05d5\u05d8\u05dc",
-                2 => "\u05d4\u05d5\u05e2\u05d1\u05e8",
-                _ => null
-            };
         }
 
         private void LogReconciliationSummary(
@@ -635,6 +548,11 @@ namespace Odmon.Worker.Services
         /// </summary>
         private static async Task<bool> TableExistsAsync(IntegrationDbContext db, string tableName, CancellationToken ct)
         {
+            if (!db.Database.IsRelational())
+            {
+                return true;
+            }
+
             var connection = db.Database.GetDbConnection();
             var wasClosed = connection.State == ConnectionState.Closed;
             if (wasClosed)

@@ -78,6 +78,21 @@ namespace Odmon.Worker.Tests
         // ====================================================================
 
         [Fact]
+        public void Onboarding_NotReadyForMonday_RemainsExcluded()
+        {
+            var cases = new[]
+            {
+                new OdcanitCase { TikCounter = 4001, IsReadyForMonday = false },
+                new OdcanitCase { TikCounter = 4002, IsReadyForMonday = true }
+            };
+
+            var eligible = SyncService.FilterReadyForMonday(cases);
+
+            Assert.Single(eligible);
+            Assert.Equal(4002, eligible[0].TikCounter);
+        }
+
+        [Fact]
         public void Bootstrap_CaseAfterCutoff_SystemDown_CreatesIt()
         {
             // Arrange: A case was opened on 2026-02-12, but system was down.

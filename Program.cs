@@ -21,6 +21,12 @@ using Odmon.Worker.Voicenter;
 using Odmon.Worker.Workers;
 using Serilog;
 
+if (HearingStatusRepairCli.TryParse(args, out var hearingStatusRepairRequest))
+{
+    await HearingStatusRepairCli.RunAsync(args, hearingStatusRepairRequest, CancellationToken.None);
+    return;
+}
+
 if (CaseIntakeCli.TryParse(args, out var caseIntakeRequest))
 {
     await CaseIntakeCli.RunAsync(args, caseIntakeRequest, CancellationToken.None);

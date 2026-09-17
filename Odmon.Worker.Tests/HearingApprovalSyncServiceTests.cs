@@ -280,6 +280,9 @@ namespace Odmon.Worker.Tests
             public Task<string?> GetItemStateAsync(long boardId, long itemId, CancellationToken ct)
                 => Task.FromResult<string?>(null);
 
+            public Task<MondayItemStatusValue?> GetItemStatusValueAsync(long boardId, long itemId, string statusColumnId, CancellationToken ct)
+                => Task.FromResult<MondayItemStatusValue?>(null);
+
             public Task UpdateItemAsync(long boardId, long itemId, string columnValuesJson, CancellationToken ct)
                 => Task.CompletedTask;
 

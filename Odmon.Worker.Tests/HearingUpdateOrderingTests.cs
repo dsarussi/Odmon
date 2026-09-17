@@ -27,21 +27,20 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public void NewActive_MeetStatus0_PlannedSteps_StatusThenJudgeCityThenDate()
+        public void NewActive_MeetStatus0_PlannedSteps_OmitStatusThenJudgeCityThenDate()
         {
             HearingNearestSnapshot? snapshot = null;
             var hearing = NewHearing(meetStatus: 0, start: DateTime.UtcNow.AddDays(1), judge: "Judge", city: "City");
 
             var (planned, _, _, _) = HearingNearestSyncServiceHelper.ComputePlannedSteps(hearing, snapshot);
 
-            Assert.Equal(3, planned.Count);
-            Assert.Equal("SetStatus_Active", planned[0]);
-            Assert.Equal("UpdateJudgeCity", planned[1]);
-            Assert.Equal("UpdateHearingDate", planned[2]);
+            Assert.Equal(2, planned.Count);
+            Assert.Equal("UpdateJudgeCity", planned[0]);
+            Assert.Equal("UpdateHearingDate", planned[1]);
         }
 
         [Fact]
-        public void Active_MeetStatus0_PreviousTransferredStatus_PlansStatusBackToActive()
+        public void Active_MeetStatus0_PreviousTransferredStatus_DoesNotPlanStatusWrite()
         {
             var start = DateTime.UtcNow.AddDays(1);
             var snapshot = new HearingNearestSnapshot
@@ -55,12 +54,11 @@ namespace Odmon.Worker.Tests
 
             var (planned, _, _, _) = HearingNearestSyncServiceHelper.ComputePlannedSteps(hearing, snapshot);
 
-            Assert.Single(planned);
-            Assert.Equal("SetStatus_Active", planned[0]);
+            Assert.Empty(planned);
         }
 
         [Fact]
-        public void Cancelled_MeetStatus1_OnlyStatus_NoDateChange()
+        public void Cancelled_MeetStatus1_StatusFirst_NoDateChange()
         {
             var start = DateTime.UtcNow.AddDays(1);
             var snapshot = new HearingNearestSnapshot
@@ -72,8 +70,8 @@ namespace Odmon.Worker.Tests
 
             var (planned, _, _, _) = HearingNearestSyncServiceHelper.ComputePlannedSteps(hearing, snapshot);
 
-            Assert.Single(planned);
             Assert.Equal("SetStatus_Canceled", planned[0]);
+            Assert.Contains("UpdateJudgeCity", planned);
             Assert.DoesNotContain("UpdateHearingDate", planned);
         }
 

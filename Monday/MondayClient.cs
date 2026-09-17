@@ -216,6 +216,130 @@ namespace Odmon.Worker.Monday
             }
         }
 
+        public async Task<MondayItemStatusValue?> GetItemStatusValueAsync(
+            long boardId,
+            long itemId,
+            string statusColumnId,
+            CancellationToken ct)
+        {
+            if (boardId <= 0 || itemId <= 0 || string.IsNullOrWhiteSpace(statusColumnId))
+            {
+                throw new ArgumentException("Board, item, and status column must be specified.");
+            }
+
+            var query = @"query ($itemIds: [ID!], $columnIds: [String!]) {
+                items(ids: $itemIds) {
+                    id
+                    state
+                    board { id }
+                    column_values(ids: $columnIds) {
+                        id
+                        text
+                    }
+                }
+            }";
+            var variables = new Dictionary<string, object>
+            {
+                ["itemIds"] = new[] { itemId.ToString(CultureInfo.InvariantCulture) },
+                ["columnIds"] = new[] { statusColumnId }
+            };
+
+            using var doc = await ExecuteGraphQLRequestAsync(
+                query,
+                variables,
+                ct,
+                operation: "item_status_value",
+                boardId: boardId,
+                itemId: itemId);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("data", out var data) ||
+                !data.TryGetProperty("items", out var items) ||
+                items.ValueKind != JsonValueKind.Array)
+            {
+                throw new MondayApiException(
+                    "Monday.com unexpected response while reading an item status value.",
+                    operation: "item_status_value",
+                    boardId: boardId,
+                    itemId: itemId);
+            }
+
+            if (items.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            var item = items[0];
+            var returnedItemId = ParseRequiredId(item, "id", "item", boardId, itemId);
+            if (!item.TryGetProperty("board", out var board))
+            {
+                throw UnexpectedStatusRead(boardId, itemId, "missing board identity");
+            }
+            var returnedBoardId = ParseRequiredId(board, "id", "board", boardId, itemId);
+            if (returnedItemId != itemId || returnedBoardId != boardId)
+            {
+                throw UnexpectedStatusRead(boardId, itemId, "identity mismatch");
+            }
+
+            if (!item.TryGetProperty("state", out var stateElement) ||
+                string.IsNullOrWhiteSpace(stateElement.GetString()))
+            {
+                throw UnexpectedStatusRead(boardId, itemId, "missing item state");
+            }
+
+            string? label = null;
+            if (item.TryGetProperty("column_values", out var columnValues) &&
+                columnValues.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var columnValue in columnValues.EnumerateArray())
+                {
+                    if (columnValue.TryGetProperty("id", out var idElement) &&
+                        string.Equals(idElement.GetString(), statusColumnId, StringComparison.Ordinal))
+                    {
+                        if (columnValue.TryGetProperty("text", out var textElement) &&
+                            textElement.ValueKind == JsonValueKind.String)
+                        {
+                            var text = textElement.GetString();
+                            label = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+                        }
+                        break;
+                    }
+                }
+            }
+
+            return new MondayItemStatusValue(
+                returnedBoardId,
+                returnedItemId,
+                stateElement.GetString()!,
+                label);
+        }
+
+        private static long ParseRequiredId(
+            JsonElement parent,
+            string propertyName,
+            string identityName,
+            long boardId,
+            long itemId)
+        {
+            if (parent.TryGetProperty(propertyName, out var element) &&
+                long.TryParse(element.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out var value) &&
+                value > 0)
+            {
+                return value;
+            }
+
+            throw UnexpectedStatusRead(boardId, itemId, $"invalid {identityName} identity");
+        }
+
+        private static MondayApiException UnexpectedStatusRead(
+            long boardId,
+            long itemId,
+            string reason)
+            => new(
+                $"Monday.com unexpected item status response: {reason}.",
+                operation: "item_status_value",
+                boardId: boardId,
+                itemId: itemId);
+
         public async Task UpdateItemAsync(long boardId, long itemId, string columnValuesJson, CancellationToken ct)
         {
             var query = @"mutation ($itemId: ID!, $boardId: ID!, $columnVals: JSON!) {
