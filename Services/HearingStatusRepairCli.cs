@@ -114,7 +114,11 @@ internal static class HearingStatusRepairCli
             var service = scope.ServiceProvider.GetRequiredService<HearingStatusRepairService>();
             var summary = await service.RunAsync(request.Mode, ct);
             PrintSummary(request.Mode, summary, Console.Out);
-            Environment.ExitCode = summary.ValidationFailed == 0 && summary.MondayFailed == 0 ? 0 : 2;
+            Environment.ExitCode = summary.ValidationFailed == 0 &&
+                                   summary.MondayFailed == 0 &&
+                                   summary.VerificationFailed == 0
+                ? 0
+                : 2;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -147,15 +151,20 @@ internal static class HearingStatusRepairCli
         output.WriteLine($"Updated={summary.Updated}");
         output.WriteLine($"ValidationFailed={summary.ValidationFailed}");
         output.WriteLine($"MondayFailed={summary.MondayFailed}");
+        output.WriteLine($"VerificationFailed={summary.VerificationFailed}");
         output.WriteLine($"SnapshotStatusRecorded={summary.SnapshotStatusRecorded}");
         output.WriteLine($"SnapshotUnchanged={summary.SnapshotUnchanged}");
         foreach (var failure in summary.ValidationFailures)
         {
             output.WriteLine($"ValidationFailure ItemId={failure.MondayItemId} Reason={failure.ReasonCode}");
         }
-        foreach (var itemId in summary.MondayFailureItemIds)
+        foreach (var failure in summary.MondayFailures)
         {
-            output.WriteLine($"MondayFailure ItemId={itemId}");
+            output.WriteLine($"MondayFailure ItemId={failure.MondayItemId} Reason={failure.ReasonCode}");
+        }
+        foreach (var failure in summary.VerificationFailures)
+        {
+            output.WriteLine($"VerificationFailure ItemId={failure.MondayItemId} Reason={failure.ReasonCode}");
         }
     }
 
@@ -173,6 +182,7 @@ internal static class HearingStatusRepairCli
         output.WriteLine("Updated=0");
         output.WriteLine($"ValidationFailed={targets.Count}");
         output.WriteLine("MondayFailed=0");
+        output.WriteLine("VerificationFailed=0");
         output.WriteLine("SnapshotStatusRecorded=0");
         output.WriteLine($"SnapshotUnchanged={targets.Count}");
         output.WriteLine("GlobalAbort=true");
@@ -215,6 +225,7 @@ internal static class HearingStatusRepairCli
                 services.AddHttpClient<IMondayMetadataProvider, MondayMetadataProvider>(client =>
                     client.BaseAddress = new Uri("https://api.monday.com/v2/"));
                 services.AddSingleton(TimeProvider.System);
+                services.AddSingleton<IHearingStatusRepairDelay, HearingStatusRepairDelay>();
                 services.AddScoped<HearingStatusRepairService>();
             })
             .Build();

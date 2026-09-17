@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 
 namespace Odmon.Worker.Monday
 {
@@ -33,12 +34,21 @@ namespace Odmon.Worker.Monday
         /// </summary>
         public string? ColumnValuesSnippet { get; }
 
+        /// <summary>Sanitized Monday/transport error classification.</summary>
+        public string ErrorCode { get; }
+
+        public int? HttpStatusCode { get; }
+
+        public TimeSpan? RetryAfter { get; }
+
         public MondayApiException(string message) : base(message)
         {
+            ErrorCode = "MONDAY_API_ERROR";
         }
 
         public MondayApiException(string message, Exception innerException) : base(message, innerException)
         {
+            ErrorCode = "MONDAY_API_ERROR";
         }
 
         public MondayApiException(
@@ -47,7 +57,10 @@ namespace Odmon.Worker.Monday
             string? operation = null,
             long? boardId = null,
             long? itemId = null,
-            string? columnValuesSnippet = null)
+            string? columnValuesSnippet = null,
+            string? errorCode = null,
+            int? httpStatusCode = null,
+            TimeSpan? retryAfter = null)
             : base(message)
         {
             RawErrorJson = rawErrorJson;
@@ -55,6 +68,9 @@ namespace Odmon.Worker.Monday
             BoardId = boardId;
             ItemId = itemId;
             ColumnValuesSnippet = TruncateSnippet(columnValuesSnippet, 500);
+            ErrorCode = NormalizeErrorCode(errorCode);
+            HttpStatusCode = httpStatusCode;
+            RetryAfter = retryAfter;
         }
 
         public MondayApiException(
@@ -64,7 +80,10 @@ namespace Odmon.Worker.Monday
             string? operation = null,
             long? boardId = null,
             long? itemId = null,
-            string? columnValuesSnippet = null)
+            string? columnValuesSnippet = null,
+            string? errorCode = null,
+            int? httpStatusCode = null,
+            TimeSpan? retryAfter = null)
             : base(message, innerException)
         {
             RawErrorJson = rawErrorJson;
@@ -72,6 +91,28 @@ namespace Odmon.Worker.Monday
             BoardId = boardId;
             ItemId = itemId;
             ColumnValuesSnippet = TruncateSnippet(columnValuesSnippet, 500);
+            ErrorCode = NormalizeErrorCode(errorCode);
+            HttpStatusCode = httpStatusCode;
+            RetryAfter = retryAfter;
+        }
+
+        public bool IsRetryableRateLimit()
+        {
+            if (string.Equals(ErrorCode, "DAILY_LIMIT_EXCEEDED", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ErrorCode, "REQUEST_MAX_COMPLEXITY_EXCEEDED", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return HttpStatusCode == 429 || ErrorCode switch
+            {
+                "COMPLEXITY_BUDGET_EXHAUSTED" => true,
+                "IP_RATE_LIMIT_EXCEEDED" => true,
+                "MAX_CONCURRENCY_EXCEEDED" => true,
+                "MINUTE_RATE_LIMIT_EXCEEDED" => true,
+                "RATE_LIMIT_EXCEEDED" => true,
+                _ => false
+            };
         }
 
         /// <summary>
@@ -105,6 +146,35 @@ namespace Odmon.Worker.Monday
                 return snippet;
 
             return snippet.Substring(0, maxLength) + "... (truncated)";
+        }
+
+        private static string NormalizeErrorCode(string? errorCode)
+        {
+            if (string.IsNullOrWhiteSpace(errorCode))
+            {
+                return "MONDAY_API_ERROR";
+            }
+
+            var source = errorCode.Trim().ToUpperInvariant();
+            var builder = new StringBuilder(Math.Min(source.Length, 64));
+            foreach (var character in source)
+            {
+                if (builder.Length == 64)
+                {
+                    break;
+                }
+
+                builder.Append(character is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_'
+                    ? character
+                    : '_');
+            }
+            var normalized = builder.Length == 0 ? "MONDAY_API_ERROR" : builder.ToString();
+            return normalized switch
+            {
+                "MAXCONCURRENCYEXCEEDED" => "MAX_CONCURRENCY_EXCEEDED",
+                "MINUTE_LIMIT_RATE_EXCEEDED" => "MINUTE_RATE_LIMIT_EXCEEDED",
+                _ => normalized
+            };
         }
     }
 }

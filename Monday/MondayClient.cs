@@ -363,14 +363,17 @@ namespace Odmon.Worker.Monday
 
                 if (!root.TryGetProperty("data", out var data) ||
                     !data.TryGetProperty("change_multiple_column_values", out var change) ||
-                    !change.TryGetProperty("id", out _))
+                    !change.TryGetProperty("id", out var returnedId) ||
+                    !TryParseGraphQlId(returnedId, out var returnedItemId) ||
+                    returnedItemId != itemId)
                 {
                     throw new MondayApiException(
-                        "Monday.com unexpected response: missing change_multiple_column_values.id in response",
+                        "Monday.com mutation response identity was missing or invalid.",
                         operation: "change_multiple_column_values",
                         boardId: effectiveBoardId,
                         itemId: itemId,
-                        columnValuesSnippet: columnValuesJson);
+                        columnValuesSnippet: columnValuesJson,
+                        errorCode: "INVALID_MUTATION_RESPONSE");
                 }
             }
             catch (MondayApiException)
@@ -380,13 +383,29 @@ namespace Odmon.Worker.Monday
             catch (Exception ex) when (!(ex is MondayApiException))
             {
                 throw new MondayApiException(
-                    $"Unexpected error during change_multiple_column_values: {ex.Message}",
+                    "Unexpected error during change_multiple_column_values.",
                     ex,
                     operation: "change_multiple_column_values",
                     boardId: effectiveBoardId,
                     itemId: itemId,
-                    columnValuesSnippet: columnValuesJson);
+                    columnValuesSnippet: columnValuesJson,
+                    errorCode: "MUTATION_RESPONSE_ERROR");
             }
+        }
+
+        private static bool TryParseGraphQlId(JsonElement element, out long value)
+        {
+            value = 0;
+            if (element.ValueKind == JsonValueKind.String)
+            {
+                return long.TryParse(
+                    element.GetString(),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out value);
+            }
+
+            return element.ValueKind == JsonValueKind.Number && element.TryGetInt64(out value);
         }
 
         public async Task UpdateItemNameAsync(long boardId, long itemId, string name, CancellationToken ct)
@@ -661,119 +680,162 @@ namespace Odmon.Worker.Monday
             var payload = JsonSerializer.Serialize(new { query, variables });
             var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
-            HttpResponseMessage resp;
-            string body;
+            HttpResponseMessage response;
             try
             {
-                resp = await _httpClient.PostAsync("", content, ct);
-                resp.EnsureSuccessStatusCode();
-                body = await resp.Content.ReadAsStringAsync(ct);
+                response = await _httpClient.PostAsync("", content, ct);
             }
             catch (HttpRequestException ex)
             {
+                var statusCode = ex.StatusCode.HasValue ? (int)ex.StatusCode.Value : (int?)null;
                 _logger.LogError(ex,
                     "Monday.com HTTP request failed. Operation={Operation}, BoardId={BoardId}, ItemId={ItemId}",
                     operation ?? "unknown", boardId, itemId);
                 throw new MondayApiException(
-                    $"Monday.com HTTP request failed: {ex.Message}",
+                    "Monday.com HTTP request failed.",
                     ex,
                     operation: operation,
                     boardId: boardId,
                     itemId: itemId,
-                    columnValuesSnippet: columnValuesJson);
+                    columnValuesSnippet: columnValuesJson,
+                    errorCode: statusCode == 429 ? "HTTP_429" : "HTTP_TRANSPORT_ERROR",
+                    httpStatusCode: statusCode);
             }
 
-            JsonDocument doc;
-            try
+            using (response)
             {
-                doc = JsonDocument.Parse(body);
+                var body = await response.Content.ReadAsStringAsync(ct);
+                var headerRetryAfter = GetHeaderRetryAfter(response);
+                JsonDocument doc;
+                try
+                {
+                    doc = JsonDocument.Parse(body);
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogError(ex,
+                        "Monday.com API returned invalid JSON. Operation={Operation}, BoardId={BoardId}, ItemId={ItemId}, HttpStatus={HttpStatus}",
+                        operation ?? "unknown", boardId, itemId, (int)response.StatusCode);
+                    throw new MondayApiException(
+                        "Monday.com API returned invalid JSON.",
+                        ex,
+                        operation: operation,
+                        boardId: boardId,
+                        itemId: itemId,
+                        columnValuesSnippet: columnValuesJson,
+                        errorCode: "INVALID_JSON_RESPONSE",
+                        httpStatusCode: (int)response.StatusCode,
+                        retryAfter: headerRetryAfter);
+                }
+
+                var root = doc.RootElement;
+                if (TryGetGraphQLError(root, out var errorDetails))
+                {
+                    doc.Dispose();
+                    var retryAfter = errorDetails.RetryAfter ?? headerRetryAfter;
+                    _logger.LogError(
+                        "Monday.com GraphQL API error. Operation={Operation}, BoardId={BoardId}, ItemId={ItemId}, ErrorCode={ErrorCode}, HttpStatus={HttpStatus}",
+                        operation ?? "unknown", boardId, itemId, errorDetails.ErrorCode, (int)response.StatusCode);
+                    throw new MondayApiException(
+                        "Monday.com GraphQL API rejected the request.",
+                        rawErrorJson: errorDetails.RawErrorJson,
+                        operation: operation,
+                        boardId: boardId,
+                        itemId: itemId,
+                        columnValuesSnippet: columnValuesJson,
+                        errorCode: errorDetails.ErrorCode,
+                        httpStatusCode: (int)response.StatusCode,
+                        retryAfter: retryAfter);
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    doc.Dispose();
+                    var statusCode = (int)response.StatusCode;
+                    throw new MondayApiException(
+                        "Monday.com HTTP response indicated failure.",
+                        operation: operation,
+                        boardId: boardId,
+                        itemId: itemId,
+                        columnValuesSnippet: columnValuesJson,
+                        errorCode: statusCode == 429 ? "HTTP_429" : $"HTTP_{statusCode}",
+                        httpStatusCode: statusCode,
+                        retryAfter: headerRetryAfter);
+                }
+
+                return doc;
             }
-            catch (JsonException ex)
-            {
-                _logger.LogError(ex,
-                    "Monday.com API returned invalid JSON. Operation={Operation}, BoardId={BoardId}, ItemId={ItemId}, Response={Response}",
-                    operation ?? "unknown", boardId, itemId, body);
-                throw new MondayApiException(
-                    $"Monday.com API returned invalid JSON: {ex.Message}",
-                    ex,
-                    operation: operation,
-                    boardId: boardId,
-                    itemId: itemId,
-                    columnValuesSnippet: columnValuesJson);
-            }
-
-            var root = doc.RootElement;
-
-            if (root.TryGetProperty("errors", out var errors))
-            {
-                var errorJson = errors.ToString();
-                doc.Dispose();
-
-                // Try to extract a more readable error message
-                string errorMessage = ExtractErrorMessage(errors, errorJson);
-
-                _logger.LogError(
-                    "Monday.com GraphQL API error. Operation={Operation}, BoardId={BoardId}, ItemId={ItemId}, Errors={Errors}",
-                    operation ?? "unknown", boardId, itemId, errorJson);
-
-                throw new MondayApiException(
-                    $"Monday.com API error: {errorMessage}",
-                    rawErrorJson: errorJson,
-                    operation: operation,
-                    boardId: boardId,
-                    itemId: itemId,
-                    columnValuesSnippet: columnValuesJson);
-            }
-
-            return doc;
         }
 
-        private static string ExtractErrorMessage(JsonElement errors, string fallbackJson)
+        private static bool TryGetGraphQLError(
+            JsonElement root,
+            out GraphQLErrorDetails details)
         {
-            try
+            details = default;
+            if (!root.TryGetProperty("errors", out var errors) ||
+                errors.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined ||
+                (errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() == 0))
             {
-                if (errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() > 0)
+                return false;
+            }
+
+            var rawErrorJson = errors.GetRawText();
+            var errorCode = "GRAPHQL_ERROR";
+            TimeSpan? retryAfter = null;
+            if (errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() > 0)
+            {
+                var firstError = errors[0];
+                if (firstError.TryGetProperty("extensions", out var extensions))
                 {
-                    var firstError = errors[0];
-                    if (firstError.TryGetProperty("message", out var messageElement))
+                    if (extensions.TryGetProperty("code", out var codeElement) &&
+                        codeElement.ValueKind == JsonValueKind.String &&
+                        !string.IsNullOrWhiteSpace(codeElement.GetString()))
                     {
-                        var message = messageElement.GetString();
-                        if (!string.IsNullOrWhiteSpace(message))
+                        errorCode = codeElement.GetString()!;
+                    }
+
+                    if (extensions.TryGetProperty("retry_in_seconds", out var retryElement))
+                    {
+                        if (retryElement.TryGetInt32(out var retrySeconds) && retrySeconds >= 0)
                         {
-                            // Try to get column-specific error details
-                            if (firstError.TryGetProperty("extensions", out var extensions))
-                            {
-                                if (extensions.TryGetProperty("error_data", out var errorData))
-                                {
-                                    var details = new List<string> { message };
-                                    
-                                    if (errorData.TryGetProperty("column_id", out var columnId))
-                                        details.Add($"Column ID: {columnId.GetString()}");
-                                    
-                                    if (errorData.TryGetProperty("column_name", out var columnName))
-                                        details.Add($"Column: {columnName.GetString()}");
-                                    
-                                    if (errorData.TryGetProperty("column_type", out var columnType))
-                                        details.Add($"Type: {columnType.GetString()}");
-                                    
-                                    if (errorData.TryGetProperty("column_value", out var columnValue))
-                                        details.Add($"Value: {columnValue.GetString()}");
-                                    
-                                    return string.Join("; ", details);
-                                }
-                            }
-                            return message;
+                            retryAfter = TimeSpan.FromSeconds(retrySeconds);
+                        }
+                        else if (retryElement.ValueKind == JsonValueKind.String &&
+                                 int.TryParse(retryElement.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out retrySeconds) &&
+                                 retrySeconds >= 0)
+                        {
+                            retryAfter = TimeSpan.FromSeconds(retrySeconds);
                         }
                     }
                 }
             }
-            catch
+
+            details = new GraphQLErrorDetails(errorCode, retryAfter, rawErrorJson);
+            return true;
+        }
+
+        private static TimeSpan? GetHeaderRetryAfter(HttpResponseMessage response)
+        {
+            var retryAfter = response.Headers.RetryAfter;
+            if (retryAfter?.Delta is { } delta && delta >= TimeSpan.Zero)
             {
-                // Fall through to return fallback
+                return delta;
             }
 
-            return fallbackJson;
+            if (retryAfter?.Date is { } date)
+            {
+                var calculated = date - DateTimeOffset.UtcNow;
+                return calculated > TimeSpan.Zero ? calculated : TimeSpan.Zero;
+            }
+
+            return null;
         }
+
+        private readonly record struct GraphQLErrorDetails(
+            string ErrorCode,
+            TimeSpan? RetryAfter,
+            string RawErrorJson);
+
     }
 }
 

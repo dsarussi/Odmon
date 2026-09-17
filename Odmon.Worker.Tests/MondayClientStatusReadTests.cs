@@ -74,7 +74,77 @@ public sealed class MondayClientStatusReadTests
         Assert.Equal(label, onlyColumn.Value.GetProperty("label").GetString());
     }
 
-    private sealed class RecordingHandler(string responseBody) : HttpMessageHandler
+    [Fact]
+    public async Task UpdateHearingStatus_Http200WithGraphQlErrorsThrowsClassifiedFailure()
+    {
+        const long boardId = 7000000001;
+        const long itemId = 7000000002;
+        var handler = new RecordingHandler(
+            $"{{\"data\":{{\"change_multiple_column_values\":{{\"id\":\"{itemId}\"}}}},\"errors\":[{{\"message\":\"Synthetic rejection\",\"extensions\":{{\"code\":\"ColumnValueException\"}}}}]}}");
+        var client = CreateClient(handler);
+
+        var exception = await Assert.ThrowsAsync<MondayApiException>(() =>
+            client.UpdateHearingStatusAsync(
+                boardId,
+                itemId,
+                "Synthetic label",
+                "synthetic_status",
+                CancellationToken.None));
+
+        Assert.Equal("COLUMNVALUEEXCEPTION", exception.ErrorCode);
+        Assert.Equal(200, exception.HttpStatusCode);
+        Assert.False(exception.IsRetryableRateLimit());
+    }
+
+    [Fact]
+    public async Task UpdateHearingStatus_Http429GraphQlThrottleCapturesRetryDelay()
+    {
+        var handler = new RecordingHandler(
+            "{\"errors\":[{\"message\":\"Synthetic throttle\",\"extensions\":{\"code\":\"COMPLEXITY_BUDGET_EXHAUSTED\",\"retry_in_seconds\":6}}]}",
+            HttpStatusCode.TooManyRequests);
+        var client = CreateClient(handler);
+
+        var exception = await Assert.ThrowsAsync<MondayApiException>(() =>
+            client.UpdateHearingStatusAsync(
+                7000000001,
+                7000000002,
+                "Synthetic label",
+                "synthetic_status",
+                CancellationToken.None));
+
+        Assert.True(exception.IsRetryableRateLimit());
+        Assert.Equal("COMPLEXITY_BUDGET_EXHAUSTED", exception.ErrorCode);
+        Assert.Equal(TimeSpan.FromSeconds(6), exception.RetryAfter);
+    }
+
+    [Fact]
+    public async Task UpdateHearingStatus_MismatchedMutationIdentityIsRejected()
+    {
+        var handler = new RecordingHandler(
+            "{\"data\":{\"change_multiple_column_values\":{\"id\":\"7000000999\"}}}");
+        var client = CreateClient(handler);
+
+        var exception = await Assert.ThrowsAsync<MondayApiException>(() =>
+            client.UpdateHearingStatusAsync(
+                7000000001,
+                7000000002,
+                "Synthetic label",
+                "synthetic_status",
+                CancellationToken.None));
+
+        Assert.Equal("INVALID_MUTATION_RESPONSE", exception.ErrorCode);
+    }
+
+    private static MondayClient CreateClient(RecordingHandler handler)
+        => new(
+            new HttpClient(handler) { BaseAddress = new Uri("https://example.invalid/") },
+            new ConfigurationBuilder().Build(),
+            new FakeSecretProvider(),
+            NullLogger<MondayClient>.Instance);
+
+    private sealed class RecordingHandler(
+        string responseBody,
+        HttpStatusCode statusCode = HttpStatusCode.OK) : HttpMessageHandler
     {
         public string RequestBody { get; private set; } = string.Empty;
 
@@ -83,7 +153,7 @@ public sealed class MondayClientStatusReadTests
             CancellationToken cancellationToken)
         {
             RequestBody = await request.Content!.ReadAsStringAsync(cancellationToken);
-            return new HttpResponseMessage(HttpStatusCode.OK)
+            return new HttpResponseMessage(statusCode)
             {
                 Content = new StringContent(responseBody, Encoding.UTF8, "application/json")
             };

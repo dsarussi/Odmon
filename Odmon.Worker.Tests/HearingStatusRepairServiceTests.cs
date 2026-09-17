@@ -94,6 +94,7 @@ public sealed class HearingStatusRepairServiceTests
         Assert.Equal(0, summary.Updated);
         Assert.Equal(0, summary.ValidationFailed);
         Assert.Equal(0, summary.MondayFailed);
+        Assert.Equal(0, summary.VerificationFailed);
         Assert.Empty(scenario.Monday.StatusMutations);
         Assert.Equal(0, summary.SnapshotStatusRecorded);
         Assert.Equal(49, summary.SnapshotUnchanged);
@@ -117,6 +118,7 @@ public sealed class HearingStatusRepairServiceTests
         Assert.Equal(48, summary.Planned);
         Assert.Equal(1, summary.AlreadyCorrect);
         Assert.Equal(48, summary.Updated);
+        Assert.Equal(0, summary.VerificationFailed);
         Assert.Equal(48, scenario.Monday.StatusMutations.Count);
         Assert.All(scenario.Monday.StatusMutations, mutation =>
         {
@@ -180,8 +182,99 @@ public sealed class HearingStatusRepairServiceTests
 
         Assert.Equal(48, summary.Updated);
         Assert.Equal(1, summary.MondayFailed);
-        Assert.Equal(new[] { failedItem }, summary.MondayFailureItemIds);
+        Assert.Equal(failedItem, Assert.Single(summary.MondayFailures).MondayItemId);
         Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+    }
+
+    [Fact]
+    public async Task RetryableThrottle_RetriesThenVerifiesSuccess()
+    {
+        var itemId = HearingStatusRepairService.GetTargets()[0].MondayItemId;
+        var failures = new Dictionary<long, Queue<Exception>>
+        {
+            [itemId] = new Queue<Exception>(
+            [
+                new MondayApiException(
+                    "Synthetic throttle.",
+                    errorCode: "COMPLEXITY_BUDGET_EXHAUSTED",
+                    httpStatusCode: 429,
+                    retryAfter: TimeSpan.FromSeconds(4))
+            ])
+        };
+        await using var scenario = await CreateScenarioAsync(mutationFailures: failures);
+
+        var summary = await scenario.Service.RunAsync(HearingStatusRepairMode.Live, CancellationToken.None);
+
+        Assert.Equal(49, summary.Updated);
+        Assert.Equal(0, summary.MondayFailed);
+        Assert.Equal(2, scenario.Monday.StatusMutations.Count(mutation => mutation.ItemId == itemId));
+        Assert.Contains(TimeSpan.FromSeconds(4), scenario.Delay.Delays);
+    }
+
+    [Fact]
+    public async Task RetryableThrottle_ExhaustionIsMondayFailure()
+    {
+        var itemId = HearingStatusRepairService.GetTargets()[0].MondayItemId;
+        var failures = new Dictionary<long, Queue<Exception>>
+        {
+            [itemId] = new Queue<Exception>(Enumerable.Range(0, 3).Select(_ =>
+                new MondayApiException(
+                    "Synthetic throttle.",
+                    errorCode: "IP_RATE_LIMIT_EXCEEDED",
+                    httpStatusCode: 429,
+                    retryAfter: TimeSpan.FromSeconds(1))))
+        };
+        await using var scenario = await CreateScenarioAsync(mutationFailures: failures);
+
+        var summary = await scenario.Service.RunAsync(HearingStatusRepairMode.Live, CancellationToken.None);
+
+        Assert.Equal(48, summary.Updated);
+        Assert.Equal(1, summary.MondayFailed);
+        Assert.Equal(0, summary.VerificationFailed);
+        Assert.Equal(3, scenario.Monday.StatusMutations.Count(mutation => mutation.ItemId == itemId));
+        Assert.Equal("RETRY_EXHAUSTED_IP_RATE_LIMIT_EXCEEDED", Assert.Single(summary.MondayFailures).ReasonCode);
+    }
+
+    [Fact]
+    public async Task SuccessfulAcknowledgement_ReadBackMismatchIsNeverUpdated()
+    {
+        var itemId = HearingStatusRepairService.GetTargets()[0].MondayItemId;
+        await using var scenario = await CreateScenarioAsync(
+            suppressMutationPersistence: new HashSet<long> { itemId });
+
+        var summary = await scenario.Service.RunAsync(HearingStatusRepairMode.Live, CancellationToken.None);
+
+        Assert.Equal(48, summary.Updated);
+        Assert.Equal(0, summary.MondayFailed);
+        Assert.Equal(1, summary.VerificationFailed);
+        var failure = Assert.Single(summary.VerificationFailures);
+        Assert.Equal(itemId, failure.MondayItemId);
+        Assert.Equal("READBACK_MISMATCH", failure.ReasonCode);
+    }
+
+    [Fact]
+    public async Task PartialSuccess_AccountsForCorrectFailureAndMismatchSeparately()
+    {
+        var targets = HearingStatusRepairService.GetTargets();
+        var alreadyCorrect = targets[0];
+        var mutationFailure = targets[1];
+        var verificationFailure = targets[2];
+        await using var scenario = await CreateScenarioAsync(
+            currentLabels: new Dictionary<long, string?>
+            {
+                [alreadyCorrect.MondayItemId] = alreadyCorrect.ExpectedLabel
+            },
+            failedMutationItemId: mutationFailure.MondayItemId,
+            suppressMutationPersistence: new HashSet<long> { verificationFailure.MondayItemId });
+
+        var summary = await scenario.Service.RunAsync(HearingStatusRepairMode.Live, CancellationToken.None);
+
+        Assert.Equal(1, summary.AlreadyCorrect);
+        Assert.Equal(48, summary.Planned);
+        Assert.Equal(46, summary.Updated);
+        Assert.Equal(1, summary.MondayFailed);
+        Assert.Equal(1, summary.VerificationFailed);
+        Assert.Equal(49, summary.AlreadyCorrect + summary.Updated + summary.MondayFailed + summary.VerificationFailed);
     }
 
     private static async Task<Scenario> CreateScenarioAsync(
@@ -189,7 +282,9 @@ public sealed class HearingStatusRepairServiceTests
         IReadOnlyDictionary<long, int>? statusOverrides = null,
         IReadOnlySet<long>? inactiveItemIds = null,
         IEnumerable<string>? allowedLabels = null,
-        long? failedMutationItemId = null)
+        long? failedMutationItemId = null,
+        IReadOnlyDictionary<long, Queue<Exception>>? mutationFailures = null,
+        IReadOnlySet<long>? suppressMutationPersistence = null)
     {
         var options = new DbContextOptionsBuilder<IntegrationDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
@@ -209,7 +304,13 @@ public sealed class HearingStatusRepairServiceTests
         await db.SaveChangesAsync();
 
         var reader = new FakeOdcanitReader(mappings, targets, statusOverrides, NowUtc);
-        var monday = new FakeMondayClient(currentLabels, inactiveItemIds, failedMutationItemId);
+        var monday = new FakeMondayClient(
+            currentLabels,
+            inactiveItemIds,
+            failedMutationItemId,
+            mutationFailures,
+            suppressMutationPersistence);
+        var delay = new FakeDelay();
         var metadata = new FakeMetadataProvider(allowedLabels ??
         [
             HearingStatusRepairService.CancelledLabel,
@@ -228,24 +329,37 @@ public sealed class HearingStatusRepairServiceTests
             monday,
             metadata,
             config,
-            new FixedTimeProvider(NowUtc));
-        return new Scenario(db, service, monday);
+            new FixedTimeProvider(NowUtc),
+            delay);
+        return new Scenario(db, service, monday, delay);
     }
 
     private sealed class Scenario(
         IntegrationDbContext db,
         HearingStatusRepairService service,
-        FakeMondayClient monday) : IAsyncDisposable
+        FakeMondayClient monday,
+        FakeDelay delay) : IAsyncDisposable
     {
         public IntegrationDbContext Db { get; } = db;
         public HearingStatusRepairService Service { get; } = service;
         public FakeMondayClient Monday { get; } = monday;
+        public FakeDelay Delay { get; } = delay;
         public ValueTask DisposeAsync() => Db.DisposeAsync();
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    internal sealed class FakeDelay : IHearingStatusRepairDelay
+    {
+        public List<TimeSpan> Delays { get; } = new();
+        public Task DelayAsync(TimeSpan delay, CancellationToken ct)
+        {
+            Delays.Add(delay);
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class FakeOdcanitReader : IOdcanitReader
@@ -296,18 +410,24 @@ public sealed class HearingStatusRepairServiceTests
 
     private sealed class FakeMondayClient : IMondayClient
     {
-        private readonly IReadOnlyDictionary<long, string?> _currentLabels;
+        private readonly Dictionary<long, string?> _currentLabels;
         private readonly IReadOnlySet<long> _inactiveItemIds;
         private readonly long? _failedMutationItemId;
+        private readonly IReadOnlyDictionary<long, Queue<Exception>> _mutationFailures;
+        private readonly IReadOnlySet<long> _suppressMutationPersistence;
 
         public FakeMondayClient(
             IReadOnlyDictionary<long, string?>? currentLabels,
             IReadOnlySet<long>? inactiveItemIds,
-            long? failedMutationItemId)
+            long? failedMutationItemId,
+            IReadOnlyDictionary<long, Queue<Exception>>? mutationFailures,
+            IReadOnlySet<long>? suppressMutationPersistence)
         {
-            _currentLabels = currentLabels ?? new Dictionary<long, string?>();
+            _currentLabels = currentLabels?.ToDictionary(pair => pair.Key, pair => pair.Value) ?? new();
             _inactiveItemIds = inactiveItemIds ?? new HashSet<long>();
             _failedMutationItemId = failedMutationItemId;
+            _mutationFailures = mutationFailures ?? new Dictionary<long, Queue<Exception>>();
+            _suppressMutationPersistence = suppressMutationPersistence ?? new HashSet<long>();
         }
 
         public List<(long BoardId, long ItemId, string Label, string ColumnId)> StatusMutations { get; } = new();
@@ -322,11 +442,19 @@ public sealed class HearingStatusRepairServiceTests
 
         public Task UpdateHearingStatusAsync(long boardId, long itemId, string label, string statusColumnId, CancellationToken ct)
         {
+            StatusMutations.Add((boardId, itemId, label, statusColumnId));
+            if (_mutationFailures.TryGetValue(itemId, out var failures) && failures.Count > 0)
+            {
+                throw failures.Dequeue();
+            }
             if (_failedMutationItemId == itemId)
             {
                 throw new InvalidOperationException("Synthetic mutation failure.");
             }
-            StatusMutations.Add((boardId, itemId, label, statusColumnId));
+            if (!_suppressMutationPersistence.Contains(itemId))
+            {
+                _currentLabels[itemId] = label;
+            }
             return Task.CompletedTask;
         }
 
