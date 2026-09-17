@@ -12,7 +12,8 @@ public enum HearingStatusWorkflowOutcome
     AdvancedAfterMutation = 5,
     ValidationFailed = 6,
     MondayFailed = 7,
-    VerificationFailed = 8
+    VerificationFailed = 8,
+    SkippedInactive = 9
 }
 
 public sealed record HearingStatusWorkflowResult(
@@ -98,6 +99,13 @@ public sealed class HearingStatusWorkflowService
     {
         var desiredLabel = GetDesiredLabel(meetStatus);
         var initialRead = await ReadStatusAsync(boardId, itemId, statusColumnId, ct);
+        if (string.Equals(initialRead.FailureCode, "MONDAY_ITEM_INACTIVE", StringComparison.Ordinal))
+        {
+            return new HearingStatusWorkflowResult(
+                HearingStatusWorkflowOutcome.SkippedInactive,
+                desiredLabel,
+                initialRead.FailureCode);
+        }
         if (initialRead.FailureCode != null)
         {
             return new HearingStatusWorkflowResult(
@@ -268,12 +276,22 @@ public sealed class HearingStatusWorkflowService
                 itemId,
                 statusColumnId,
                 ct);
-            if (value == null ||
-                value.BoardId != boardId ||
-                value.ItemId != itemId ||
-                !string.Equals(value.State, "active", StringComparison.OrdinalIgnoreCase))
+            if (value == null)
             {
-                return (null, "MONDAY_ITEM_INVALID");
+                return (null, "MONDAY_ITEM_MISSING");
+            }
+            if (value.BoardId != boardId || value.ItemId != itemId)
+            {
+                return (null, "MONDAY_ITEM_IDENTITY_MISMATCH");
+            }
+            if (string.Equals(value.State, "archived", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value.State, "inactive", StringComparison.OrdinalIgnoreCase))
+            {
+                return (null, "MONDAY_ITEM_INACTIVE");
+            }
+            if (!string.Equals(value.State, "active", StringComparison.OrdinalIgnoreCase))
+            {
+                return (null, "MONDAY_ITEM_INVALID_STATE");
             }
 
             return (value, null);

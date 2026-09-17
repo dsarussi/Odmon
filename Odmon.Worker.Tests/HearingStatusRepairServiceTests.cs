@@ -197,6 +197,9 @@ public sealed class HearingStatusRepairServiceTests
             CancellationToken.None);
 
         Assert.Equal(2, summary.ValidationFailed);
+        Assert.Contains(summary.ValidationFailures, failure =>
+            failure.MondayItemId == inactive.MondayItemId &&
+            failure.ReasonCode == "MONDAY_ITEM_INVALID");
         Assert.DoesNotContain(scenario.Monday.StatusMutations, mutation =>
             mutation.ItemId == changedSource.MondayItemId || mutation.ItemId == inactive.MondayItemId);
         Assert.Equal(47, summary.Updated);

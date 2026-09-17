@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Odmon.Worker.Data;
@@ -262,6 +263,87 @@ namespace Odmon.Worker.Tests
             Assert.Null(snapshot.City);
         }
 
+        [Theory]
+        [InlineData("archived")]
+        [InlineData("inactive")]
+        public async Task InactiveMondayItem_IsSkippedWithoutFailureMutationOrSnapshot(string itemState)
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                mondayItemState: itemState);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            Assert.Equal(0, scenario.Monday.DetailsMutationCount);
+            Assert.Equal(0, scenario.Monday.DateMutationCount);
+            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=MondayItemInactive", StringComparison.Ordinal));
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("SkippedInactive=1", StringComparison.Ordinal) &&
+                message.Contains("Failed=0", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task MissingMondayItem_RemainsValidationFailure()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                mondayItemMissing: true);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=MONDAY_ITEM_MISSING", StringComparison.Ordinal));
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("SkippedInactive=0", StringComparison.Ordinal) &&
+                message.Contains("Failed=1", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task DeletedMondayItem_RemainsValidationFailure()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                mondayItemState: "deleted");
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=MONDAY_ITEM_INVALID_STATE", StringComparison.Ordinal));
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("SkippedInactive=0", StringComparison.Ordinal) &&
+                message.Contains("Failed=1", StringComparison.Ordinal));
+        }
+
+        [Theory]
+        [InlineData(true, false)]
+        [InlineData(false, true)]
+        public async Task WrongMondayIdentity_RemainsValidationFailure(
+            bool wrongBoard,
+            bool wrongItem)
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                returnedBoardId: wrongBoard ? BoardId + 1 : null,
+                returnedItemId: wrongItem ? MondayItemId + 1 : null);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=MONDAY_ITEM_IDENTITY_MISMATCH", StringComparison.Ordinal));
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("SkippedInactive=0", StringComparison.Ordinal) &&
+                message.Contains("Failed=1", StringComparison.Ordinal));
+        }
+
         private static Scenario CreateScenario(
             int meetStatus,
             DateTime? mappingCreatedAtUtc = null,
@@ -275,7 +357,11 @@ namespace Odmon.Worker.Tests
             HearingNearestMode hearingMode = HearingNearestMode.StatusOnly,
             string? currentStatusLabel = null,
             string? statusAfterMutation = null,
-            int? snapshotMeetStatus = null)
+            int? snapshotMeetStatus = null,
+            string mondayItemState = "active",
+            bool mondayItemMissing = false,
+            long? returnedBoardId = null,
+            long? returnedItemId = null)
         {
             var options = new DbContextOptionsBuilder<IntegrationDbContext>()
                 .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
@@ -327,7 +413,11 @@ namespace Odmon.Worker.Tests
                 FailStatusMutation = failStatusMutation,
                 FailDateMutation = failDateMutation,
                 CurrentStatusLabel = currentStatusLabel,
-                StatusAfterMutation = statusAfterMutation
+                StatusAfterMutation = statusAfterMutation,
+                ItemState = mondayItemState,
+                ItemMissing = mondayItemMissing,
+                ReturnedBoardId = returnedBoardId,
+                ReturnedItemId = returnedItemId
             };
             var metadata = new FakeMetadataProvider(allowedLabels ?? new[]
             {
@@ -357,6 +447,7 @@ namespace Odmon.Worker.Tests
             var mappingReader = new MondayMappingReadService(
                 db,
                 NullLogger<MondayMappingReadService>.Instance);
+            var logger = new RecordingLogger<HearingNearestSyncService>();
             var service = new HearingNearestSyncService(
                 reader,
                 db,
@@ -364,12 +455,12 @@ namespace Odmon.Worker.Tests
                 metadata,
                 configuration,
                 mondaySettings,
-                NullLogger<HearingNearestSyncService>.Instance,
+                logger,
                 skipLogger,
                 mappingReader,
                 new HearingStatusWorkflowService(monday, new FakeDelay()));
 
-            return new Scenario(db, service, reader, monday, skipLogger);
+            return new Scenario(db, service, reader, monday, skipLogger, logger);
         }
 
         private sealed class Scenario(
@@ -377,13 +468,15 @@ namespace Odmon.Worker.Tests
             HearingNearestSyncService service,
             FakeOdcanitReader reader,
             FakeMondayClient monday,
-            FakeSkipLogger skipLogger) : IAsyncDisposable
+            FakeSkipLogger skipLogger,
+            RecordingLogger<HearingNearestSyncService> logger) : IAsyncDisposable
         {
             public IntegrationDbContext Db { get; } = db;
             public HearingNearestSyncService Service { get; } = service;
             public FakeOdcanitReader Reader { get; } = reader;
             public FakeMondayClient Monday { get; } = monday;
             public FakeSkipLogger SkipLogger { get; } = skipLogger;
+            public RecordingLogger<HearingNearestSyncService> Logger { get; } = logger;
 
             public ValueTask DisposeAsync() => Db.DisposeAsync();
         }
@@ -434,6 +527,10 @@ namespace Odmon.Worker.Tests
             public string? StatusAfterMutation { get; init; }
             public int DetailsMutationCount { get; private set; }
             public int DateMutationCount { get; private set; }
+            public string ItemState { get; init; } = "active";
+            public bool ItemMissing { get; init; }
+            public long? ReturnedBoardId { get; init; }
+            public long? ReturnedItemId { get; init; }
 
             public Task UpdateHearingStatusAsync(long boardId, long itemId, string label, string statusColumnId, CancellationToken ct)
             {
@@ -467,7 +564,13 @@ namespace Odmon.Worker.Tests
             public Task<string?> GetItemStateAsync(long boardId, long itemId, CancellationToken ct)
                 => Task.FromResult<string?>("active");
             public Task<MondayItemStatusValue?> GetItemStatusValueAsync(long boardId, long itemId, string statusColumnId, CancellationToken ct)
-                => Task.FromResult<MondayItemStatusValue?>(new(boardId, itemId, "active", CurrentStatusLabel));
+                => Task.FromResult(ItemMissing
+                    ? null
+                    : new MondayItemStatusValue(
+                        ReturnedBoardId ?? boardId,
+                        ReturnedItemId ?? itemId,
+                        ItemState,
+                        CurrentStatusLabel));
             public Task UpdateItemAsync(long boardId, long itemId, string columnValuesJson, CancellationToken ct)
                 => Task.CompletedTask;
             public Task UpdateItemNameAsync(long boardId, long itemId, string name, CancellationToken ct)
@@ -523,6 +626,21 @@ namespace Odmon.Worker.Tests
                 CallCount++;
                 return Task.CompletedTask;
             }
+        }
+
+        private sealed class RecordingLogger<T> : ILogger<T>
+        {
+            public List<string> Messages { get; } = new();
+
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+                => Messages.Add(formatter(state, exception));
         }
     }
 }

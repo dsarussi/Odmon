@@ -269,6 +269,9 @@ internal sealed class HearingStatusRepairService
                 case HearingStatusWorkflowOutcome.ProtectedWorkflowStatus:
                     protectedWorkflowStatus++;
                     break;
+                case HearingStatusWorkflowOutcome.SkippedInactive:
+                    failures.TryAdd(target.MondayItemId, "MONDAY_ITEM_INVALID");
+                    break;
                 case HearingStatusWorkflowOutcome.Planned:
                     planned.Add(target);
                     break;
@@ -311,6 +314,9 @@ internal sealed class HearingStatusRepairService
                         break;
                     case HearingStatusWorkflowOutcome.ProtectedWorkflowStatus:
                         protectedWorkflowStatus++;
+                        break;
+                    case HearingStatusWorkflowOutcome.SkippedInactive:
+                        failures.TryAdd(target.MondayItemId, "MONDAY_ITEM_INVALID");
                         break;
                     case HearingStatusWorkflowOutcome.MondayFailed:
                         mondayFailed++;
