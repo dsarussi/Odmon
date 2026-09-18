@@ -266,7 +266,7 @@ namespace Odmon.Worker.Tests
         [Theory]
         [InlineData("archived")]
         [InlineData("inactive")]
-        public async Task InactiveMondayItem_IsSkippedWithoutFailureMutationOrSnapshot(string itemState)
+        public async Task ReturnedUnavailableMondayItem_IsSkippedWithoutFailureMutationOrSnapshot(string itemState)
         {
             await using var scenario = CreateScenario(
                 meetStatus: 1,
@@ -279,14 +279,14 @@ namespace Odmon.Worker.Tests
             Assert.Equal(0, scenario.Monday.DateMutationCount);
             Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
             Assert.Contains(scenario.Logger.Messages, message =>
-                message.Contains("Reason=MondayItemInactive", StringComparison.Ordinal));
+                message.Contains("Reason=MondayItemUnavailable", StringComparison.Ordinal));
             Assert.Contains(scenario.Logger.Messages, message =>
-                message.Contains("SkippedInactive=1", StringComparison.Ordinal) &&
+                message.Contains("SkippedUnavailable=1", StringComparison.Ordinal) &&
                 message.Contains("Failed=0", StringComparison.Ordinal));
         }
 
         [Fact]
-        public async Task MissingMondayItem_RemainsValidationFailure()
+        public async Task EmptySuccessfulItemResult_IsSkippedUnavailable()
         {
             await using var scenario = CreateScenario(
                 meetStatus: 1,
@@ -297,10 +297,10 @@ namespace Odmon.Worker.Tests
             Assert.Empty(scenario.Monday.StatusLabels);
             Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
             Assert.Contains(scenario.Logger.Messages, message =>
-                message.Contains("Reason=MONDAY_ITEM_MISSING", StringComparison.Ordinal));
+                message.Contains("Reason=MondayItemUnavailable", StringComparison.Ordinal));
             Assert.Contains(scenario.Logger.Messages, message =>
-                message.Contains("SkippedInactive=0", StringComparison.Ordinal) &&
-                message.Contains("Failed=1", StringComparison.Ordinal));
+                message.Contains("SkippedUnavailable=1", StringComparison.Ordinal) &&
+                message.Contains("Failed=0", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -317,7 +317,7 @@ namespace Odmon.Worker.Tests
             Assert.Contains(scenario.Logger.Messages, message =>
                 message.Contains("Reason=MONDAY_ITEM_INVALID_STATE", StringComparison.Ordinal));
             Assert.Contains(scenario.Logger.Messages, message =>
-                message.Contains("SkippedInactive=0", StringComparison.Ordinal) &&
+                message.Contains("SkippedUnavailable=0", StringComparison.Ordinal) &&
                 message.Contains("Failed=1", StringComparison.Ordinal));
         }
 
@@ -340,8 +340,207 @@ namespace Odmon.Worker.Tests
             Assert.Contains(scenario.Logger.Messages, message =>
                 message.Contains("Reason=MONDAY_ITEM_IDENTITY_MISMATCH", StringComparison.Ordinal));
             Assert.Contains(scenario.Logger.Messages, message =>
-                message.Contains("SkippedInactive=0", StringComparison.Ordinal) &&
+                message.Contains("SkippedUnavailable=0", StringComparison.Ordinal) &&
                 message.Contains("Failed=1", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task MondayApiFailure_RemainsValidationFailure()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                statusReadException: new MondayApiException(
+                    "Synthetic GraphQL failure.",
+                    errorCode: "SYNTHETIC_GRAPHQL_ERROR"));
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=MONDAY_SYNTHETIC_GRAPHQL_ERROR", StringComparison.Ordinal));
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("SkippedUnavailable=0", StringComparison.Ordinal) &&
+                message.Contains("Failed=1", StringComparison.Ordinal));
+        }
+
+        [Theory]
+        [InlineData(1, CancelledLabel)]
+        [InlineData(2, TransferredLabel)]
+        public async Task SourceStatusChange_WithUnavailablePeer_UpdatesOnlyStatusThenIsIdempotent(
+            int newMeetStatus,
+            string expectedLabel)
+        {
+            await using var scenario = CreateMixedStatusChangeScenario(newMeetStatus);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            var mutation = Assert.Single(scenario.Monday.StatusMutations);
+            Assert.Equal(BoardId, mutation.BoardId);
+            Assert.Equal(scenario.ActiveItemId, mutation.ItemId);
+            Assert.Equal(expectedLabel, mutation.Label);
+            Assert.Equal("synthetic_status", mutation.ColumnId);
+            Assert.Equal(0, scenario.Monday.DetailsMutationCount);
+            Assert.Equal(0, scenario.Monday.DateMutationCount);
+
+            var activeSnapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync(
+                item => item.MondayItemId == scenario.ActiveItemId);
+            Assert.Equal(newMeetStatus, activeSnapshot.NearestMeetStatus);
+            Assert.Equal(scenario.OriginalStartDateUtc, activeSnapshot.NearestStartDateUtc);
+            Assert.Equal("Synthetic existing judge", activeSnapshot.JudgeName);
+            Assert.Equal("Synthetic existing city", activeSnapshot.City);
+
+            var unavailableSnapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync(
+                item => item.MondayItemId == scenario.UnavailableItemId);
+            Assert.Equal(0, unavailableSnapshot.NearestMeetStatus);
+            Assert.Equal(scenario.UnavailableLastSyncedAtUtc, unavailableSnapshot.LastSyncedAtUtc);
+            var activeLastSyncedAfterFirstRun = activeSnapshot.LastSyncedAtUtc;
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Single(scenario.Monday.StatusMutations);
+            Assert.Equal(
+                activeLastSyncedAfterFirstRun,
+                (await scenario.Db.HearingNearestSnapshots.SingleAsync(
+                    item => item.MondayItemId == scenario.ActiveItemId)).LastSyncedAtUtc);
+            Assert.Equal(
+                scenario.UnavailableLastSyncedAtUtc,
+                (await scenario.Db.HearingNearestSnapshots.SingleAsync(
+                    item => item.MondayItemId == scenario.UnavailableItemId)).LastSyncedAtUtc);
+        }
+
+        private static MixedScenario CreateMixedStatusChangeScenario(int newMeetStatus)
+        {
+            const long activeItemId = 810001;
+            const long unavailableItemId = 810002;
+            const int activeTikCounter = 1101;
+            const int unavailableTikCounter = 1102;
+            const string activeTikNumber = "SYN-1101";
+            const string unavailableTikNumber = "SYN-1102";
+            var unavailableLastSyncedAtUtc = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+            var originalStartDateUtc = new DateTime(2026, 1, 3, 4, 5, 6, DateTimeKind.Utc);
+
+            var options = new DbContextOptionsBuilder<IntegrationDbContext>()
+                .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+                .Options;
+            var db = new IntegrationDbContext(options);
+            db.MondayItemMappings.AddRange(
+                new MondayItemMapping
+                {
+                    TikCounter = activeTikCounter,
+                    TikNumber = activeTikNumber,
+                    MondayItemId = activeItemId,
+                    BoardId = BoardId,
+                    CreatedAtUtc = DateTime.UnixEpoch
+                },
+                new MondayItemMapping
+                {
+                    TikCounter = unavailableTikCounter,
+                    TikNumber = unavailableTikNumber,
+                    MondayItemId = unavailableItemId,
+                    BoardId = BoardId,
+                    CreatedAtUtc = DateTime.UnixEpoch
+                });
+            db.HearingNearestSnapshots.AddRange(
+                new HearingNearestSnapshot
+                {
+                    TikCounter = activeTikCounter,
+                    BoardId = BoardId,
+                    MondayItemId = activeItemId,
+                    NearestMeetStatus = 0,
+                    NearestStartDateUtc = originalStartDateUtc,
+                    JudgeName = "Synthetic existing judge",
+                    City = "Synthetic existing city",
+                    LastSyncedAtUtc = DateTime.UnixEpoch
+                },
+                new HearingNearestSnapshot
+                {
+                    TikCounter = unavailableTikCounter,
+                    BoardId = BoardId,
+                    MondayItemId = unavailableItemId,
+                    NearestMeetStatus = 0,
+                    LastSyncedAtUtc = unavailableLastSyncedAtUtc
+                });
+            db.SaveChanges();
+
+            var israelTime = TimeZoneInfo.FindSystemTimeZoneById("Israel Standard Time");
+            var futureStart = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, israelTime).AddDays(2);
+            var reader = new MixedFakeOdcanitReader(
+                new Dictionary<string, int>(StringComparer.Ordinal)
+                {
+                    [activeTikNumber] = activeTikCounter,
+                    [unavailableTikNumber] = unavailableTikCounter
+                },
+                [
+                    new OdcanitDiaryEvent
+                    {
+                        TikCounter = activeTikCounter,
+                        StartDate = futureStart,
+                        MeetStatus = newMeetStatus,
+                        JudgeName = "Synthetic new judge",
+                        City = "Synthetic new city"
+                    },
+                    new OdcanitDiaryEvent
+                    {
+                        TikCounter = unavailableTikCounter,
+                        StartDate = futureStart.AddHours(1),
+                        MeetStatus = newMeetStatus
+                    }
+                ]);
+            var monday = new FakeMondayClient();
+            monday.ItemStatusValues[activeItemId] = new MondayItemStatusValue(
+                BoardId,
+                activeItemId,
+                "active",
+                HearingStatusWorkflowService.ActiveBaselineLabel);
+            monday.ItemStatusValues[unavailableItemId] = null;
+            var metadata = new FakeMetadataProvider(
+            [
+                HearingStatusWorkflowService.ActiveBaselineLabel,
+                CancelledLabel,
+                TransferredLabel
+            ]);
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Testing:Enable"] = "false",
+                    ["OdcanitWrites:Enable"] = "true",
+                    ["OdcanitWrites:DryRun"] = "false",
+                    ["HearingNearest:Mode"] = HearingNearestMode.StatusOnly.ToString(),
+                    ["HearingNearest:DryRun"] = "false",
+                    ["HearingNearest:RecoveryLookbackDays"] = "30"
+                })
+                .Build();
+            var settings = Options.Create(new MondaySettings
+            {
+                HearingStatusColumnId = "synthetic_status",
+                JudgeNameColumnId = "synthetic_judge",
+                HearingDateColumnId = "synthetic_date",
+                HearingHourColumnId = "synthetic_hour"
+            });
+            var mappingReader = new MondayMappingReadService(
+                db,
+                NullLogger<MondayMappingReadService>.Instance);
+            var service = new HearingNearestSyncService(
+                reader,
+                db,
+                monday,
+                metadata,
+                configuration,
+                settings,
+                new RecordingLogger<HearingNearestSyncService>(),
+                new FakeSkipLogger(),
+                mappingReader,
+                new HearingStatusWorkflowService(monday, new FakeDelay()));
+
+            return new MixedScenario(
+                db,
+                service,
+                monday,
+                activeItemId,
+                unavailableItemId,
+                originalStartDateUtc,
+                unavailableLastSyncedAtUtc);
         }
 
         private static Scenario CreateScenario(
@@ -361,7 +560,8 @@ namespace Odmon.Worker.Tests
             string mondayItemState = "active",
             bool mondayItemMissing = false,
             long? returnedBoardId = null,
-            long? returnedItemId = null)
+            long? returnedItemId = null,
+            Exception? statusReadException = null)
         {
             var options = new DbContextOptionsBuilder<IntegrationDbContext>()
                 .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
@@ -417,7 +617,8 @@ namespace Odmon.Worker.Tests
                 ItemState = mondayItemState,
                 ItemMissing = mondayItemMissing,
                 ReturnedBoardId = returnedBoardId,
-                ReturnedItemId = returnedItemId
+                ReturnedItemId = returnedItemId,
+                StatusReadException = statusReadException
             };
             var metadata = new FakeMetadataProvider(allowedLabels ?? new[]
             {
@@ -481,6 +682,25 @@ namespace Odmon.Worker.Tests
             public ValueTask DisposeAsync() => Db.DisposeAsync();
         }
 
+        private sealed class MixedScenario(
+            IntegrationDbContext db,
+            HearingNearestSyncService service,
+            FakeMondayClient monday,
+            long activeItemId,
+            long unavailableItemId,
+            DateTime originalStartDateUtc,
+            DateTime unavailableLastSyncedAtUtc) : IAsyncDisposable
+        {
+            public IntegrationDbContext Db { get; } = db;
+            public HearingNearestSyncService Service { get; } = service;
+            public FakeMondayClient Monday { get; } = monday;
+            public long ActiveItemId { get; } = activeItemId;
+            public long UnavailableItemId { get; } = unavailableItemId;
+            public DateTime OriginalStartDateUtc { get; } = originalStartDateUtc;
+            public DateTime UnavailableLastSyncedAtUtc { get; } = unavailableLastSyncedAtUtc;
+            public ValueTask DisposeAsync() => Db.DisposeAsync();
+        }
+
         private sealed class FakeOdcanitReader(OdcanitDiaryEvent hearing) : IOdcanitReader
         {
             public int GetCasesCallCount { get; private set; }
@@ -518,9 +738,47 @@ namespace Odmon.Worker.Tests
                 => Task.FromResult(new List<int>());
         }
 
+        private sealed class MixedFakeOdcanitReader(
+            IReadOnlyDictionary<string, int> resolutions,
+            IReadOnlyList<OdcanitDiaryEvent> hearings) : IOdcanitReader
+        {
+            public Task<List<OdcanitCase>> GetCasesCreatedOnDateAsync(DateTime date, CancellationToken ct)
+                => Task.FromResult(new List<OdcanitCase>());
+
+            public Task<List<OdcanitCase>> GetCasesByTikCountersAsync(
+                IEnumerable<int> tikCounters,
+                CancellationToken ct)
+                => Task.FromResult(new List<OdcanitCase>());
+
+            public Task<List<OdcanitDiaryEvent>> GetDiaryEventsByTikCountersAsync(
+                IEnumerable<int> tikCounters,
+                CancellationToken ct)
+            {
+                var requested = tikCounters.ToHashSet();
+                return Task.FromResult(hearings
+                    .Where(item => item.TikCounter.HasValue && requested.Contains(item.TikCounter.Value))
+                    .ToList());
+            }
+
+            public Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(
+                IEnumerable<string> tikNumbers,
+                CancellationToken ct)
+            {
+                var requested = tikNumbers.ToHashSet(StringComparer.Ordinal);
+                return Task.FromResult(resolutions
+                    .Where(pair => requested.Contains(pair.Key))
+                    .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
+            }
+
+            public Task<List<int>> GetTikCountersSinceCutoffAsync(DateTime cutoffDate, CancellationToken ct)
+                => Task.FromResult(new List<int>());
+        }
+
         private sealed class FakeMondayClient : IMondayClient
         {
             public List<string> StatusLabels { get; } = new();
+            public List<(long BoardId, long ItemId, string Label, string ColumnId)> StatusMutations { get; } = new();
+            public Dictionary<long, MondayItemStatusValue?> ItemStatusValues { get; } = new();
             public bool FailStatusMutation { get; init; }
             public bool FailDateMutation { get; init; }
             public string? CurrentStatusLabel { get; set; }
@@ -531,6 +789,7 @@ namespace Odmon.Worker.Tests
             public bool ItemMissing { get; init; }
             public long? ReturnedBoardId { get; init; }
             public long? ReturnedItemId { get; init; }
+            public Exception? StatusReadException { get; init; }
 
             public Task UpdateHearingStatusAsync(long boardId, long itemId, string label, string statusColumnId, CancellationToken ct)
             {
@@ -539,7 +798,16 @@ namespace Odmon.Worker.Tests
                     throw new InvalidOperationException("Synthetic Monday failure");
                 }
                 StatusLabels.Add(label);
-                CurrentStatusLabel = StatusAfterMutation ?? label;
+                StatusMutations.Add((boardId, itemId, label, statusColumnId));
+                var persistedLabel = StatusAfterMutation ?? label;
+                if (ItemStatusValues.TryGetValue(itemId, out var value) && value != null)
+                {
+                    ItemStatusValues[itemId] = value with { Label = persistedLabel };
+                }
+                else
+                {
+                    CurrentStatusLabel = persistedLabel;
+                }
                 return Task.CompletedTask;
             }
 
@@ -564,13 +832,25 @@ namespace Odmon.Worker.Tests
             public Task<string?> GetItemStateAsync(long boardId, long itemId, CancellationToken ct)
                 => Task.FromResult<string?>("active");
             public Task<MondayItemStatusValue?> GetItemStatusValueAsync(long boardId, long itemId, string statusColumnId, CancellationToken ct)
-                => Task.FromResult(ItemMissing
+            {
+                if (StatusReadException != null)
+                {
+                    throw StatusReadException;
+                }
+
+                if (ItemStatusValues.TryGetValue(itemId, out var configuredValue))
+                {
+                    return Task.FromResult(configuredValue);
+                }
+
+                return Task.FromResult(ItemMissing
                     ? null
                     : new MondayItemStatusValue(
                         ReturnedBoardId ?? boardId,
                         ReturnedItemId ?? itemId,
                         ItemState,
                         CurrentStatusLabel));
+            }
             public Task UpdateItemAsync(long boardId, long itemId, string columnValuesJson, CancellationToken ct)
                 => Task.CompletedTask;
             public Task UpdateItemNameAsync(long boardId, long itemId, string name, CancellationToken ct)

@@ -13,7 +13,7 @@ public enum HearingStatusWorkflowOutcome
     ValidationFailed = 6,
     MondayFailed = 7,
     VerificationFailed = 8,
-    SkippedInactive = 9
+    SkippedUnavailable = 9
 }
 
 public sealed record HearingStatusWorkflowResult(
@@ -99,10 +99,10 @@ public sealed class HearingStatusWorkflowService
     {
         var desiredLabel = GetDesiredLabel(meetStatus);
         var initialRead = await ReadStatusAsync(boardId, itemId, statusColumnId, ct);
-        if (string.Equals(initialRead.FailureCode, "MONDAY_ITEM_INACTIVE", StringComparison.Ordinal))
+        if (string.Equals(initialRead.FailureCode, "MONDAY_ITEM_UNAVAILABLE", StringComparison.Ordinal))
         {
             return new HearingStatusWorkflowResult(
-                HearingStatusWorkflowOutcome.SkippedInactive,
+                HearingStatusWorkflowOutcome.SkippedUnavailable,
                 desiredLabel,
                 initialRead.FailureCode);
         }
@@ -278,7 +278,9 @@ public sealed class HearingStatusWorkflowService
                 ct);
             if (value == null)
             {
-                return (null, "MONDAY_ITEM_MISSING");
+                // A successful empty items result is intentionally opaque: Monday
+                // uses it for more than one lifecycle condition.
+                return (null, "MONDAY_ITEM_UNAVAILABLE");
             }
             if (value.BoardId != boardId || value.ItemId != itemId)
             {
@@ -287,7 +289,7 @@ public sealed class HearingStatusWorkflowService
             if (string.Equals(value.State, "archived", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(value.State, "inactive", StringComparison.OrdinalIgnoreCase))
             {
-                return (null, "MONDAY_ITEM_INACTIVE");
+                return (null, "MONDAY_ITEM_UNAVAILABLE");
             }
             if (!string.Equals(value.State, "active", StringComparison.OrdinalIgnoreCase))
             {

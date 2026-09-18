@@ -136,7 +136,7 @@ namespace Odmon.Worker.Services
             var wouldUpdate = 0;
             var noChange = 0;
             var failed = 0;
-            var skippedInactive = 0;
+            var skippedUnavailable = 0;
             var protectedWorkflowStatus = 0;
             var advancedAfterMutation = 0;
 
@@ -241,13 +241,12 @@ namespace Odmon.Worker.Services
                     case HearingStatusWorkflowOutcome.ProtectedWorkflowStatus:
                         protectedWorkflowStatus++;
                         break;
-                    case HearingStatusWorkflowOutcome.SkippedInactive:
-                        skippedInactive++;
+                    case HearingStatusWorkflowOutcome.SkippedUnavailable:
+                        skippedUnavailable++;
                         _logger.LogInformation(
-                            "Hearing status reconciliation skipped safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=MondayItemInactive, ReviveInactiveItems={ReviveInactiveItems}",
+                            "Hearing status reconciliation skipped safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=MondayItemUnavailable",
                             mapping.TikCounter,
-                            effectiveItemId,
-                            _mondaySettings.ReviveInactiveItems);
+                            effectiveItemId);
                         continue;
                     case HearingStatusWorkflowOutcome.AdvancedAfterMutation:
                         advancedAfterMutation++;
@@ -387,7 +386,7 @@ namespace Odmon.Worker.Services
                 wouldUpdate,
                 noChange,
                 failed,
-                skippedInactive,
+                skippedUnavailable,
                 protectedWorkflowStatus,
                 advancedAfterMutation);
         }
@@ -455,12 +454,12 @@ namespace Odmon.Worker.Services
             int wouldUpdate,
             int noChange,
             int failed,
-            int skippedInactive = 0,
+            int skippedUnavailable = 0,
             int protectedWorkflowStatus = 0,
             int advancedAfterMutation = 0)
         {
             _logger.LogInformation(
-                "HearingNearest reconciliation summary: BoardId={BoardId}, Mode={Mode}, MappedCases={MappedCases}, SelectedActive={SelectedActive}, SelectedCancelledFallback={SelectedCancelledFallback}, SelectedTransferredFallback={SelectedTransferredFallback}, MissingSnapshot={MissingSnapshot}, WouldUpdate={WouldUpdate}, SkippedInactive={SkippedInactive}, ProtectedWorkflowStatus={ProtectedWorkflowStatus}, AdvancedAfterMutation={AdvancedAfterMutation}, NoChange={NoChange}, Failed={Failed}",
+                "HearingNearest reconciliation summary: BoardId={BoardId}, Mode={Mode}, MappedCases={MappedCases}, SelectedActive={SelectedActive}, SelectedCancelledFallback={SelectedCancelledFallback}, SelectedTransferredFallback={SelectedTransferredFallback}, MissingSnapshot={MissingSnapshot}, WouldUpdate={WouldUpdate}, SkippedUnavailable={SkippedUnavailable}, ProtectedWorkflowStatus={ProtectedWorkflowStatus}, AdvancedAfterMutation={AdvancedAfterMutation}, NoChange={NoChange}, Failed={Failed}",
                 boardId,
                 mode,
                 mappedCases,
@@ -469,7 +468,7 @@ namespace Odmon.Worker.Services
                 selectedTransferredFallback,
                 missingSnapshot,
                 wouldUpdate,
-                skippedInactive,
+                skippedUnavailable,
                 protectedWorkflowStatus,
                 advancedAfterMutation,
                 noChange,

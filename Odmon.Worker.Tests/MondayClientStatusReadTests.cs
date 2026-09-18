@@ -41,6 +41,23 @@ public sealed class MondayClientStatusReadTests
     }
 
     [Fact]
+    public async Task GetItemStatusValue_EmptySuccessfulItemsResultReturnsNull()
+    {
+        var handler = new RecordingHandler("{\"data\":{\"items\":[]}}");
+        var client = CreateClient(handler);
+
+        var result = await client.GetItemStatusValueAsync(
+            7000000001,
+            7000000002,
+            "synthetic_status",
+            CancellationToken.None);
+
+        Assert.Null(result);
+        Assert.Contains("query", handler.RequestBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("mutation", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task UpdateHearingStatus_WritesExactlyOneRequestedStatusColumn()
     {
         const long boardId = 7000000001;
