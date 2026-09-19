@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore;
+using Odmon.Worker.Models;
 using Odmon.Worker.OdcanitAccess;
 using Xunit;
 
@@ -5,6 +7,23 @@ namespace Odmon.Worker.Tests
 {
     public class SqlOdcanitReaderResolutionTests
     {
+        [Fact]
+        public void DiarySourceProjection_MapsStableCounterView()
+        {
+            var options = new DbContextOptionsBuilder<OdcanitDbContext>()
+                .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+                .Options;
+            using var db = new OdcanitDbContext(options);
+
+            var entity = db.Model.FindEntityType(typeof(OdcanitDiarySourceRow));
+
+            Assert.NotNull(entity);
+            Assert.Equal("vwYomandata", entity!.GetViewName());
+            Assert.Equal("dbo", entity.GetViewSchema());
+            Assert.Null(entity.FindPrimaryKey());
+            Assert.NotNull(entity.FindProperty(nameof(OdcanitDiarySourceRow.Counter)));
+        }
+
         [Fact]
         public async Task ResolveTikNumbersInBatchesAsync_LargeInput_UsesBoundedBatchesAndMergesResults()
         {

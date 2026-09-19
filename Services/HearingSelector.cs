@@ -6,7 +6,7 @@ using Odmon.Worker.Models;
 namespace Odmon.Worker.Services
 {
     /// <summary>
-    /// Selects the nearest upcoming hearing per TikCounter from vwExportToOuterSystems_YomanData rows.
+    /// Selects the nearest upcoming hearing per TikCounter from source diary rows.
     /// </summary>
     public static class HearingSelector
     {

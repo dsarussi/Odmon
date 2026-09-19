@@ -17,21 +17,25 @@ namespace Odmon.Worker.Tests
         private const long BoardId = 700001;
         private const long MondayItemId = 800001;
         private const int TikCounter = 1001;
+        private const int SourceEventId = 1201;
         private const string TikNumber = "SYN-1001";
         private const string CancelledLabel = "מבוטל";
         private const string TransferredLabel = "הועבר";
 
         [Fact]
-        public async Task ExistingMapping_NotReady_NoSnapshot_FutureCancelled_UpdatesStatusThenSavesSnapshot()
+        public async Task ExistingMapping_NoSnapshot_FutureCancelled_IsReportedAsLegacyAmbiguous()
         {
             await using var scenario = CreateScenario(meetStatus: 1);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
-            Assert.Equal(new[] { CancelledLabel }, scenario.Monday.StatusLabels);
+            Assert.Empty(scenario.Monday.StatusLabels);
             Assert.Equal(0, scenario.Reader.GetCasesCallCount);
-            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
-            Assert.Equal(1, snapshot.NearestMeetStatus);
+            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=LegacyStatusAmbiguous", StringComparison.Ordinal));
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("LegacyStatusAmbiguous=1", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -41,7 +45,8 @@ namespace Odmon.Worker.Tests
             await using var scenario = CreateScenario(
                 meetStatus: 1,
                 mappingCreatedAtUtc: listenerStart.AddDays(-20),
-                listenerStartedAtUtc: listenerStart);
+                listenerStartedAtUtc: listenerStart,
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
@@ -52,7 +57,7 @@ namespace Odmon.Worker.Tests
         [Fact]
         public async Task FutureTransferredOnly_UpdatesTransferredStatus()
         {
-            await using var scenario = CreateScenario(meetStatus: 2);
+            await using var scenario = CreateScenario(meetStatus: 2, snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
@@ -68,7 +73,10 @@ namespace Odmon.Worker.Tests
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Empty(scenario.Monday.StatusLabels);
-            Assert.Equal(0, Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync()).NearestMeetStatus);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(0, snapshot.NearestMeetStatus);
+            Assert.Null(snapshot.PendingStatusSourceEventId);
+            Assert.Null(snapshot.PendingMeetStatus);
         }
 
         [Fact]
@@ -88,11 +96,19 @@ namespace Odmon.Worker.Tests
         [Fact]
         public async Task StatusMutationFailure_DoesNotSaveSnapshot()
         {
-            await using var scenario = CreateScenario(meetStatus: 1, failStatusMutation: true);
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                failStatusMutation: true,
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
-            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(0, snapshot.NearestMeetStatus);
+            Assert.Null(snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(SourceEventId, snapshot.PendingStatusSourceEventId);
+            Assert.Equal(1, snapshot.PendingMeetStatus);
+            Assert.False(snapshot.PendingInitialStatusWasDesired);
         }
 
         [Fact]
@@ -102,23 +118,27 @@ namespace Odmon.Worker.Tests
                 meetStatus: 1,
                 includeHearingDetails: true,
                 failDateMutation: true,
-                hearingMode: HearingNearestMode.Full);
+                hearingMode: HearingNearestMode.Full,
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Equal(new[] { CancelledLabel }, scenario.Monday.StatusLabels);
-            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(0, Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync()).NearestMeetStatus);
         }
 
         [Fact]
         public async Task DryRun_DoesNotMutateMondayOrSaveSnapshot()
         {
-            await using var scenario = CreateScenario(meetStatus: 1, dryRun: true);
+            await using var scenario = CreateScenario(meetStatus: 1, dryRun: true, snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Empty(scenario.Monday.StatusLabels);
-            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(0, snapshot.NearestMeetStatus);
+            Assert.Null(snapshot.PendingStatusSourceEventId);
+            Assert.Null(snapshot.PendingMeetStatus);
         }
 
         [Fact]
@@ -138,7 +158,10 @@ namespace Odmon.Worker.Tests
         [Fact]
         public async Task RecentlyElapsedCancelled_InsideRecoveryWindow_IsReconciled()
         {
-            await using var scenario = CreateScenario(meetStatus: 1, hearingStartOffset: TimeSpan.FromDays(-2));
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                hearingStartOffset: TimeSpan.FromDays(-2),
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
@@ -149,7 +172,10 @@ namespace Odmon.Worker.Tests
         [Fact]
         public async Task RecentlyElapsedTransferred_InsideRecoveryWindow_IsReconciled()
         {
-            await using var scenario = CreateScenario(meetStatus: 2, hearingStartOffset: TimeSpan.FromHours(-4));
+            await using var scenario = CreateScenario(
+                meetStatus: 2,
+                hearingStartOffset: TimeSpan.FromHours(-4),
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
@@ -198,17 +224,166 @@ namespace Odmon.Worker.Tests
             Assert.Equal(meetStatus, Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync()).NearestMeetStatus);
         }
 
+        [Theory]
+        [InlineData(1, HearingStatusWorkflowService.ActiveLabel, CancelledLabel)]
+        [InlineData(1, HearingStatusWorkflowService.ActiveBaselineLabel, CancelledLabel)]
+        [InlineData(2, HearingStatusWorkflowService.ActiveLabel, TransferredLabel)]
+        [InlineData(2, HearingStatusWorkflowService.ActiveBaselineLabel, TransferredLabel)]
+        public async Task ActiveManagedBaseline_AllowsNewCancellationOrTransfer(
+            int meetStatus,
+            string currentLabel,
+            string expectedLabel)
+        {
+            await using var scenario = CreateScenario(
+                meetStatus,
+                currentStatusLabel: currentLabel,
+                snapshotMeetStatus: 0);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Equal(new[] { expectedLabel }, scenario.Monday.StatusLabels);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(meetStatus, snapshot.DeliveredMeetStatus);
+        }
+
         [Fact]
-        public async Task ExactDesiredStatus_IsNoOpAndStillRecordsSourceSnapshot()
+        public async Task DeliveredCancellation_WithDownstreamLabel_IsNotRepublished()
         {
             await using var scenario = CreateScenario(
                 meetStatus: 1,
-                currentStatusLabel: CancelledLabel);
+                currentStatusLabel: "Synthetic downstream workflow",
+                snapshotMeetStatus: 1,
+                deliveredStatusSourceEventId: SourceEventId,
+                deliveredMeetStatus: 1);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Empty(scenario.Monday.StatusLabels);
-            Assert.Equal(1, Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync()).NearestMeetStatus);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(1, snapshot.DeliveredMeetStatus);
+        }
+
+        [Fact]
+        public async Task NewActiveEvent_IsObservedThenItsCancellationIsDeliveredExactlyOnce()
+        {
+            const int previousEventId = 1200;
+            await using var scenario = CreateScenario(
+                meetStatus: 0,
+                currentStatusLabel: "Synthetic downstream workflow",
+                snapshotMeetStatus: 1,
+                deliveredStatusSourceEventId: previousEventId,
+                deliveredMeetStatus: 1,
+                sourceEventId: SourceEventId,
+                observedSourceEventId: previousEventId);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            var afterObservation = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, afterObservation.ObservedSourceEventId);
+            Assert.Equal(0, afterObservation.NearestMeetStatus);
+            Assert.Equal(previousEventId, afterObservation.DeliveredStatusSourceEventId);
+
+            scenario.Reader.Hearings[0].MeetStatus = 1;
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Equal(new[] { CancelledLabel }, scenario.Monday.StatusLabels);
+            var afterDelivery = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, afterDelivery.DeliveredStatusSourceEventId);
+            Assert.Equal(1, afterDelivery.DeliveredMeetStatus);
+
+            scenario.Monday.CurrentStatusLabel = "Synthetic downstream workflow";
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Single(scenario.Monday.StatusLabels);
+        }
+
+        [Theory]
+        [InlineData(1)]
+        [InlineData(2)]
+        public async Task EventFirstObservedTerminal_AfterSuccessfulActiveCycle_IsQuarantinedAsAmbiguous(
+            int terminalStatus)
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 0,
+                currentStatusLabel: HearingStatusWorkflowService.ActiveBaselineLabel);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+            Assert.Equal(SourceEventId, Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync()).ObservedSourceEventId);
+
+            var nextEvent = scenario.Reader.Hearings[0];
+            nextEvent.SourceEventId = SourceEventId + 1;
+            nextEvent.MeetStatus = terminalStatus;
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, snapshot.ObservedSourceEventId);
+            Assert.Null(snapshot.DeliveredStatusSourceEventId);
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=UnobservedTerminalEventAmbiguous", StringComparison.Ordinal));
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("UnobservedTerminalAmbiguous=1", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task TrackedCancellation_IsDeliveredEvenWhenSelectorPrefersAnotherFutureActiveEvent()
+        {
+            var israelTime = TimeZoneInfo.FindSystemTimeZoneById("Israel Standard Time");
+            var future = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, israelTime).AddDays(3);
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                currentStatusLabel: "Synthetic downstream workflow",
+                snapshotMeetStatus: 0,
+                additionalHearing: new OdcanitDiaryEvent
+                {
+                    SourceEventId = SourceEventId + 1,
+                    TikCounter = TikCounter,
+                    StartDate = future,
+                    MeetStatus = 0
+                });
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Equal(new[] { CancelledLabel }, scenario.Monday.StatusLabels);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId + 1, snapshot.ObservedSourceEventId);
+            Assert.Equal(0, snapshot.NearestMeetStatus);
+            Assert.Equal(SourceEventId, snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(1, snapshot.DeliveredMeetStatus);
+        }
+
+        [Fact]
+        public async Task SameManagedLabelFromOlderEvent_DoesNotBlockNewDelivery()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                currentStatusLabel: CancelledLabel,
+                snapshotMeetStatus: 0);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Equal(new[] { CancelledLabel }, scenario.Monday.StatusLabels);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(1, snapshot.DeliveredMeetStatus);
+        }
+
+        [Fact]
+        public async Task ExactDesiredStatus_ForAlreadyDeliveredEvent_IsNoOp()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                currentStatusLabel: CancelledLabel,
+                snapshotMeetStatus: 1,
+                deliveredStatusSourceEventId: SourceEventId,
+                deliveredMeetStatus: 1);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
         }
 
         [Theory]
@@ -218,7 +393,10 @@ namespace Odmon.Worker.Tests
         {
             await using var scenario = CreateScenario(
                 meetStatus: 1,
-                currentStatusLabel: protectedLabel);
+                currentStatusLabel: protectedLabel,
+                snapshotMeetStatus: 1,
+                deliveredStatusSourceEventId: SourceEventId,
+                deliveredMeetStatus: 1);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
@@ -230,18 +408,149 @@ namespace Odmon.Worker.Tests
             Assert.Null(snapshot.City);
         }
 
+        [Theory]
+        [InlineData(1, CancelledLabel)]
+        [InlineData(2, TransferredLabel)]
+        public async Task ConfirmedMutation_AdvancedByBringUp_DeliversEachObservedEventOnce(
+            int terminalStatus,
+            string expectedLabel)
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 0,
+                currentStatusLabel: HearingStatusWorkflowService.ActiveBaselineLabel,
+                statusAfterMutation: "Synthetic advanced workflow");
+
+            // First successful cycle observes active event A without resetting Monday.
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+            Assert.Empty(scenario.Monday.StatusLabels);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, snapshot.ObservedSourceEventId);
+            Assert.Equal(0, snapshot.NearestMeetStatus);
+
+            // A becomes terminal. Monday acknowledges the mutation, then BringUp
+            // advances the workflow label before our read-back.
+            scenario.Reader.Hearings[0].MeetStatus = terminalStatus;
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Equal(new[] { expectedLabel }, scenario.Monday.StatusLabels);
+            snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(terminalStatus, snapshot.DeliveredMeetStatus);
+            Assert.Null(snapshot.PendingStatusSourceEventId);
+
+            // Repeated processing of A is suppressed by the delivered tuple.
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+            Assert.Single(scenario.Monday.StatusLabels);
+
+            // Event B is observed active while BringUp's downstream label remains.
+            scenario.Reader.Hearings[0].SourceEventId = SourceEventId + 1;
+            scenario.Reader.Hearings[0].MeetStatus = 0;
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+            snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId + 1, snapshot.ObservedSourceEventId);
+            Assert.Equal(0, snapshot.NearestMeetStatus);
+            Assert.Single(scenario.Monday.StatusLabels);
+
+            // B then reaches the same terminal status and is published once.
+            scenario.Reader.Hearings[0].MeetStatus = terminalStatus;
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+            Assert.Equal(new[] { expectedLabel, expectedLabel }, scenario.Monday.StatusLabels);
+            snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId + 1, snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(terminalStatus, snapshot.DeliveredMeetStatus);
+            Assert.Null(snapshot.PendingStatusSourceEventId);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+            Assert.Equal(2, scenario.Monday.StatusLabels.Count);
+        }
+
         [Fact]
-        public async Task AutomationAdvancementAfterMutation_IsSuccessfulAndSavesSnapshot()
+        public async Task TimeoutAfterMondayAcceptedMutation_IsRecoveredByExactReadWithoutRepeating()
         {
             await using var scenario = CreateScenario(
                 meetStatus: 1,
                 currentStatusLabel: HearingStatusWorkflowService.ActiveBaselineLabel,
-                statusAfterMutation: "Synthetic advanced workflow");
+                snapshotMeetStatus: 0,
+                failStatusMutationAfterApply: true);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
-            Assert.Equal(new[] { CancelledLabel }, scenario.Monday.StatusLabels);
-            Assert.Equal(1, Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync()).NearestMeetStatus);
+            Assert.Single(scenario.Monday.StatusLabels);
+            var pending = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, pending.PendingStatusSourceEventId);
+            Assert.False(pending.PendingInitialStatusWasDesired);
+            Assert.Null(pending.DeliveredStatusSourceEventId);
+
+            scenario.Monday.FailStatusMutationAfterApply = false;
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Single(scenario.Monday.StatusLabels);
+            var recovered = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, recovered.DeliveredStatusSourceEventId);
+            Assert.Equal(1, recovered.DeliveredMeetStatus);
+            Assert.Null(recovered.PendingStatusSourceEventId);
+        }
+
+        [Fact]
+        public async Task OlderUncertainAttempt_WithProtectedLabel_IsNotRepeatedOrMarkedDelivered()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                currentStatusLabel: "Synthetic downstream workflow",
+                snapshotMeetStatus: 0,
+                pendingStatusSourceEventId: SourceEventId,
+                pendingMeetStatus: 1,
+                pendingInitialStatusWasDesired: false);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Null(snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(SourceEventId, snapshot.PendingStatusSourceEventId);
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=PendingDeliveryProtectedWorkflowState", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task CrashAfterMutationBeforeDeliveryPersistence_IsRecoveredWithoutRepeating()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                currentStatusLabel: CancelledLabel,
+                snapshotMeetStatus: 0,
+                pendingStatusSourceEventId: SourceEventId,
+                pendingMeetStatus: 1,
+                pendingInitialStatusWasDesired: false);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(SourceEventId, snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(1, snapshot.DeliveredMeetStatus);
+            Assert.Null(snapshot.PendingStatusSourceEventId);
+        }
+
+        [Fact]
+        public async Task CrashBeforeMutation_WhenDesiredLabelPreexisted_RemainsUncertainWithoutRetry()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                currentStatusLabel: CancelledLabel,
+                snapshotMeetStatus: 0,
+                pendingStatusSourceEventId: SourceEventId,
+                pendingMeetStatus: 1,
+                pendingInitialStatusWasDesired: true);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.StatusLabels);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Null(snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(SourceEventId, snapshot.PendingStatusSourceEventId);
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=PendingExactStatePreexisted", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -250,7 +559,8 @@ namespace Odmon.Worker.Tests
             await using var scenario = CreateScenario(
                 meetStatus: 1,
                 includeHearingDetails: true,
-                hearingMode: HearingNearestMode.StatusOnly);
+                hearingMode: HearingNearestMode.StatusOnly,
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
@@ -270,14 +580,15 @@ namespace Odmon.Worker.Tests
         {
             await using var scenario = CreateScenario(
                 meetStatus: 1,
-                mondayItemState: itemState);
+                mondayItemState: itemState,
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Empty(scenario.Monday.StatusLabels);
             Assert.Equal(0, scenario.Monday.DetailsMutationCount);
             Assert.Equal(0, scenario.Monday.DateMutationCount);
-            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            AssertUnadvancedSeedSnapshot(await scenario.Db.HearingNearestSnapshots.SingleAsync());
             Assert.Contains(scenario.Logger.Messages, message =>
                 message.Contains("Reason=MondayItemUnavailable", StringComparison.Ordinal));
             Assert.Contains(scenario.Logger.Messages, message =>
@@ -290,12 +601,13 @@ namespace Odmon.Worker.Tests
         {
             await using var scenario = CreateScenario(
                 meetStatus: 1,
-                mondayItemMissing: true);
+                mondayItemMissing: true,
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Empty(scenario.Monday.StatusLabels);
-            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            AssertUnadvancedSeedSnapshot(await scenario.Db.HearingNearestSnapshots.SingleAsync());
             Assert.Contains(scenario.Logger.Messages, message =>
                 message.Contains("Reason=MondayItemUnavailable", StringComparison.Ordinal));
             Assert.Contains(scenario.Logger.Messages, message =>
@@ -308,12 +620,13 @@ namespace Odmon.Worker.Tests
         {
             await using var scenario = CreateScenario(
                 meetStatus: 1,
-                mondayItemState: "deleted");
+                mondayItemState: "deleted",
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Empty(scenario.Monday.StatusLabels);
-            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            AssertUnadvancedSeedSnapshot(await scenario.Db.HearingNearestSnapshots.SingleAsync());
             Assert.Contains(scenario.Logger.Messages, message =>
                 message.Contains("Reason=MONDAY_ITEM_INVALID_STATE", StringComparison.Ordinal));
             Assert.Contains(scenario.Logger.Messages, message =>
@@ -331,12 +644,13 @@ namespace Odmon.Worker.Tests
             await using var scenario = CreateScenario(
                 meetStatus: 1,
                 returnedBoardId: wrongBoard ? BoardId + 1 : null,
-                returnedItemId: wrongItem ? MondayItemId + 1 : null);
+                returnedItemId: wrongItem ? MondayItemId + 1 : null,
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Empty(scenario.Monday.StatusLabels);
-            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            AssertUnadvancedSeedSnapshot(await scenario.Db.HearingNearestSnapshots.SingleAsync());
             Assert.Contains(scenario.Logger.Messages, message =>
                 message.Contains("Reason=MONDAY_ITEM_IDENTITY_MISMATCH", StringComparison.Ordinal));
             Assert.Contains(scenario.Logger.Messages, message =>
@@ -351,12 +665,13 @@ namespace Odmon.Worker.Tests
                 meetStatus: 1,
                 statusReadException: new MondayApiException(
                     "Synthetic GraphQL failure.",
-                    errorCode: "SYNTHETIC_GRAPHQL_ERROR"));
+                    errorCode: "SYNTHETIC_GRAPHQL_ERROR"),
+                snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Empty(scenario.Monday.StatusLabels);
-            Assert.Empty(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            AssertUnadvancedSeedSnapshot(await scenario.Db.HearingNearestSnapshots.SingleAsync());
             Assert.Contains(scenario.Logger.Messages, message =>
                 message.Contains("Reason=MONDAY_SYNTHETIC_GRAPHQL_ERROR", StringComparison.Ordinal));
             Assert.Contains(scenario.Logger.Messages, message =>
@@ -386,6 +701,9 @@ namespace Odmon.Worker.Tests
             var activeSnapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync(
                 item => item.MondayItemId == scenario.ActiveItemId);
             Assert.Equal(newMeetStatus, activeSnapshot.NearestMeetStatus);
+            Assert.Equal(1301, activeSnapshot.ObservedSourceEventId);
+            Assert.Equal(1301, activeSnapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(newMeetStatus, activeSnapshot.DeliveredMeetStatus);
             Assert.Equal(scenario.OriginalStartDateUtc, activeSnapshot.NearestStartDateUtc);
             Assert.Equal("Synthetic existing judge", activeSnapshot.JudgeName);
             Assert.Equal("Synthetic existing city", activeSnapshot.City);
@@ -409,12 +727,22 @@ namespace Odmon.Worker.Tests
                     item => item.MondayItemId == scenario.UnavailableItemId)).LastSyncedAtUtc);
         }
 
+        private static void AssertUnadvancedSeedSnapshot(HearingNearestSnapshot snapshot)
+        {
+            Assert.Equal(SourceEventId, snapshot.ObservedSourceEventId);
+            Assert.Equal(0, snapshot.NearestMeetStatus);
+            Assert.Null(snapshot.DeliveredStatusSourceEventId);
+            Assert.Null(snapshot.DeliveredMeetStatus);
+        }
+
         private static MixedScenario CreateMixedStatusChangeScenario(int newMeetStatus)
         {
             const long activeItemId = 810001;
             const long unavailableItemId = 810002;
             const int activeTikCounter = 1101;
             const int unavailableTikCounter = 1102;
+            const int activeSourceEventId = 1301;
+            const int unavailableSourceEventId = 1302;
             const string activeTikNumber = "SYN-1101";
             const string unavailableTikNumber = "SYN-1102";
             var unavailableLastSyncedAtUtc = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
@@ -447,6 +775,7 @@ namespace Odmon.Worker.Tests
                     TikCounter = activeTikCounter,
                     BoardId = BoardId,
                     MondayItemId = activeItemId,
+                    ObservedSourceEventId = activeSourceEventId,
                     NearestMeetStatus = 0,
                     NearestStartDateUtc = originalStartDateUtc,
                     JudgeName = "Synthetic existing judge",
@@ -458,6 +787,7 @@ namespace Odmon.Worker.Tests
                     TikCounter = unavailableTikCounter,
                     BoardId = BoardId,
                     MondayItemId = unavailableItemId,
+                    ObservedSourceEventId = unavailableSourceEventId,
                     NearestMeetStatus = 0,
                     LastSyncedAtUtc = unavailableLastSyncedAtUtc
                 });
@@ -474,6 +804,7 @@ namespace Odmon.Worker.Tests
                 [
                     new OdcanitDiaryEvent
                     {
+                        SourceEventId = activeSourceEventId,
                         TikCounter = activeTikCounter,
                         StartDate = futureStart,
                         MeetStatus = newMeetStatus,
@@ -482,6 +813,7 @@ namespace Odmon.Worker.Tests
                     },
                     new OdcanitDiaryEvent
                     {
+                        SourceEventId = unavailableSourceEventId,
                         TikCounter = unavailableTikCounter,
                         StartDate = futureStart.AddHours(1),
                         MeetStatus = newMeetStatus
@@ -497,6 +829,7 @@ namespace Odmon.Worker.Tests
             var metadata = new FakeMetadataProvider(
             [
                 HearingStatusWorkflowService.ActiveBaselineLabel,
+                HearingStatusWorkflowService.ActiveLabel,
                 CancelledLabel,
                 TransferredLabel
             ]);
@@ -549,6 +882,7 @@ namespace Odmon.Worker.Tests
             DateTime? listenerStartedAtUtc = null,
             IEnumerable<string>? allowedLabels = null,
             bool failStatusMutation = false,
+            bool failStatusMutationAfterApply = false,
             TimeSpan? hearingStartOffset = null,
             bool includeHearingDetails = false,
             bool failDateMutation = false,
@@ -557,6 +891,14 @@ namespace Odmon.Worker.Tests
             string? currentStatusLabel = null,
             string? statusAfterMutation = null,
             int? snapshotMeetStatus = null,
+            int? deliveredStatusSourceEventId = null,
+            int? deliveredMeetStatus = null,
+            int? pendingStatusSourceEventId = null,
+            int? pendingMeetStatus = null,
+            bool? pendingInitialStatusWasDesired = null,
+            int sourceEventId = SourceEventId,
+            int? observedSourceEventId = null,
+            OdcanitDiaryEvent? additionalHearing = null,
             string mondayItemState = "active",
             bool mondayItemMissing = false,
             long? returnedBoardId = null,
@@ -582,7 +924,16 @@ namespace Odmon.Worker.Tests
                     TikCounter = TikCounter,
                     BoardId = BoardId,
                     MondayItemId = MondayItemId,
+                    ObservedSourceEventId = observedSourceEventId ?? sourceEventId,
                     NearestMeetStatus = snapshotMeetStatus.Value,
+                    DeliveredStatusSourceEventId = deliveredStatusSourceEventId,
+                    DeliveredMeetStatus = deliveredMeetStatus,
+                    PendingStatusSourceEventId = pendingStatusSourceEventId,
+                    PendingMeetStatus = pendingMeetStatus,
+                    PendingInitialStatusWasDesired = pendingInitialStatusWasDesired,
+                    PendingStatusSinceUtc = pendingStatusSourceEventId.HasValue
+                        ? DateTime.UtcNow.AddMinutes(-5)
+                        : null,
                     LastSyncedAtUtc = DateTime.UtcNow.AddDays(-1)
                 });
             }
@@ -600,17 +951,27 @@ namespace Odmon.Worker.Tests
             var israelTime = TimeZoneInfo.FindSystemTimeZoneById("Israel Standard Time");
             var hearingStartLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, israelTime)
                 .Add(hearingStartOffset ?? TimeSpan.FromDays(2));
-            var reader = new FakeOdcanitReader(new OdcanitDiaryEvent
+            var hearings = new List<OdcanitDiaryEvent>
             {
-                TikCounter = TikCounter,
-                StartDate = hearingStartLocal,
-                MeetStatus = meetStatus,
-                JudgeName = includeHearingDetails ? "Synthetic Judge" : null,
-                City = includeHearingDetails ? "Synthetic City" : null
-            });
+                new()
+                {
+                    SourceEventId = sourceEventId,
+                    TikCounter = TikCounter,
+                    StartDate = hearingStartLocal,
+                    MeetStatus = meetStatus,
+                    JudgeName = includeHearingDetails ? "Synthetic Judge" : null,
+                    City = includeHearingDetails ? "Synthetic City" : null
+                }
+            };
+            if (additionalHearing != null)
+            {
+                hearings.Add(additionalHearing);
+            }
+            var reader = new FakeOdcanitReader(hearings);
             var monday = new FakeMondayClient
             {
                 FailStatusMutation = failStatusMutation,
+                FailStatusMutationAfterApply = failStatusMutationAfterApply,
                 FailDateMutation = failDateMutation,
                 CurrentStatusLabel = currentStatusLabel,
                 StatusAfterMutation = statusAfterMutation,
@@ -623,6 +984,7 @@ namespace Odmon.Worker.Tests
             var metadata = new FakeMetadataProvider(allowedLabels ?? new[]
             {
                 HearingStatusWorkflowService.ActiveBaselineLabel,
+                HearingStatusWorkflowService.ActiveLabel,
                 CancelledLabel,
                 TransferredLabel
             });
@@ -701,10 +1063,11 @@ namespace Odmon.Worker.Tests
             public ValueTask DisposeAsync() => Db.DisposeAsync();
         }
 
-        private sealed class FakeOdcanitReader(OdcanitDiaryEvent hearing) : IOdcanitReader
+        private sealed class FakeOdcanitReader(List<OdcanitDiaryEvent> hearings) : IOdcanitReader
         {
             public int GetCasesCallCount { get; private set; }
             public int DiaryCallCount { get; private set; }
+            public List<OdcanitDiaryEvent> Hearings { get; } = hearings;
 
             public Task<List<OdcanitCase>> GetCasesCreatedOnDateAsync(DateTime date, CancellationToken ct)
                 => Task.FromResult(new List<OdcanitCase>());
@@ -723,7 +1086,7 @@ namespace Odmon.Worker.Tests
                 CancellationToken ct)
             {
                 DiaryCallCount++;
-                return Task.FromResult(new List<OdcanitDiaryEvent> { hearing });
+                return Task.FromResult(Hearings.ToList());
             }
 
             public Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(
@@ -780,6 +1143,7 @@ namespace Odmon.Worker.Tests
             public List<(long BoardId, long ItemId, string Label, string ColumnId)> StatusMutations { get; } = new();
             public Dictionary<long, MondayItemStatusValue?> ItemStatusValues { get; } = new();
             public bool FailStatusMutation { get; init; }
+            public bool FailStatusMutationAfterApply { get; set; }
             public bool FailDateMutation { get; init; }
             public string? CurrentStatusLabel { get; set; }
             public string? StatusAfterMutation { get; init; }
@@ -807,6 +1171,10 @@ namespace Odmon.Worker.Tests
                 else
                 {
                     CurrentStatusLabel = persistedLabel;
+                }
+                if (FailStatusMutationAfterApply)
+                {
+                    throw new TimeoutException("Synthetic timeout after mutation acceptance");
                 }
                 return Task.CompletedTask;
             }

@@ -122,6 +122,7 @@ namespace Odmon.Worker.Data
                 b.HasKey(x => x.Id);
                 b.HasIndex(x => new { x.TikCounter, x.BoardId }).IsUnique();
                 b.HasIndex(x => x.MondayItemId);
+                b.HasIndex(x => x.ObservedSourceEventId);
             });
 
             modelBuilder.Entity<SyncFailure>(b =>

@@ -19,7 +19,8 @@ public enum HearingStatusWorkflowOutcome
 public sealed record HearingStatusWorkflowResult(
     HearingStatusWorkflowOutcome Outcome,
     string? DesiredLabel,
-    string? ReasonCode = null)
+    string? ReasonCode = null,
+    string? ObservedLabel = null)
 {
     public bool IsSuccessful => Outcome is
         HearingStatusWorkflowOutcome.ActiveNoMutation or
@@ -46,6 +47,7 @@ public sealed class HearingStatusDelay : IHearingStatusDelay
 public sealed class HearingStatusWorkflowService
 {
     public const string ActiveBaselineLabel = "דיון לא בוטל";
+    public const string ActiveLabel = "פעיל";
     public const string CancelledLabel = "מבוטל";
     public const string TransferredLabel = "הועבר";
 
@@ -55,6 +57,7 @@ public sealed class HearingStatusWorkflowService
     private static readonly HashSet<string> ManagedLabels = new(StringComparer.Ordinal)
     {
         ActiveBaselineLabel,
+        ActiveLabel,
         CancelledLabel,
         TransferredLabel
     };
@@ -95,7 +98,10 @@ public sealed class HearingStatusWorkflowService
         string statusColumnId,
         int meetStatus,
         bool live,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool allowProtectedTransition = false,
+        bool protectedReadbackConfirmsSuccess = true,
+        bool forceManagedWrite = false)
     {
         var desiredLabel = GetDesiredLabel(meetStatus);
         var initialRead = await ReadStatusAsync(boardId, itemId, statusColumnId, ct);
@@ -128,14 +134,14 @@ public sealed class HearingStatusWorkflowService
                 DesiredLabel: null);
         }
 
-        if (string.Equals(currentLabel, desiredLabel, StringComparison.Ordinal))
+        if (string.Equals(currentLabel, desiredLabel, StringComparison.Ordinal) && !forceManagedWrite)
         {
             return new HearingStatusWorkflowResult(
                 HearingStatusWorkflowOutcome.AlreadyCorrect,
                 desiredLabel);
         }
 
-        if (IsProtectedWorkflowLabel(currentLabel))
+        if (IsProtectedWorkflowLabel(currentLabel) && !allowProtectedTransition)
         {
             return new HearingStatusWorkflowResult(
                 HearingStatusWorkflowOutcome.ProtectedWorkflowStatus,
@@ -146,7 +152,8 @@ public sealed class HearingStatusWorkflowService
         {
             return new HearingStatusWorkflowResult(
                 HearingStatusWorkflowOutcome.Planned,
-                desiredLabel);
+                desiredLabel,
+                ObservedLabel: currentLabel);
         }
 
         await _delay.DelayAsync(MutationInterval, ct);
@@ -169,7 +176,8 @@ public sealed class HearingStatusWorkflowService
             itemId,
             statusColumnId,
             desiredLabel,
-            ct);
+            ct,
+            protectedReadbackConfirmsSuccess);
     }
 
     private async Task<string?> MutateWithRetryAsync(
@@ -219,7 +227,8 @@ public sealed class HearingStatusWorkflowService
         long itemId,
         string statusColumnId,
         string desiredLabel,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool protectedReadbackConfirmsSuccess)
     {
         var failureCode = "READBACK_MISMATCH";
         for (var attempt = 1; attempt <= VerificationAttempts; attempt++)
@@ -235,14 +244,16 @@ public sealed class HearingStatusWorkflowService
                         desiredLabel);
                 }
 
-                if (IsProtectedWorkflowLabel(label))
+                if (IsProtectedWorkflowLabel(label) && protectedReadbackConfirmsSuccess)
                 {
                     return new HearingStatusWorkflowResult(
                         HearingStatusWorkflowOutcome.AdvancedAfterMutation,
                         desiredLabel);
                 }
 
-                failureCode = "READBACK_MANAGED_MISMATCH";
+                failureCode = IsProtectedWorkflowLabel(label)
+                    ? "READBACK_PROTECTED_UNPROVEN"
+                    : "READBACK_MANAGED_MISMATCH";
             }
             else
             {

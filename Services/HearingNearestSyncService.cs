@@ -127,6 +127,10 @@ namespace Odmon.Worker.Services
                 diaryRows,
                 nowLocal,
                 TimeSpan.FromDays(recoveryLookbackDays));
+            var diaryRowsByTik = diaryRows
+                .Where(row => row.TikCounter.HasValue)
+                .GroupBy(row => row.TikCounter!.Value)
+                .ToDictionary(group => group.Key, group => group.ToList());
 
             var mappedCases = mappings.Count;
             var selectedActive = nearestByTik.Values.Count(h => (h.MeetStatus ?? 0) == 0);
@@ -139,6 +143,9 @@ namespace Odmon.Worker.Services
             var skippedUnavailable = 0;
             var protectedWorkflowStatus = 0;
             var advancedAfterMutation = 0;
+            var legacyStatusAmbiguous = 0;
+            var unobservedTerminalAmbiguous = 0;
+            var deliveryUncertain = 0;
 
             var tableExists = await TableExistsAsync(_integrationDb, "HearingNearestSnapshots", ct);
             if (!tableExists)
@@ -180,31 +187,12 @@ namespace Odmon.Worker.Services
 
             foreach (var mapping in mappings)
             {
-                if (!nearestByTik.TryGetValue(mapping.TikCounter, out var hearing))
+                if (!diaryRowsByTik.TryGetValue(mapping.TikCounter, out var caseRows) || caseRows.Count == 0)
                 {
                     continue;
                 }
 
-                // Determine effective court city (City if present, else CourtName)
-                var effectiveCourtCity = !string.IsNullOrWhiteSpace(hearing.City)
-                    ? hearing.City.Trim()
-                    : (!string.IsNullOrWhiteSpace(hearing.CourtName) ? hearing.CourtName.Trim() : null);
-                
-                _logger.LogDebug(
-                    "Effective court city determined: TikCounter={TikCounter}, City='{City}', CourtName='{CourtName}', EffectiveCourtCity='{EffectiveCourtCity}'",
-                    mapping.TikCounter,
-                    hearing.City ?? "<null>",
-                    hearing.CourtName ?? "<null>",
-                    effectiveCourtCity ?? "<null>");
-
-                // Check minimal required fields (only StartDate is mandatory)
-                if (!hearing.StartDate.HasValue)
-                {
-                    _logger.LogWarning(
-                        "Hearing sync skipped (missing StartDate): TikCounter={TikCounter}, MondayItemId={MondayItemId}",
-                        mapping.TikCounter, mapping.MondayItemId);
-                    continue;
-                }
+                nearestByTik.TryGetValue(mapping.TikCounter, out var hearing);
 
                 var snapshot = await _integrationDb.HearingNearestSnapshots
                     .FirstOrDefaultAsync(s => s.TikCounter == mapping.TikCounter && s.BoardId == boardId, ct);
@@ -213,11 +201,132 @@ namespace Odmon.Worker.Services
                     missingSnapshot++;
                 }
 
-                var startDateUtc = hearing.StartDate!.Value.Kind == DateTimeKind.Utc
-                    ? hearing.StartDate.Value
-                    : TimeZoneInfo.ConvertTimeToUtc(hearing.StartDate.Value, IsraelTimeZone);
+                OdcanitDiaryEvent? trackedEvent = null;
+                if (snapshot?.ObservedSourceEventId is int trackedSourceEventId)
+                {
+                    var trackedMatches = caseRows
+                        .Where(row => row.SourceEventId == trackedSourceEventId)
+                        .ToArray();
+                    if (trackedMatches.Length > 1)
+                    {
+                        failed++;
+                        _logger.LogWarning(
+                            "Hearing reconciliation failed safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=DuplicateSourceEventIdentity",
+                            mapping.TikCounter,
+                            mapping.MondayItemId);
+                        continue;
+                    }
+                    trackedEvent = trackedMatches.SingleOrDefault();
+                }
+
+                var selectedIsActive = hearing != null && (hearing.MeetStatus ?? 0) == 0;
+                var observedEvent = selectedIsActive ? hearing : trackedEvent ?? hearing;
+                var trackedStatus = trackedEvent?.MeetStatus ?? 0;
+                var hasActionableTrackedStatus = trackedEvent != null && trackedStatus is 1 or 2;
+                var statusAlreadyDelivered = hasActionableTrackedStatus &&
+                    snapshot!.DeliveredStatusSourceEventId == trackedEvent!.SourceEventId &&
+                    snapshot.DeliveredMeetStatus == trackedStatus;
+                var statusEvent = hasActionableTrackedStatus && !statusAlreadyDelivered
+                    ? trackedEvent
+                    : null;
+
+                // A cancelled/transferred row is actionable only after its stable
+                // source event ID was previously observed. Legacy rows without that
+                // history are intentionally not baselined or treated as delivered.
+                if (snapshot?.ObservedSourceEventId == null)
+                {
+                    if (hearing == null)
+                    {
+                        continue;
+                    }
+                    if (!hearing.SourceEventId.HasValue || (hearing.MeetStatus ?? 0) is 1 or 2)
+                    {
+                        legacyStatusAmbiguous++;
+                        _logger.LogWarning(
+                            "Hearing status reconciliation skipped safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=LegacyStatusAmbiguous",
+                            mapping.TikCounter,
+                            mapping.MondayItemId);
+                        continue;
+                    }
+
+                    observedEvent = hearing;
+                    statusEvent = null;
+                }
+                else if (trackedEvent == null)
+                {
+                    if (hearing?.SourceEventId.HasValue == true &&
+                        (hearing.MeetStatus ?? 0) is 1 or 2)
+                    {
+                        unobservedTerminalAmbiguous++;
+                        _logger.LogWarning(
+                            "Hearing status reconciliation skipped safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, SourceEventId={SourceEventId}, Reason=UnobservedTerminalEventAmbiguous",
+                            mapping.TikCounter,
+                            mapping.MondayItemId,
+                            hearing.SourceEventId);
+                        continue;
+                    }
+
+                    if (!selectedIsActive || !hearing!.SourceEventId.HasValue)
+                    {
+                        legacyStatusAmbiguous++;
+                        _logger.LogWarning(
+                            "Hearing status reconciliation skipped safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=TrackedSourceEventUnavailable",
+                            mapping.TikCounter,
+                            mapping.MondayItemId);
+                        continue;
+                    }
+
+                    observedEvent = hearing;
+                    statusEvent = null;
+                }
+
+                // With no selected future or bounded-recovery candidate, do not
+                // reintroduce an older tracked row merely because its ID is known.
+                if (hearing == null)
+                {
+                    continue;
+                }
+
+                if (observedEvent?.SourceEventId == null)
+                {
+                    legacyStatusAmbiguous++;
+                    _logger.LogWarning(
+                        "Hearing status reconciliation skipped safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=SourceEventIdentityUnavailable",
+                        mapping.TikCounter,
+                        mapping.MondayItemId);
+                    continue;
+                }
+
+                // Schedule fields follow the selected active replacement when one
+                // exists; otherwise they remain associated with the tracked event.
+                var hearingForPlan = selectedIsActive ? hearing! : observedEvent;
+
+                // Determine effective court city (City if present, else CourtName)
+                var effectiveCourtCity = !string.IsNullOrWhiteSpace(hearingForPlan.City)
+                    ? hearingForPlan.City.Trim()
+                    : (!string.IsNullOrWhiteSpace(hearingForPlan.CourtName) ? hearingForPlan.CourtName.Trim() : null);
+                
+                _logger.LogDebug(
+                    "Effective court city determined: TikCounter={TikCounter}, City='{City}', CourtName='{CourtName}', EffectiveCourtCity='{EffectiveCourtCity}'",
+                    mapping.TikCounter,
+                    hearingForPlan.City ?? "<null>",
+                    hearingForPlan.CourtName ?? "<null>",
+                    effectiveCourtCity ?? "<null>");
+
+                // Check minimal required fields (only StartDate is mandatory)
+                if (!hearingForPlan.StartDate.HasValue)
+                {
+                    _logger.LogWarning(
+                        "Hearing sync skipped (missing StartDate): TikCounter={TikCounter}, MondayItemId={MondayItemId}",
+                        mapping.TikCounter, mapping.MondayItemId);
+                    continue;
+                }
+
+                var startDateUtc = hearingForPlan.StartDate!.Value.Kind == DateTimeKind.Utc
+                    ? hearingForPlan.StartDate.Value
+                    : TimeZoneInfo.ConvertTimeToUtc(hearingForPlan.StartDate.Value, IsraelTimeZone);
                 var plan = HearingNearestSyncServiceHelper.CreatePlan(
-                    hearing,
+                    hearingForPlan,
                     snapshot,
                     startDateUtc,
                     effectiveCourtCity);
@@ -225,13 +334,111 @@ namespace Odmon.Worker.Services
                 var executedSteps = new List<string>();
                 var columnsToUpdate = new List<string>();
                 var effectiveItemId = mapping.MondayItemId;
+                var hadPendingDelivery = statusEvent != null &&
+                    snapshot!.PendingStatusSourceEventId == statusEvent.SourceEventId &&
+                    snapshot.PendingMeetStatus == statusEvent.MeetStatus;
+
+                if (statusEvent != null &&
+                    snapshot!.PendingStatusSourceEventId.HasValue &&
+                    !hadPendingDelivery)
+                {
+                    deliveryUncertain++;
+                    _logger.LogWarning(
+                        "Hearing status reconciliation quarantined: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=PendingDeliveryConflict",
+                        mapping.TikCounter,
+                        effectiveItemId);
+                    continue;
+                }
+
+                // Before the first live mutation, durably record the exact event/status
+                // tuple being attempted. If the request times out or the process exits
+                // after Monday accepts it, the next cycle verifies this pending tuple
+                // instead of blindly publishing it again.
+                if (statusEvent != null && !dryRun && !hadPendingDelivery)
+                {
+                    var preflight = await _statusWorkflow.ReconcileAsync(
+                        boardId,
+                        effectiveItemId,
+                        statusColumnId,
+                        statusEvent.MeetStatus ?? 0,
+                        live: false,
+                        ct,
+                        allowProtectedTransition: true,
+                        protectedReadbackConfirmsSuccess: false,
+                        forceManagedWrite: true);
+
+                    if (preflight.Outcome == HearingStatusWorkflowOutcome.SkippedUnavailable)
+                    {
+                        skippedUnavailable++;
+                        _logger.LogInformation(
+                            "Hearing status reconciliation skipped safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=MondayItemUnavailable",
+                            mapping.TikCounter,
+                            effectiveItemId);
+                        continue;
+                    }
+                    if (preflight.Outcome != HearingStatusWorkflowOutcome.Planned)
+                    {
+                        failed++;
+                        _logger.LogWarning(
+                            "Hearing status reconciliation preflight failed safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Outcome={Outcome}, Reason={Reason}",
+                            mapping.TikCounter,
+                            effectiveItemId,
+                            preflight.Outcome,
+                            preflight.ReasonCode ?? "unspecified");
+                        continue;
+                    }
+
+                    snapshot!.PendingStatusSourceEventId = statusEvent.SourceEventId;
+                    snapshot.PendingMeetStatus = statusEvent.MeetStatus;
+                    snapshot.PendingStatusSinceUtc = DateTime.UtcNow;
+                    snapshot.PendingInitialStatusWasDesired = string.Equals(
+                        preflight.ObservedLabel,
+                        preflight.DesiredLabel,
+                        StringComparison.Ordinal);
+                    try
+                    {
+                        await _integrationDb.SaveChangesAsync(ct);
+                    }
+                    catch (Exception pendingEx)
+                    {
+                        failed++;
+                        _logger.LogError(
+                            pendingEx,
+                            "Failed to persist pending hearing status delivery: TikCounter={TikCounter}, MondayItemId={MondayItemId}",
+                            mapping.TikCounter,
+                            effectiveItemId);
+                        continue;
+                    }
+                }
+
                 var statusResult = await _statusWorkflow.ReconcileAsync(
                     boardId,
                     effectiveItemId,
                     statusColumnId,
-                    plan.MeetStatus,
+                    statusEvent?.MeetStatus ?? 0,
                     live: !dryRun,
-                    ct);
+                    ct,
+                    allowProtectedTransition: statusEvent != null && !hadPendingDelivery,
+                    protectedReadbackConfirmsSuccess: statusEvent == null || !hadPendingDelivery,
+                    forceManagedWrite: statusEvent != null && !hadPendingDelivery);
+
+                if (statusEvent != null &&
+                    hadPendingDelivery &&
+                    statusResult.Outcome == HearingStatusWorkflowOutcome.AlreadyCorrect &&
+                    snapshot!.PendingInitialStatusWasDesired != false)
+                {
+                    deliveryUncertain++;
+                    _logger.LogWarning(
+                        "Hearing status delivery remains uncertain: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=PendingExactStatePreexisted",
+                        mapping.TikCounter,
+                        effectiveItemId);
+                    continue;
+                }
+
+                var statusDeliverySucceeded = statusEvent != null && statusResult.Outcome is
+                    HearingStatusWorkflowOutcome.AlreadyCorrect or
+                    HearingStatusWorkflowOutcome.Updated or
+                    HearingStatusWorkflowOutcome.AdvancedAfterMutation;
 
                 switch (statusResult.Outcome)
                 {
@@ -239,6 +446,15 @@ namespace Odmon.Worker.Services
                         wouldUpdate++;
                         break;
                     case HearingStatusWorkflowOutcome.ProtectedWorkflowStatus:
+                        if (statusEvent != null && hadPendingDelivery)
+                        {
+                            deliveryUncertain++;
+                            _logger.LogWarning(
+                                "Hearing status delivery remains uncertain: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=PendingDeliveryProtectedWorkflowState",
+                                mapping.TikCounter,
+                                effectiveItemId);
+                            continue;
+                        }
                         protectedWorkflowStatus++;
                         break;
                     case HearingStatusWorkflowOutcome.SkippedUnavailable:
@@ -253,7 +469,7 @@ namespace Odmon.Worker.Services
                         executedSteps.Add("StatusAdvancedByWorkflow");
                         break;
                     case HearingStatusWorkflowOutcome.Updated:
-                        executedSteps.Add(plan.MeetStatus == 1
+                        executedSteps.Add(statusEvent!.MeetStatus == 1
                             ? "SetStatus_Canceled"
                             : "SetStatus_Transferred");
                         columnsToUpdate.Add(statusColumnId);
@@ -291,7 +507,7 @@ namespace Odmon.Worker.Services
                             effectiveItemId,
                             mapping.TikCounter,
                             plan,
-                            hearing,
+                            hearingForPlan,
                             executedSteps,
                             columnsToUpdate,
                             ct);
@@ -309,7 +525,15 @@ namespace Odmon.Worker.Services
 
                 var statusSnapshotChanged = snapshot == null
                     || snapshot.MondayItemId != effectiveItemId
-                    || snapshot.NearestMeetStatus != plan.MeetStatus;
+                    || snapshot.ObservedSourceEventId != observedEvent.SourceEventId
+                    || snapshot.NearestMeetStatus != (observedEvent.MeetStatus ?? 0)
+                    || (statusDeliverySucceeded &&
+                        (snapshot.DeliveredStatusSourceEventId != statusEvent!.SourceEventId ||
+                         snapshot.DeliveredMeetStatus != statusEvent.MeetStatus ||
+                         snapshot.PendingStatusSourceEventId.HasValue ||
+                         snapshot.PendingMeetStatus.HasValue ||
+                         snapshot.PendingStatusSinceUtc.HasValue ||
+                         snapshot.PendingInitialStatusWasDesired.HasValue));
                 var fullSnapshotChanged = statusSnapshotChanged
                     || plan.StartDateChanged
                     || plan.JudgeChanged
@@ -332,10 +556,13 @@ namespace Odmon.Worker.Services
                             TikCounter = mapping.TikCounter,
                             BoardId = boardId,
                             MondayItemId = effectiveItemId,
+                            ObservedSourceEventId = observedEvent.SourceEventId,
                             NearestStartDateUtc = hearingMode == HearingNearestMode.StatusOnly
                                 ? null
                                 : plan.DateUpdateBlocked ? null : startDateUtc,
-                            NearestMeetStatus = plan.MeetStatus,
+                            NearestMeetStatus = observedEvent.MeetStatus ?? 0,
+                            DeliveredStatusSourceEventId = statusDeliverySucceeded ? statusEvent!.SourceEventId : null,
+                            DeliveredMeetStatus = statusDeliverySucceeded ? statusEvent!.MeetStatus : null,
                             JudgeName = hearingMode == HearingNearestMode.StatusOnly ? null : plan.JudgeName,
                             City = hearingMode == HearingNearestMode.StatusOnly ? null : plan.City,
                             LastSyncedAtUtc = nowUtc
@@ -344,11 +571,21 @@ namespace Odmon.Worker.Services
                     else
                     {
                         snapshot.MondayItemId = effectiveItemId;
+                        snapshot.ObservedSourceEventId = observedEvent.SourceEventId;
                         if (hearingMode == HearingNearestMode.Full && !plan.DateUpdateBlocked)
                         {
                             snapshot.NearestStartDateUtc = startDateUtc;
                         }
-                        snapshot.NearestMeetStatus = plan.MeetStatus;
+                        snapshot.NearestMeetStatus = observedEvent.MeetStatus ?? 0;
+                        if (statusDeliverySucceeded)
+                        {
+                            snapshot.DeliveredStatusSourceEventId = statusEvent!.SourceEventId;
+                            snapshot.DeliveredMeetStatus = statusEvent.MeetStatus;
+                            snapshot.PendingStatusSourceEventId = null;
+                            snapshot.PendingMeetStatus = null;
+                            snapshot.PendingStatusSinceUtc = null;
+                            snapshot.PendingInitialStatusWasDesired = null;
+                        }
                         if (hearingMode == HearingNearestMode.Full && plan.JudgeName != null)
                         {
                             snapshot.JudgeName = plan.JudgeName;
@@ -364,7 +601,7 @@ namespace Odmon.Worker.Services
 
                     _logger.LogDebug(
                         "Hearing sync succeeded: TikCounter={TikCounter}, MondayItemId={MondayItemId}, ExecutedSteps=[{Steps}], SnapshotNew=[StartDate={StartDate}, Status={MeetStatus}]",
-                        mapping.TikCounter, effectiveItemId, string.Join(", ", executedSteps), startDateUtc.ToString("yyyy-MM-dd HH:mm"), plan.MeetStatus);
+                        mapping.TikCounter, effectiveItemId, string.Join(", ", executedSteps), startDateUtc.ToString("yyyy-MM-dd HH:mm"), observedEvent.MeetStatus ?? 0);
                 }
                 catch (Exception snapshotEx)
                 {
@@ -388,7 +625,10 @@ namespace Odmon.Worker.Services
                 failed,
                 skippedUnavailable,
                 protectedWorkflowStatus,
-                advancedAfterMutation);
+                advancedAfterMutation,
+                legacyStatusAmbiguous,
+                unobservedTerminalAmbiguous,
+                deliveryUncertain);
         }
 
         /// <summary>
@@ -456,10 +696,13 @@ namespace Odmon.Worker.Services
             int failed,
             int skippedUnavailable = 0,
             int protectedWorkflowStatus = 0,
-            int advancedAfterMutation = 0)
+            int advancedAfterMutation = 0,
+            int legacyStatusAmbiguous = 0,
+            int unobservedTerminalAmbiguous = 0,
+            int deliveryUncertain = 0)
         {
             _logger.LogInformation(
-                "HearingNearest reconciliation summary: BoardId={BoardId}, Mode={Mode}, MappedCases={MappedCases}, SelectedActive={SelectedActive}, SelectedCancelledFallback={SelectedCancelledFallback}, SelectedTransferredFallback={SelectedTransferredFallback}, MissingSnapshot={MissingSnapshot}, WouldUpdate={WouldUpdate}, SkippedUnavailable={SkippedUnavailable}, ProtectedWorkflowStatus={ProtectedWorkflowStatus}, AdvancedAfterMutation={AdvancedAfterMutation}, NoChange={NoChange}, Failed={Failed}",
+                "HearingNearest reconciliation summary: BoardId={BoardId}, Mode={Mode}, MappedCases={MappedCases}, SelectedActive={SelectedActive}, SelectedCancelledFallback={SelectedCancelledFallback}, SelectedTransferredFallback={SelectedTransferredFallback}, MissingSnapshot={MissingSnapshot}, WouldUpdate={WouldUpdate}, SkippedUnavailable={SkippedUnavailable}, ProtectedWorkflowStatus={ProtectedWorkflowStatus}, AdvancedAfterMutation={AdvancedAfterMutation}, LegacyStatusAmbiguous={LegacyStatusAmbiguous}, UnobservedTerminalAmbiguous={UnobservedTerminalAmbiguous}, DeliveryUncertain={DeliveryUncertain}, NoChange={NoChange}, Failed={Failed}",
                 boardId,
                 mode,
                 mappedCases,
@@ -471,6 +714,9 @@ namespace Odmon.Worker.Services
                 skippedUnavailable,
                 protectedWorkflowStatus,
                 advancedAfterMutation,
+                legacyStatusAmbiguous,
+                unobservedTerminalAmbiguous,
+                deliveryUncertain,
                 noChange,
                 failed);
         }

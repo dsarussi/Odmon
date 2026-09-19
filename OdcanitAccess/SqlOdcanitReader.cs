@@ -170,12 +170,23 @@ namespace Odmon.Worker.OdcanitAccess
             }
 
             var set = new HashSet<int>(list);
-            var rows = await _db.DiaryEvents
+            var sourceRows = await _db.DiaryEventSources
                 .AsNoTracking()
                 .Where(d => d.TikCounter.HasValue && set.Contains(d.TikCounter.Value))
                 .ToListAsync(ct);
 
-            _logger.LogDebug("GetDiaryEventsByTikCountersAsync: loaded {Count} rows from vwExportToOuterSystems_YomanData for {TikCount} TikCounters.", rows.Count, list.Count);
+            var rows = sourceRows.Select(d => new OdcanitDiaryEvent
+            {
+                SourceEventId = d.Counter,
+                TikCounter = d.TikCounter,
+                StartDate = d.StartDate,
+                MeetStatus = d.MeetStatus,
+                JudgeName = d.JudgeName,
+                City = d.City,
+                CourtName = d.CourtName
+            }).ToList();
+
+            _logger.LogDebug("GetDiaryEventsByTikCountersAsync: loaded {Count} rows with stable event identity from dbo.vwYomandata for {TikCount} TikCounters.", rows.Count, list.Count);
             return rows;
         }
 

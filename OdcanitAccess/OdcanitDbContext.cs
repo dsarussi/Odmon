@@ -13,6 +13,7 @@ namespace Odmon.Worker.OdcanitAccess
         public DbSet<OdcanitSide> Sides => Set<OdcanitSide>();
         public DbSet<OdcanitSideDataLink> SideDataLinks => Set<OdcanitSideDataLink>();
         public DbSet<OdcanitDiaryEvent> DiaryEvents => Set<OdcanitDiaryEvent>();
+        public DbSet<OdcanitDiarySourceRow> DiaryEventSources => Set<OdcanitDiarySourceRow>();
         public DbSet<OdcanitUserData> UserData => Set<OdcanitUserData>();
         public DbSet<OdcanitHozlapMainData> HozlapMainData => Set<OdcanitHozlapMainData>();
         public DbSet<NetCourtDocument> NetCourtDocuments => Set<NetCourtDocument>();
@@ -43,6 +44,10 @@ namespace Odmon.Worker.OdcanitAccess
 
             modelBuilder.Entity<OdcanitDiaryEvent>()
                 .ToView("vwExportToOuterSystems_YomanData")
+                .HasNoKey();
+
+            modelBuilder.Entity<OdcanitDiarySourceRow>()
+                .ToView("vwYomandata", "dbo")
                 .HasNoKey();
 
             modelBuilder.Entity<OdcanitUserData>()

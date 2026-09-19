@@ -1,9 +1,13 @@
 using System;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Odmon.Worker.Models
 {
     public class OdcanitDiaryEvent
     {
+        /// <summary>Stable dbo.yomandata Counter exposed by dbo.vwYomandata.</summary>
+        [NotMapped]
+        public int? SourceEventId { get; set; }
         public string? SortName { get; set; }
         public DateTime? StartDate { get; set; }
         public DateTime? FromTime { get; set; }
@@ -31,6 +35,21 @@ namespace Odmon.Worker.Models
         public int? TikCounter { get; set; }
         public int? MeetStatus { get; set; }
         public string? MeetStatusName { get; set; }
+    }
+
+    /// <summary>
+    /// Minimal source projection used for reconciliation. Unlike the outer-systems
+    /// export view, dbo.vwYomandata exposes the underlying event Counter.
+    /// </summary>
+    public class OdcanitDiarySourceRow
+    {
+        public int Counter { get; set; }
+        public int? TikCounter { get; set; }
+        public DateTime? StartDate { get; set; }
+        public int? MeetStatus { get; set; }
+        public string? JudgeName { get; set; }
+        public string? City { get; set; }
+        public string? CourtName { get; set; }
     }
 }
 

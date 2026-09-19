@@ -363,6 +363,7 @@ public sealed class HearingStatusRepairServiceTests
         var metadata = new FakeMetadataProvider(allowedLabels ??
         [
             HearingStatusWorkflowService.ActiveBaselineLabel,
+            HearingStatusWorkflowService.ActiveLabel,
             HearingStatusRepairService.CancelledLabel,
             HearingStatusRepairService.TransferredLabel
         ]);
