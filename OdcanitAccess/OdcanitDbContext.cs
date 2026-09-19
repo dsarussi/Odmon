@@ -46,9 +46,17 @@ namespace Odmon.Worker.OdcanitAccess
                 .ToView("vwExportToOuterSystems_YomanData")
                 .HasNoKey();
 
-            modelBuilder.Entity<OdcanitDiarySourceRow>()
-                .ToView("vwYomandata", "dbo")
-                .HasNoKey();
+            modelBuilder.Entity<OdcanitDiarySourceRow>(entity =>
+            {
+                entity.ToView("vwYomandata", "dbo").HasNoKey();
+                entity.Property(row => row.Counter).HasColumnName("Counter");
+                entity.Property(row => row.TikCounter).HasColumnName("TikCounter");
+                entity.Property(row => row.StartDate).HasColumnName("MDate");
+                entity.Property(row => row.MeetStatus).HasColumnName("MeetStatus");
+                entity.Property(row => row.JudgeName).HasColumnName("JudgeName");
+                entity.Property(row => row.City).HasColumnName("City");
+                entity.Property(row => row.CourtName).HasColumnName("CourtName");
+            });
 
             modelBuilder.Entity<OdcanitUserData>()
                 .ToView("vwExportToOuterSystems_UserData")

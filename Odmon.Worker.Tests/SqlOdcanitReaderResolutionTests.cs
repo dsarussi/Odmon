@@ -8,20 +8,34 @@ namespace Odmon.Worker.Tests
     public class SqlOdcanitReaderResolutionTests
     {
         [Fact]
-        public void DiarySourceProjection_MapsStableCounterView()
+        public void DiarySourceQuery_UsesRelationalViewColumnsIncludingMDate()
         {
             var options = new DbContextOptionsBuilder<OdcanitDbContext>()
-                .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+                .UseSqlServer(
+                    "Server=(localdb)\\MSSQLLocalDB;Database=OdmonSqlGenerationOnly;Trusted_Connection=True;TrustServerCertificate=True")
                 .Options;
             using var db = new OdcanitDbContext(options);
 
             var entity = db.Model.FindEntityType(typeof(OdcanitDiarySourceRow));
-
             Assert.NotNull(entity);
             Assert.Equal("vwYomandata", entity!.GetViewName());
             Assert.Equal("dbo", entity.GetViewSchema());
             Assert.Null(entity.FindPrimaryKey());
-            Assert.NotNull(entity.FindProperty(nameof(OdcanitDiarySourceRow.Counter)));
+
+            var sql = SqlOdcanitReader.BuildDiaryEventSourceQuery(
+                    db,
+                    new HashSet<int> { 1001, 1002 })
+                .ToQueryString();
+
+            Assert.Contains("FROM [dbo].[vwYomandata] AS [", sql, StringComparison.Ordinal);
+            Assert.Contains(".[Counter]", sql, StringComparison.Ordinal);
+            Assert.Contains(".[TikCounter]", sql, StringComparison.Ordinal);
+            Assert.Contains(".[MDate]", sql, StringComparison.Ordinal);
+            Assert.Contains(".[MeetStatus]", sql, StringComparison.Ordinal);
+            Assert.Contains(".[JudgeName]", sql, StringComparison.Ordinal);
+            Assert.Contains(".[City]", sql, StringComparison.Ordinal);
+            Assert.Contains(".[CourtName]", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain(".[StartDate]", sql, StringComparison.Ordinal);
         }
 
         [Fact]

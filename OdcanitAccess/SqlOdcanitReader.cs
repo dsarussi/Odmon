@@ -170,10 +170,7 @@ namespace Odmon.Worker.OdcanitAccess
             }
 
             var set = new HashSet<int>(list);
-            var sourceRows = await _db.DiaryEventSources
-                .AsNoTracking()
-                .Where(d => d.TikCounter.HasValue && set.Contains(d.TikCounter.Value))
-                .ToListAsync(ct);
+            var sourceRows = await BuildDiaryEventSourceQuery(_db, set).ToListAsync(ct);
 
             var rows = sourceRows.Select(d => new OdcanitDiaryEvent
             {
@@ -189,6 +186,13 @@ namespace Odmon.Worker.OdcanitAccess
             _logger.LogDebug("GetDiaryEventsByTikCountersAsync: loaded {Count} rows with stable event identity from dbo.vwYomandata for {TikCount} TikCounters.", rows.Count, list.Count);
             return rows;
         }
+
+        internal static IQueryable<OdcanitDiarySourceRow> BuildDiaryEventSourceQuery(
+            OdcanitDbContext db,
+            HashSet<int> tikCounters)
+            => db.DiaryEventSources
+                .AsNoTracking()
+                .Where(d => d.TikCounter.HasValue && tikCounters.Contains(d.TikCounter.Value));
 
         public async Task<Dictionary<string, int>> ResolveTikNumbersToCountersAsync(IEnumerable<string> tikNumbers, CancellationToken ct)
         {
