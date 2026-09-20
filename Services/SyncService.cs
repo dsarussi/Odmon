@@ -1017,7 +1017,11 @@ namespace Odmon.Worker.Services
             return referenceNumber;
         }
 
-        private async Task<string> BuildColumnValuesJsonAsync(long boardId, OdcanitCase c, CancellationToken ct = default)
+        private async Task<string> BuildColumnValuesJsonAsync(
+            long boardId,
+            OdcanitCase c,
+            CancellationToken ct,
+            bool includeOnboardingHearingColumns)
         {
             var columnValues = new Dictionary<string, object>();
 
@@ -1333,6 +1337,11 @@ namespace Odmon.Worker.Services
                 c.ThirdPartyCarNumber ?? "<null>", tpCarColId ?? "<null>",
                 c.ShortAccidentCircumstances ?? "<null>", accColId ?? "<null>");
 
+            if (!includeOnboardingHearingColumns)
+            {
+                RemoveOngoingHearingColumns(columnValues, _mondaySettings);
+            }
+
             // DEBUG: Log column values before JSON serialization
             _logger.LogDebug(
                 "BuildColumnValues BEFORE JSON: TikCounter={TikCounter}, TikNumber={TikNumber}, BoardId={BoardId}, Count={Count}, ColumnIds={ColumnIds}",
@@ -1355,6 +1364,29 @@ namespace Odmon.Worker.Services
             }
 
             columnValues[columnId] = value;
+        }
+
+        internal static void RemoveOngoingHearingColumns(
+            IDictionary<string, object> columnValues,
+            MondaySettings mondaySettings)
+        {
+            // HearingNearest is the sole ongoing writer for event-based terminal
+            // status and selected-active date/time/judge. Initial onboarding keeps
+            // the established full payload; legal court city and court-case number
+            // retain their existing ordinary-sync ownership.
+            foreach (var columnId in new[]
+            {
+                mondaySettings.HearingStatusColumnId,
+                mondaySettings.HearingDateColumnId,
+                mondaySettings.HearingHourColumnId,
+                mondaySettings.JudgeNameColumnId
+            })
+            {
+                if (!string.IsNullOrWhiteSpace(columnId))
+                {
+                    columnValues.Remove(columnId);
+                }
+            }
         }
 
         internal static void AddInsurancePartyColumns(
@@ -3049,7 +3081,11 @@ namespace Odmon.Worker.Services
             // FAIL-FAST: Validate critical fields before creating Monday item
             await ValidateCriticalFieldsAsync(boardId, c, ct);
 
-            var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, ct);
+            var columnValuesJson = await BuildColumnValuesJsonAsync(
+                boardId,
+                c,
+                ct,
+                includeOnboardingHearingColumns: true);
             var mondayItemId = await _mondayClient.CreateItemAsync(boardId, groupId, itemName, columnValuesJson, ct);
 
             var newMapping = new MondayItemMapping
@@ -3101,7 +3137,11 @@ namespace Odmon.Worker.Services
                 // FAIL-FAST: Validate critical fields before updating Monday item
                 await ValidateCriticalFieldsAsync(boardId, c, ct);
 
-                var columnValuesJson = await BuildColumnValuesJsonAsync(boardId, c, ct);
+                var columnValuesJson = await BuildColumnValuesJsonAsync(
+                    boardId,
+                    c,
+                    ct,
+                    includeOnboardingHearingColumns: false);
                 await _mondayClient.UpdateItemAsync(boardId, mapping.MondayItemId, columnValuesJson, ct);
                 mapping.OdcanitVersion = ComputeContentVersion(c);
             }

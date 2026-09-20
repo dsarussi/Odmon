@@ -493,6 +493,9 @@ public sealed class HearingStatusRepairServiceTests
                 _inactiveItemIds.Contains(itemId) ? "archived" : "active",
                 _currentLabels.GetValueOrDefault(itemId)));
 
+        public Task<MondayHearingDetailsValue?> GetHearingDetailsValueAsync(long boardId, long itemId, string dateColumnId, string hourColumnId, string judgeColumnId, CancellationToken ct)
+            => Task.FromResult<MondayHearingDetailsValue?>(null);
+
         public Task UpdateHearingStatusAsync(long boardId, long itemId, string label, string statusColumnId, CancellationToken ct)
         {
             StatusMutations.Add((boardId, itemId, label, statusColumnId));

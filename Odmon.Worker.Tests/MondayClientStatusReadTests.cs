@@ -12,6 +12,107 @@ namespace Odmon.Worker.Tests;
 public sealed class MondayClientStatusReadTests
 {
     [Fact]
+    public async Task GetHearingDetailsValue_ReadsIdentityAndTypedValuesWithoutMutation()
+    {
+        const long boardId = 7000000101;
+        const long itemId = 7000000102;
+        var response = JsonSerializer.Serialize(new
+        {
+            data = new
+            {
+                items = new[]
+                {
+                    new
+                    {
+                        id = itemId.ToString(),
+                        state = "active",
+                        board = new { id = boardId.ToString() },
+                        column_values = new[]
+                        {
+                            new { id = "synthetic_date", text = "2030-04-05", value = "{\"date\":\"2030-04-05\"}" },
+                            new { id = "synthetic_hour", text = "09:17", value = "{\"hour\":9,\"minute\":17}" },
+                            new { id = "synthetic_judge", text = "Synthetic Judge", value = "\"Synthetic Judge\"" }
+                        }
+                    }
+                }
+            }
+        });
+        var handler = new RecordingHandler(response);
+        var client = CreateClient(handler);
+
+        var result = await client.GetHearingDetailsValueAsync(
+            boardId,
+            itemId,
+            "synthetic_date",
+            "synthetic_hour",
+            "synthetic_judge",
+            CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(new DateOnly(2030, 4, 5), result.HearingDate);
+        Assert.Equal(new TimeOnly(9, 17), result.HearingTime);
+        Assert.Equal("Synthetic Judge", result.JudgeName);
+        Assert.DoesNotContain("mutation", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task GetHearingDetailsValue_EmptySuccessfulItemsResultReturnsNull()
+    {
+        var handler = new RecordingHandler("{\"data\":{\"items\":[]}}");
+        var client = CreateClient(handler);
+
+        var result = await client.GetHearingDetailsValueAsync(
+            7000000101,
+            7000000102,
+            "synthetic_date",
+            "synthetic_hour",
+            "synthetic_judge",
+            CancellationToken.None);
+
+        Assert.Null(result);
+        Assert.DoesNotContain("mutation", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task GetHearingDetailsValue_MissingRequestedColumnIsMalformedFailure()
+    {
+        const long boardId = 7000000101;
+        const long itemId = 7000000102;
+        var response = JsonSerializer.Serialize(new
+        {
+            data = new
+            {
+                items = new[]
+                {
+                    new
+                    {
+                        id = itemId.ToString(),
+                        state = "active",
+                        board = new { id = boardId.ToString() },
+                        column_values = new[]
+                        {
+                            new { id = "synthetic_date", text = "", value = (string?)null },
+                            new { id = "synthetic_hour", text = "", value = (string?)null }
+                        }
+                    }
+                }
+            }
+        });
+        var client = CreateClient(new RecordingHandler(response));
+
+        var exception = await Assert.ThrowsAsync<MondayApiException>(() =>
+            client.GetHearingDetailsValueAsync(
+                boardId,
+                itemId,
+                "synthetic_date",
+                "synthetic_hour",
+                "synthetic_judge",
+                CancellationToken.None));
+
+        Assert.Equal("INVALID_HEARING_DETAILS_RESPONSE", exception.ErrorCode);
+    }
+
+    [Fact]
     public async Task GetItemStatusValue_ReadsIdentityStateAndDisplayedLabelWithoutMutation()
     {
         const long boardId = 7000000001;

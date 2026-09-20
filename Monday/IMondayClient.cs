@@ -10,6 +10,14 @@ namespace Odmon.Worker.Monday
         string State,
         string? Label);
 
+    public sealed record MondayHearingDetailsValue(
+        long BoardId,
+        long ItemId,
+        string State,
+        DateOnly? HearingDate,
+        TimeOnly? HearingTime,
+        string? JudgeName);
+
     public interface IMondayClient
     {
         /// <summary>Returns group IDs for the board (order preserved). Used for bootstrap group resolution.</summary>
@@ -26,6 +34,18 @@ namespace Odmon.Worker.Monday
             long boardId,
             long itemId,
             string statusColumnId,
+            CancellationToken ct);
+        /// <summary>
+        /// Reads the configured hearing date, time, and judge columns together with
+        /// item identity and lifecycle state. Returns null only for a successful
+        /// empty items result.
+        /// </summary>
+        Task<MondayHearingDetailsValue?> GetHearingDetailsValueAsync(
+            long boardId,
+            long itemId,
+            string dateColumnId,
+            string hourColumnId,
+            string judgeColumnId,
             CancellationToken ct);
         Task UpdateItemAsync(long boardId, long itemId, string columnValuesJson, CancellationToken ct);
         Task UpdateItemNameAsync(long boardId, long itemId, string name, CancellationToken ct);

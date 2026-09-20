@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
+using System.Globalization;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
@@ -98,6 +100,11 @@ namespace Odmon.Worker.Services
                 || _config.GetValue<bool>("OdcanitWrites:DryRun", true)
                 || _config.GetValue<bool>("HearingNearest:DryRun", true);
             var mode = $"{hearingMode}:{(dryRun ? "dryrun" : "live")}";
+            var fullDetailTikCounters = _config
+                .GetSection("HearingNearest:FullDetailTikCounters")
+                .Get<int[]>()?
+                .Where(value => value > 0)
+                .ToHashSet() ?? new HashSet<int>();
 
             _logger.LogInformation(
                 "HearingNearest sync: Mode={Mode}, BoardId={BoardId}, Enable={Enable}, DryRun={DryRun}",
@@ -146,6 +153,12 @@ namespace Odmon.Worker.Services
             var legacyStatusAmbiguous = 0;
             var unobservedTerminalAmbiguous = 0;
             var deliveryUncertain = 0;
+            var proposedDateChanges = 0;
+            var proposedTimeChanges = 0;
+            var proposedJudgeChanges = 0;
+            var detailBaselineInitializations = 0;
+            var blockedMissingJudge = 0;
+            var detailScopeExcluded = 0;
 
             var tableExists = await TableExistsAsync(_integrationDb, "HearingNearestSnapshots", ct);
             if (!tableExists)
@@ -184,6 +197,10 @@ namespace Odmon.Worker.Services
                 statusColumnId,
                 ct);
             HearingStatusWorkflowService.ValidateManagedLabels(allowedStatusLabels);
+            if (hearingMode == HearingNearestMode.Full)
+            {
+                ValidateFullModeColumns(boardColumns);
+            }
 
             foreach (var mapping in mappings)
             {
@@ -301,18 +318,6 @@ namespace Odmon.Worker.Services
                 // exists; otherwise they remain associated with the tracked event.
                 var hearingForPlan = selectedIsActive ? hearing! : observedEvent;
 
-                // Determine effective court city (City if present, else CourtName)
-                var effectiveCourtCity = !string.IsNullOrWhiteSpace(hearingForPlan.City)
-                    ? hearingForPlan.City.Trim()
-                    : (!string.IsNullOrWhiteSpace(hearingForPlan.CourtName) ? hearingForPlan.CourtName.Trim() : null);
-                
-                _logger.LogDebug(
-                    "Effective court city determined: TikCounter={TikCounter}, City='{City}', CourtName='{CourtName}', EffectiveCourtCity='{EffectiveCourtCity}'",
-                    mapping.TikCounter,
-                    hearingForPlan.City ?? "<null>",
-                    hearingForPlan.CourtName ?? "<null>",
-                    effectiveCourtCity ?? "<null>");
-
                 // Check minimal required fields (only StartDate is mandatory)
                 if (!hearingForPlan.StartDate.HasValue)
                 {
@@ -322,17 +327,8 @@ namespace Odmon.Worker.Services
                     continue;
                 }
 
-                var startDateUtc = hearingForPlan.StartDate!.Value.Kind == DateTimeKind.Utc
-                    ? hearingForPlan.StartDate.Value
-                    : TimeZoneInfo.ConvertTimeToUtc(hearingForPlan.StartDate.Value, IsraelTimeZone);
-                var plan = HearingNearestSyncServiceHelper.CreatePlan(
-                    hearingForPlan,
-                    snapshot,
-                    startDateUtc,
-                    effectiveCourtCity);
-
+                var startDateUtc = ToSnapshotUtc(hearingForPlan.StartDate!.Value);
                 var executedSteps = new List<string>();
-                var columnsToUpdate = new List<string>();
                 var effectiveItemId = mapping.MondayItemId;
                 var hadPendingDelivery = statusEvent != null &&
                     snapshot!.PendingStatusSourceEventId == statusEvent.SourceEventId &&
@@ -472,7 +468,6 @@ namespace Odmon.Worker.Services
                         executedSteps.Add(statusEvent!.MeetStatus == 1
                             ? "SetStatus_Canceled"
                             : "SetStatus_Transferred");
-                        columnsToUpdate.Add(statusColumnId);
                         break;
                     case HearingStatusWorkflowOutcome.ValidationFailed:
                     case HearingStatusWorkflowOutcome.MondayFailed:
@@ -487,30 +482,64 @@ namespace Odmon.Worker.Services
                         continue;
                 }
 
-                var hasNonStatusChanges = plan.JudgeOrCityUpdateRequired || plan.DateUpdateRequired;
-                if (hearingMode == HearingNearestMode.StatusOnly)
-                {
-                    hasNonStatusChanges = false;
-                }
-
-                if (dryRun)
-                {
-                    continue;
-                }
-
-                if (hearingMode == HearingNearestMode.Full && hasNonStatusChanges)
+                // Full mode commits a confirmed status delivery before any detail
+                // work. A later detail failure therefore remains retryable without
+                // reopening or republishing the delivered event/status tuple.
+                if (hearingMode == HearingNearestMode.Full && statusDeliverySucceeded && !dryRun)
                 {
                     try
                     {
-                        await ExecuteNonStatusHearingUpdatesAsync(
+                        snapshot!.DeliveredStatusSourceEventId = statusEvent!.SourceEventId;
+                        snapshot.DeliveredMeetStatus = statusEvent.MeetStatus;
+                        snapshot.PendingStatusSourceEventId = null;
+                        snapshot.PendingMeetStatus = null;
+                        snapshot.PendingStatusSinceUtc = null;
+                        snapshot.PendingInitialStatusWasDesired = null;
+                        await _integrationDb.SaveChangesAsync(ct);
+                    }
+                    catch (Exception deliveryStateEx)
+                    {
+                        failed++;
+                        _logger.LogError(
+                            deliveryStateEx,
+                            "Failed to persist confirmed hearing status delivery: TikCounter={TikCounter}, MondayItemId={MondayItemId}",
+                            mapping.TikCounter,
+                            effectiveItemId);
+                        continue;
+                    }
+                }
+
+                HearingDetailsReconciliationResult detailsResult = HearingDetailsReconciliationResult.NotApplicable;
+                var detailInConfiguredScope = fullDetailTikCounters.Count == 0 ||
+                    fullDetailTikCounters.Contains(mapping.TikCounter);
+                if (hearingMode == HearingNearestMode.Full && selectedIsActive && detailInConfiguredScope)
+                {
+                    try
+                    {
+                        detailsResult = await ReconcileActiveHearingDetailsAsync(
                             boardId,
                             effectiveItemId,
                             mapping.TikCounter,
-                            plan,
                             hearingForPlan,
-                            executedSteps,
-                            columnsToUpdate,
+                            snapshot,
+                            startDateUtc,
+                            live: !dryRun,
                             ct);
+                        proposedDateChanges += detailsResult.DateChangePlanned ? 1 : 0;
+                        proposedTimeChanges += detailsResult.TimeChangePlanned ? 1 : 0;
+                        proposedJudgeChanges += detailsResult.JudgeChangePlanned ? 1 : 0;
+                        detailBaselineInitializations += detailsResult.BaselineInitialization ? 1 : 0;
+                        blockedMissingJudge += detailsResult.JudgeBlocked ? 1 : 0;
+                        if (detailsResult.Unavailable)
+                        {
+                            skippedUnavailable++;
+                            continue;
+                        }
+                        if (!detailsResult.Succeeded)
+                        {
+                            failed++;
+                            continue;
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -521,6 +550,15 @@ namespace Odmon.Worker.Services
                             effectiveItemId);
                         continue;
                     }
+                }
+                else if (hearingMode == HearingNearestMode.Full && selectedIsActive)
+                {
+                    detailScopeExcluded++;
+                }
+
+                if (dryRun)
+                {
+                    continue;
                 }
 
                 var statusSnapshotChanged = snapshot == null
@@ -535,9 +573,9 @@ namespace Odmon.Worker.Services
                          snapshot.PendingStatusSinceUtc.HasValue ||
                          snapshot.PendingInitialStatusWasDesired.HasValue));
                 var fullSnapshotChanged = statusSnapshotChanged
-                    || plan.StartDateChanged
-                    || plan.JudgeChanged
-                    || plan.CityChanged;
+                    || detailsResult.PersistDateTime
+                    || detailsResult.PersistJudge
+                    || detailsResult.MutationPerformed;
                 if ((hearingMode == HearingNearestMode.StatusOnly && !statusSnapshotChanged) ||
                     (hearingMode == HearingNearestMode.Full && !fullSnapshotChanged))
                 {
@@ -557,14 +595,16 @@ namespace Odmon.Worker.Services
                             BoardId = boardId,
                             MondayItemId = effectiveItemId,
                             ObservedSourceEventId = observedEvent.SourceEventId,
-                            NearestStartDateUtc = hearingMode == HearingNearestMode.StatusOnly
-                                ? null
-                                : plan.DateUpdateBlocked ? null : startDateUtc,
+                            NearestStartDateUtc = hearingMode == HearingNearestMode.Full && detailsResult.PersistDateTime
+                                ? startDateUtc
+                                : null,
                             NearestMeetStatus = observedEvent.MeetStatus ?? 0,
                             DeliveredStatusSourceEventId = statusDeliverySucceeded ? statusEvent!.SourceEventId : null,
                             DeliveredMeetStatus = statusDeliverySucceeded ? statusEvent!.MeetStatus : null,
-                            JudgeName = hearingMode == HearingNearestMode.StatusOnly ? null : plan.JudgeName,
-                            City = hearingMode == HearingNearestMode.StatusOnly ? null : plan.City,
+                            JudgeName = hearingMode == HearingNearestMode.Full && detailsResult.PersistJudge
+                                ? detailsResult.JudgeName
+                                : null,
+                            City = null,
                             LastSyncedAtUtc = nowUtc
                         });
                     }
@@ -572,7 +612,7 @@ namespace Odmon.Worker.Services
                     {
                         snapshot.MondayItemId = effectiveItemId;
                         snapshot.ObservedSourceEventId = observedEvent.SourceEventId;
-                        if (hearingMode == HearingNearestMode.Full && !plan.DateUpdateBlocked)
+                        if (hearingMode == HearingNearestMode.Full && detailsResult.PersistDateTime)
                         {
                             snapshot.NearestStartDateUtc = startDateUtc;
                         }
@@ -586,13 +626,9 @@ namespace Odmon.Worker.Services
                             snapshot.PendingStatusSinceUtc = null;
                             snapshot.PendingInitialStatusWasDesired = null;
                         }
-                        if (hearingMode == HearingNearestMode.Full && plan.JudgeName != null)
+                        if (hearingMode == HearingNearestMode.Full && detailsResult.PersistJudge)
                         {
-                            snapshot.JudgeName = plan.JudgeName;
-                        }
-                        if (hearingMode == HearingNearestMode.Full && plan.City != null)
-                        {
-                            snapshot.City = plan.City;
+                            snapshot.JudgeName = detailsResult.JudgeName;
                         }
                         snapshot.LastSyncedAtUtc = nowUtc;
                     }
@@ -600,8 +636,8 @@ namespace Odmon.Worker.Services
                     await _integrationDb.SaveChangesAsync(ct);
 
                     _logger.LogDebug(
-                        "Hearing sync succeeded: TikCounter={TikCounter}, MondayItemId={MondayItemId}, ExecutedSteps=[{Steps}], SnapshotNew=[StartDate={StartDate}, Status={MeetStatus}]",
-                        mapping.TikCounter, effectiveItemId, string.Join(", ", executedSteps), startDateUtc.ToString("yyyy-MM-dd HH:mm"), observedEvent.MeetStatus ?? 0);
+                        "Hearing sync succeeded: TikCounter={TikCounter}, MondayItemId={MondayItemId}, ExecutedSteps=[{Steps}], MeetStatus={MeetStatus}",
+                        mapping.TikCounter, effectiveItemId, string.Join(", ", executedSteps), observedEvent.MeetStatus ?? 0);
                 }
                 catch (Exception snapshotEx)
                 {
@@ -628,60 +664,214 @@ namespace Odmon.Worker.Services
                 advancedAfterMutation,
                 legacyStatusAmbiguous,
                 unobservedTerminalAmbiguous,
-                deliveryUncertain);
+                deliveryUncertain,
+                proposedDateChanges,
+                proposedTimeChanges,
+                proposedJudgeChanges,
+                detailBaselineInitializations,
+                blockedMissingJudge,
+                detailScopeExcluded);
         }
 
-        /// <summary>
-        /// Executes only the non-status Monday hearing mutations. Status is
-        /// reconciled separately through HearingStatusWorkflowService.
-        /// </summary>
-        private async Task ExecuteNonStatusHearingUpdatesAsync(
-            long boardId, long mondayItemId, int tikCounter,
-            HearingReconciliationPlan plan, OdcanitDiaryEvent hearing,
-            List<string> executedSteps, List<string> columnsToUpdate,
+        private void ValidateFullModeColumns(IReadOnlyDictionary<string, BoardColumnMetadata> boardColumns)
+        {
+            var requiredColumns = new[]
+            {
+                (ColumnId: _mondaySettings.HearingDateColumnId, Type: "date"),
+                (ColumnId: _mondaySettings.HearingHourColumnId, Type: "hour"),
+                (ColumnId: _mondaySettings.JudgeNameColumnId, Type: "text")
+            };
+            if (requiredColumns.Any(required => string.IsNullOrWhiteSpace(required.ColumnId)) ||
+                requiredColumns.Any(required =>
+                    !boardColumns.TryGetValue(required.ColumnId!, out var metadata) ||
+                    !string.Equals(metadata.ColumnType, required.Type, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException(
+                    "HearingNearest Full mode requires configured date, hour, and text judge columns on the target board.");
+            }
+        }
+
+        private async Task<HearingDetailsReconciliationResult> ReconcileActiveHearingDetailsAsync(
+            long boardId,
+            long mondayItemId,
+            int tikCounter,
+            OdcanitDiaryEvent hearing,
+            HearingNearestSnapshot? snapshot,
+            DateTime sourceStartUtc,
+            bool live,
             CancellationToken ct)
         {
-            var judgeCol = _mondaySettings.JudgeNameColumnId ?? "";
-            var cityCol = ""; // text_mkxez28d is now populated from legal UserData only, not hearing events
-            var dateCol = _mondaySettings.HearingDateColumnId ?? "";
-            var hourCol = _mondaySettings.HearingHourColumnId ?? "";
-
-            // Update judge and/or city (if they exist and changed)
-            if (plan.JudgeOrCityUpdateRequired)
+            var dateColumnId = _mondaySettings.HearingDateColumnId!;
+            var hourColumnId = _mondaySettings.HearingHourColumnId!;
+            var judgeColumnId = _mondaySettings.JudgeNameColumnId!;
+            var current = await _mondayClient.GetHearingDetailsValueAsync(
+                boardId,
+                mondayItemId,
+                dateColumnId,
+                hourColumnId,
+                judgeColumnId,
+                ct);
+            if (current == null)
             {
-                if (plan.JudgeName != null && !string.IsNullOrWhiteSpace(judgeCol))
-                    columnsToUpdate.Add(judgeCol);
-                if (plan.City != null && !string.IsNullOrWhiteSpace(cityCol))
-                    columnsToUpdate.Add(cityCol);
-
-                await _mondayClient.UpdateHearingDetailsAsync(
-                    boardId,
-                    mondayItemId,
-                    plan.JudgeName ?? "",
-                    plan.City ?? "",
-                    judgeCol,
-                    cityCol,
-                    ct);
-                executedSteps.Add("UpdateJudgeCity");
-
-                _logger.LogDebug(
-                    "Hearing details updated: TikCounter={TikCounter}, MondayItemId={MondayItemId}, JudgeName='{JudgeName}', City='{City}'",
-                    tikCounter, mondayItemId, plan.JudgeName ?? "<null>", plan.City ?? "<null>");
+                _logger.LogInformation(
+                    "Hearing details reconciliation skipped safely: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=MondayItemUnavailable",
+                    tikCounter,
+                    mondayItemId);
+                return HearingDetailsReconciliationResult.UnavailableResult;
             }
 
-            // Update date/hour ONLY if BOTH judge and city exist (triggers client notifications)
-            if (plan.DateUpdateRequired)
+            if (current.BoardId != boardId || current.ItemId != mondayItemId ||
+                !string.Equals(current.State, "active", StringComparison.OrdinalIgnoreCase))
             {
-                await _mondayClient.UpdateHearingDateAsync(boardId, mondayItemId, hearing.StartDate!.Value, dateCol, hourCol, ct);
-                executedSteps.Add("UpdateHearingDate");
-                columnsToUpdate.Add(dateCol);
-                columnsToUpdate.Add(hourCol);
-
-                _logger.LogDebug(
-                    "Hearing date/hour updated: TikCounter={TikCounter}, MondayItemId={MondayItemId}, StartDate={StartDate}",
-                    tikCounter, mondayItemId, hearing.StartDate!.Value.ToString("yyyy-MM-dd HH:mm"));
+                _logger.LogWarning(
+                    "Hearing details validation failed: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=MondayItemIdentityOrStateInvalid",
+                    tikCounter,
+                    mondayItemId);
+                return HearingDetailsReconciliationResult.FailedResult;
             }
+
+            var sourceStart = ToIsraelLocal(hearing.StartDate!.Value);
+            var desiredDate = DateOnly.FromDateTime(sourceStart);
+            var desiredTime = TimeOnly.FromDateTime(sourceStart);
+            desiredTime = new TimeOnly(desiredTime.Hour, desiredTime.Minute);
+            var desiredJudge = string.IsNullOrWhiteSpace(hearing.JudgeName)
+                ? null
+                : hearing.JudgeName.Trim();
+
+            var dateChanged = current.HearingDate != desiredDate;
+            var timeChanged = current.HearingTime != desiredTime;
+            var judgeBlocked = desiredJudge == null;
+            var judgeChanged = desiredJudge != null &&
+                !string.Equals(current.JudgeName, desiredJudge, StringComparison.Ordinal);
+            var snapshotDateMissing = snapshot?.NearestStartDateUtc == null;
+            var snapshotJudgeMissing = desiredJudge != null && snapshot?.JudgeName == null;
+            var dateTimeBaselineChanged = snapshot?.NearestStartDateUtc != sourceStartUtc;
+            var judgeBaselineChanged = desiredJudge != null &&
+                !string.Equals(snapshot?.JudgeName, desiredJudge, StringComparison.Ordinal);
+            var baselineInitialization = !dateChanged && !timeChanged && !judgeChanged &&
+                (snapshotDateMissing || snapshotJudgeMissing);
+            if (judgeBlocked)
+            {
+                _logger.LogInformation(
+                    "Hearing detail field blocked: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Field=Judge, Reason=SourceValueMissing",
+                    tikCounter,
+                    mondayItemId);
+            }
+
+            var planned = new HearingDetailsReconciliationResult(
+                Succeeded: true,
+                Unavailable: false,
+                DateChangePlanned: dateChanged,
+                TimeChangePlanned: timeChanged,
+                JudgeChangePlanned: judgeChanged,
+                BaselineInitialization: baselineInitialization,
+                JudgeBlocked: judgeBlocked,
+                PersistDateTime: dateTimeBaselineChanged,
+                PersistJudge: judgeBaselineChanged,
+                JudgeName: desiredJudge,
+                MutationPerformed: false);
+
+            if (!live || (!dateChanged && !timeChanged && !judgeChanged))
+            {
+                return planned;
+            }
+
+            var values = new Dictionary<string, object>();
+            if (dateChanged)
+            {
+                values[dateColumnId] = new { date = desiredDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) };
+            }
+            if (timeChanged)
+            {
+                values[hourColumnId] = new { hour = desiredTime.Hour, minute = desiredTime.Minute };
+            }
+            if (judgeChanged)
+            {
+                values[judgeColumnId] = desiredJudge!;
+            }
+
+            await _mondayClient.UpdateItemAsync(
+                boardId,
+                mondayItemId,
+                JsonSerializer.Serialize(values),
+                ct);
+
+            var verified = await _mondayClient.GetHearingDetailsValueAsync(
+                boardId,
+                mondayItemId,
+                dateColumnId,
+                hourColumnId,
+                judgeColumnId,
+                ct);
+            if (verified == null ||
+                verified.BoardId != boardId ||
+                verified.ItemId != mondayItemId ||
+                !string.Equals(verified.State, "active", StringComparison.OrdinalIgnoreCase) ||
+                verified.HearingDate != desiredDate ||
+                verified.HearingTime != desiredTime ||
+                (desiredJudge != null && !string.Equals(verified.JudgeName, desiredJudge, StringComparison.Ordinal)))
+            {
+                _logger.LogWarning(
+                    "Hearing details verification failed: TikCounter={TikCounter}, MondayItemId={MondayItemId}, Reason=DetailReadbackMismatch",
+                    tikCounter,
+                    mondayItemId);
+                return planned with
+                {
+                    Succeeded = false,
+                    PersistDateTime = false,
+                    PersistJudge = false
+                };
+            }
+
+            return planned with
+            {
+                PersistDateTime = dateTimeBaselineChanged,
+                PersistJudge = judgeBaselineChanged,
+                MutationPerformed = true
+            };
         }
+
+        private sealed record HearingDetailsReconciliationResult(
+            bool Succeeded,
+            bool Unavailable,
+            bool DateChangePlanned,
+            bool TimeChangePlanned,
+            bool JudgeChangePlanned,
+            bool BaselineInitialization,
+            bool JudgeBlocked,
+            bool PersistDateTime,
+            bool PersistJudge,
+            string? JudgeName,
+            bool MutationPerformed)
+        {
+            public static HearingDetailsReconciliationResult NotApplicable { get; } =
+                new(true, false, false, false, false, false, false, false, false, null, false);
+            public static HearingDetailsReconciliationResult UnavailableResult { get; } =
+                new(false, true, false, false, false, false, false, false, false, null, false);
+            public static HearingDetailsReconciliationResult FailedResult { get; } =
+                new(false, false, false, false, false, false, false, false, false, null, false);
+        }
+
+        private static DateTime ToIsraelLocal(DateTime value)
+        {
+            if (value.Kind == DateTimeKind.Utc)
+            {
+                return TimeZoneInfo.ConvertTimeFromUtc(value, IsraelTimeZone);
+            }
+            if (value.Kind == DateTimeKind.Local)
+            {
+                return TimeZoneInfo.ConvertTime(value, IsraelTimeZone);
+            }
+            return value;
+        }
+
+        private static DateTime ToSnapshotUtc(DateTime value)
+            => value.Kind switch
+            {
+                DateTimeKind.Utc => value,
+                DateTimeKind.Local => value.ToUniversalTime(),
+                _ => TimeZoneInfo.ConvertTimeToUtc(value, IsraelTimeZone)
+            };
 
         private void LogReconciliationSummary(
             long boardId,
@@ -699,10 +889,16 @@ namespace Odmon.Worker.Services
             int advancedAfterMutation = 0,
             int legacyStatusAmbiguous = 0,
             int unobservedTerminalAmbiguous = 0,
-            int deliveryUncertain = 0)
+            int deliveryUncertain = 0,
+            int proposedDateChanges = 0,
+            int proposedTimeChanges = 0,
+            int proposedJudgeChanges = 0,
+            int detailBaselineInitializations = 0,
+            int blockedMissingJudge = 0,
+            int detailScopeExcluded = 0)
         {
             _logger.LogInformation(
-                "HearingNearest reconciliation summary: BoardId={BoardId}, Mode={Mode}, MappedCases={MappedCases}, SelectedActive={SelectedActive}, SelectedCancelledFallback={SelectedCancelledFallback}, SelectedTransferredFallback={SelectedTransferredFallback}, MissingSnapshot={MissingSnapshot}, WouldUpdate={WouldUpdate}, SkippedUnavailable={SkippedUnavailable}, ProtectedWorkflowStatus={ProtectedWorkflowStatus}, AdvancedAfterMutation={AdvancedAfterMutation}, LegacyStatusAmbiguous={LegacyStatusAmbiguous}, UnobservedTerminalAmbiguous={UnobservedTerminalAmbiguous}, DeliveryUncertain={DeliveryUncertain}, NoChange={NoChange}, Failed={Failed}",
+                "HearingNearest reconciliation summary: BoardId={BoardId}, Mode={Mode}, MappedCases={MappedCases}, SelectedActive={SelectedActive}, SelectedCancelledFallback={SelectedCancelledFallback}, SelectedTransferredFallback={SelectedTransferredFallback}, MissingSnapshot={MissingSnapshot}, WouldUpdate={WouldUpdate}, ProposedDateChanges={ProposedDateChanges}, ProposedTimeChanges={ProposedTimeChanges}, ProposedJudgeChanges={ProposedJudgeChanges}, DetailBaselineInitializations={DetailBaselineInitializations}, BlockedMissingJudge={BlockedMissingJudge}, DetailScopeExcluded={DetailScopeExcluded}, SkippedUnavailable={SkippedUnavailable}, ProtectedWorkflowStatus={ProtectedWorkflowStatus}, AdvancedAfterMutation={AdvancedAfterMutation}, LegacyStatusAmbiguous={LegacyStatusAmbiguous}, UnobservedTerminalAmbiguous={UnobservedTerminalAmbiguous}, DeliveryUncertain={DeliveryUncertain}, NoChange={NoChange}, Failed={Failed}",
                 boardId,
                 mode,
                 mappedCases,
@@ -711,6 +907,12 @@ namespace Odmon.Worker.Services
                 selectedTransferredFallback,
                 missingSnapshot,
                 wouldUpdate,
+                proposedDateChanges,
+                proposedTimeChanges,
+                proposedJudgeChanges,
+                detailBaselineInitializations,
+                blockedMissingJudge,
+                detailScopeExcluded,
                 skippedUnavailable,
                 protectedWorkflowStatus,
                 advancedAfterMutation,

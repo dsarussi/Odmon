@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Text.Json;
 using Odmon.Worker.Data;
 using Odmon.Worker.Monday;
 using Odmon.Worker.Models;
@@ -112,19 +113,307 @@ namespace Odmon.Worker.Tests
         }
 
         [Fact]
-        public async Task LaterRequiredMutationFailure_DoesNotAdvanceSnapshot()
+        public async Task TerminalFallback_DoesNotWriteOrBaselineDetails()
         {
             await using var scenario = CreateScenario(
                 meetStatus: 1,
                 includeHearingDetails: true,
-                failDateMutation: true,
                 hearingMode: HearingNearestMode.Full,
                 snapshotMeetStatus: 0);
 
             await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
 
             Assert.Equal(new[] { CancelledLabel }, scenario.Monday.StatusLabels);
-            Assert.Equal(0, Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync()).NearestMeetStatus);
+            Assert.Empty(scenario.Monday.ItemMutationPayloads);
+            var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
+            Assert.Equal(1, snapshot.NearestMeetStatus);
+            Assert.Equal(SourceEventId, snapshot.DeliveredStatusSourceEventId);
+            Assert.Null(snapshot.NearestStartDateUtc);
+            Assert.Null(snapshot.JudgeName);
+        }
+
+        [Fact]
+        public async Task TransferredTrackedEvent_WithActiveReplacement_DeliversStatusThenSynchronizesReplacementDetailsOnce()
+        {
+            var replacementStart = IsraelNow().AddDays(4).AddMinutes(7);
+            var replacement = NewSyntheticHearing(2202, 0, replacementStart, "Synthetic replacement judge");
+            await using var scenario = CreateScenario(
+                meetStatus: 2,
+                snapshotMeetStatus: 0,
+                hearingMode: HearingNearestMode.Full,
+                currentStatusLabel: HearingStatusWorkflowService.ActiveBaselineLabel,
+                additionalHearing: replacement);
+            SetMondayDetails(
+                scenario,
+                replacementStart.AddDays(-2).AddMinutes(-1),
+                "Synthetic prior judge");
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Equal(new[] { TransferredLabel }, scenario.Monday.StatusLabels);
+            var payload = Assert.Single(scenario.Monday.ItemMutationPayloads);
+            AssertDetailPayloadColumns(payload, "synthetic_date", "synthetic_hour", "synthetic_judge");
+            var snapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync();
+            Assert.Equal(2202, snapshot.ObservedSourceEventId);
+            Assert.Equal(SourceEventId, snapshot.DeliveredStatusSourceEventId);
+            Assert.Equal(2, snapshot.DeliveredMeetStatus);
+            Assert.Equal(ToUtc(replacementStart), snapshot.NearestStartDateUtc);
+            Assert.Equal("Synthetic replacement judge", snapshot.JudgeName);
+            Assert.Null(snapshot.City);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Single(scenario.Monday.StatusLabels);
+            Assert.Single(scenario.Monday.ItemMutationPayloads);
+        }
+
+        [Fact]
+        public async Task SameActiveEvent_DateOneMinuteTimeAndJudgeChanges_AreDetected()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 0,
+                snapshotMeetStatus: 0,
+                includeHearingDetails: true,
+                hearingMode: HearingNearestMode.Full,
+                currentStatusLabel: "Synthetic downstream workflow");
+            var hearing = scenario.Reader.Hearings[0];
+            SetMondayDetails(scenario, hearing.StartDate!.Value, hearing.JudgeName!);
+            var snapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync();
+            snapshot.NearestStartDateUtc = ToUtc(hearing.StartDate.Value);
+            snapshot.JudgeName = hearing.JudgeName;
+            await scenario.Db.SaveChangesAsync();
+
+            hearing.StartDate = hearing.StartDate.Value.AddDays(1).AddMinutes(1);
+            hearing.JudgeName = "Synthetic changed judge";
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            var payload = Assert.Single(scenario.Monday.ItemMutationPayloads);
+            AssertDetailPayloadColumns(payload, "synthetic_date", "synthetic_hour", "synthetic_judge");
+            snapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync();
+            Assert.Equal(ToUtc(hearing.StartDate.Value), snapshot.NearestStartDateUtc);
+            Assert.Equal("Synthetic changed judge", snapshot.JudgeName);
+            Assert.Empty(scenario.Monday.StatusLabels);
+        }
+
+        [Fact]
+        public async Task ConfirmedStatusThenDetailFailure_PersistsDeliveryAndRetriesOnlyDetails()
+        {
+            var replacementStart = IsraelNow().AddDays(5);
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                snapshotMeetStatus: 0,
+                hearingMode: HearingNearestMode.Full,
+                failDateMutation: true,
+                currentStatusLabel: HearingStatusWorkflowService.ActiveBaselineLabel,
+                additionalHearing: NewSyntheticHearing(2302, 0, replacementStart, "Synthetic replacement judge"));
+            SetMondayDetails(scenario, replacementStart.AddDays(-1), "Synthetic prior judge");
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            var afterFailure = await scenario.Db.HearingNearestSnapshots.SingleAsync();
+            Assert.Equal(SourceEventId, afterFailure.DeliveredStatusSourceEventId);
+            Assert.Equal(1, afterFailure.DeliveredMeetStatus);
+            Assert.Null(afterFailure.PendingStatusSourceEventId);
+            Assert.Equal(SourceEventId, afterFailure.ObservedSourceEventId);
+            Assert.Single(scenario.Monday.StatusLabels);
+
+            scenario.Monday.FailDateMutation = false;
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Single(scenario.Monday.StatusLabels);
+            Assert.Equal(2, scenario.Monday.ItemMutationPayloads.Count);
+            var afterRetry = await scenario.Db.HearingNearestSnapshots.SingleAsync();
+            Assert.Equal(2302, afterRetry.ObservedSourceEventId);
+            Assert.Equal(ToUtc(replacementStart), afterRetry.NearestStartDateUtc);
+        }
+
+        [Fact]
+        public async Task DetailReadbackMismatch_DoesNotAdvanceDetailBaseline()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 0,
+                snapshotMeetStatus: 0,
+                includeHearingDetails: true,
+                hearingMode: HearingNearestMode.Full);
+            var hearing = scenario.Reader.Hearings[0];
+            var oldStart = hearing.StartDate!.Value.AddDays(-1);
+            SetMondayDetails(scenario, oldStart, "Synthetic prior judge");
+            var snapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync();
+            snapshot.NearestStartDateUtc = ToUtc(oldStart);
+            snapshot.JudgeName = "Synthetic prior judge";
+            await scenario.Db.SaveChangesAsync();
+            scenario.Monday.SuppressDetailMutationPersistence = true;
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            snapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync();
+            Assert.Equal(ToUtc(oldStart), snapshot.NearestStartDateUtc);
+            Assert.Equal("Synthetic prior judge", snapshot.JudgeName);
+            Assert.Single(scenario.Monday.ItemMutationPayloads);
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("Reason=DetailReadbackMismatch", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task NullDetailSnapshot_WithMatchingLiveDetails_InitializesBaselineWithoutMutation()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 0,
+                includeHearingDetails: true,
+                hearingMode: HearingNearestMode.Full);
+            var hearing = scenario.Reader.Hearings[0];
+            SetMondayDetails(scenario, hearing.StartDate!.Value, hearing.JudgeName!);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.ItemMutationPayloads);
+            var snapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync();
+            Assert.Equal(ToUtc(hearing.StartDate.Value), snapshot.NearestStartDateUtc);
+            Assert.Equal(hearing.JudgeName, snapshot.JudgeName);
+            Assert.Null(snapshot.City);
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("DetailBaselineInitializations=1", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task LiveMondayDrift_IsDetectedEvenWhenSnapshotMatchesSource()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 0,
+                snapshotMeetStatus: 0,
+                includeHearingDetails: true,
+                hearingMode: HearingNearestMode.Full);
+            var hearing = scenario.Reader.Hearings[0];
+            var snapshot = await scenario.Db.HearingNearestSnapshots.SingleAsync();
+            snapshot.NearestStartDateUtc = ToUtc(hearing.StartDate!.Value);
+            snapshot.JudgeName = hearing.JudgeName;
+            await scenario.Db.SaveChangesAsync();
+            SetMondayDetails(scenario, hearing.StartDate.Value.AddDays(-3).AddMinutes(-1), hearing.JudgeName!);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            var payload = Assert.Single(scenario.Monday.ItemMutationPayloads);
+            AssertDetailPayloadColumns(payload, "synthetic_date", "synthetic_hour");
+        }
+
+        [Fact]
+        public async Task FullDryRun_PlansDetailsWithoutMutationOrPersistence()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 0,
+                includeHearingDetails: true,
+                hearingMode: HearingNearestMode.Full,
+                dryRun: true);
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(scenario.Monday.ItemMutationPayloads);
+            Assert.Empty(await scenario.Db.HearingNearestSnapshots.AsNoTracking().ToListAsync());
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("ProposedDateChanges=1", StringComparison.Ordinal) &&
+                message.Contains("ProposedTimeChanges=1", StringComparison.Ordinal) &&
+                message.Contains("ProposedJudgeChanges=1", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task FullDetailRead_EmptyResultSkipsAndWrongIdentityFails()
+        {
+            await using var unavailable = CreateScenario(
+                meetStatus: 0,
+                snapshotMeetStatus: 0,
+                includeHearingDetails: true,
+                hearingMode: HearingNearestMode.Full);
+            unavailable.Monday.DetailMissing = true;
+            var unavailableBefore = (await unavailable.Db.HearingNearestSnapshots.AsNoTracking().SingleAsync()).LastSyncedAtUtc;
+
+            await unavailable.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(unavailable.Monday.ItemMutationPayloads);
+            Assert.Equal(unavailableBefore, (await unavailable.Db.HearingNearestSnapshots.AsNoTracking().SingleAsync()).LastSyncedAtUtc);
+
+            await using var wrongIdentity = CreateScenario(
+                meetStatus: 0,
+                snapshotMeetStatus: 0,
+                includeHearingDetails: true,
+                hearingMode: HearingNearestMode.Full);
+            wrongIdentity.Monday.DetailReturnedBoardId = BoardId + 1;
+
+            await wrongIdentity.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(wrongIdentity.Monday.ItemMutationPayloads);
+            Assert.Contains(wrongIdentity.Logger.Messages, message =>
+                message.Contains("Reason=MondayItemIdentityOrStateInvalid", StringComparison.Ordinal));
+
+            await using var apiFailure = CreateScenario(
+                meetStatus: 0,
+                snapshotMeetStatus: 0,
+                includeHearingDetails: true,
+                hearingMode: HearingNearestMode.Full);
+            apiFailure.Monday.DetailReadException = new MondayApiException(
+                "Synthetic detail read failure.",
+                errorCode: "SYNTHETIC_DETAIL_ERROR");
+
+            await apiFailure.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Empty(apiFailure.Monday.ItemMutationPayloads);
+            Assert.Contains(apiFailure.Logger.Messages, message =>
+                message.Contains("Hearing non-status reconciliation failed", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void OrdinaryExistingItemPayload_RemovesOnlyHearingNearestOwnedColumns()
+        {
+            var settings = new MondaySettings
+            {
+                HearingStatusColumnId = "synthetic_status",
+                HearingDateColumnId = "synthetic_date",
+                HearingHourColumnId = "synthetic_hour",
+                JudgeNameColumnId = "synthetic_judge",
+                CourtCityColumnId = "synthetic_legal_city",
+                CourtCaseNumberColumnId = "synthetic_court_case"
+            };
+            var values = new Dictionary<string, object>
+            {
+                ["synthetic_status"] = new { label = CancelledLabel },
+                ["synthetic_date"] = new { date = "2030-01-02" },
+                ["synthetic_hour"] = new { hour = 9, minute = 10 },
+                ["synthetic_judge"] = "Synthetic judge",
+                ["synthetic_legal_city"] = "Synthetic legal city",
+                ["synthetic_court_case"] = "SYN-CASE"
+            };
+
+            SyncService.RemoveOngoingHearingColumns(values, settings);
+
+            Assert.DoesNotContain("synthetic_status", values.Keys);
+            Assert.DoesNotContain("synthetic_date", values.Keys);
+            Assert.DoesNotContain("synthetic_hour", values.Keys);
+            Assert.DoesNotContain("synthetic_judge", values.Keys);
+            Assert.Contains("synthetic_legal_city", values.Keys);
+            Assert.Contains("synthetic_court_case", values.Keys);
+        }
+
+        [Fact]
+        public async Task FullDetailAllowlist_BoundsDetailsWithoutDisablingStatusReconciliation()
+        {
+            await using var scenario = CreateScenario(
+                meetStatus: 1,
+                snapshotMeetStatus: 0,
+                includeHearingDetails: true,
+                hearingMode: HearingNearestMode.Full,
+                additionalHearing: NewSyntheticHearing(
+                    2402,
+                    0,
+                    IsraelNow().AddDays(3),
+                    "Synthetic replacement judge"),
+                fullDetailTikCounters: new[] { TikCounter + 1 });
+
+            await scenario.Service.SyncNearestHearingsAsync(BoardId, CancellationToken.None);
+
+            Assert.Equal(0, scenario.Monday.DetailReadCount);
+            Assert.Empty(scenario.Monday.ItemMutationPayloads);
+            Assert.Equal(new[] { CancelledLabel }, scenario.Monday.StatusLabels);
+            Assert.Contains(scenario.Logger.Messages, message =>
+                message.Contains("DetailScopeExcluded=1", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -567,6 +856,8 @@ namespace Odmon.Worker.Tests
             Assert.Equal(new[] { CancelledLabel }, scenario.Monday.StatusLabels);
             Assert.Equal(0, scenario.Monday.DetailsMutationCount);
             Assert.Equal(0, scenario.Monday.DateMutationCount);
+            Assert.Equal(0, scenario.Monday.DetailReadCount);
+            Assert.Empty(scenario.Monday.ItemMutationPayloads);
             var snapshot = Assert.Single(await scenario.Db.HearingNearestSnapshots.ToListAsync());
             Assert.Null(snapshot.NearestStartDateUtc);
             Assert.Null(snapshot.JudgeName);
@@ -733,6 +1024,61 @@ namespace Odmon.Worker.Tests
             Assert.Equal(0, snapshot.NearestMeetStatus);
             Assert.Null(snapshot.DeliveredStatusSourceEventId);
             Assert.Null(snapshot.DeliveredMeetStatus);
+        }
+
+        private static DateTime IsraelNow()
+            => TimeZoneInfo.ConvertTimeFromUtc(
+                DateTime.UtcNow,
+                TimeZoneInfo.FindSystemTimeZoneById("Israel Standard Time"));
+
+        private static DateTime ToUtc(DateTime local)
+            => local.Kind == DateTimeKind.Utc
+                ? local
+                : TimeZoneInfo.ConvertTimeToUtc(
+                    local,
+                    TimeZoneInfo.FindSystemTimeZoneById("Israel Standard Time"));
+
+        private static OdcanitDiaryEvent NewSyntheticHearing(
+            int sourceEventId,
+            int meetStatus,
+            DateTime start,
+            string? judge)
+            => new()
+            {
+                SourceEventId = sourceEventId,
+                TikCounter = TikCounter,
+                StartDate = start,
+                MeetStatus = meetStatus,
+                JudgeName = judge
+            };
+
+        private static void SetMondayDetails(Scenario scenario, DateTime start, string? judge)
+        {
+            scenario.Monday.ItemHearingDetails[MondayItemId] = new MondayHearingDetailsValue(
+                BoardId,
+                MondayItemId,
+                "active",
+                DateOnly.FromDateTime(start),
+                new TimeOnly(start.Hour, start.Minute),
+                judge);
+        }
+
+        private static HashSet<string> PayloadColumns(string payload)
+        {
+            using var document = JsonDocument.Parse(payload);
+            return document.RootElement.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+        }
+
+        private static void AssertDetailPayloadColumns(string payload, params string[] expectedColumns)
+        {
+            var columns = PayloadColumns(payload);
+            Assert.Equal(
+                expectedColumns.OrderBy(value => value, StringComparer.Ordinal),
+                columns.OrderBy(value => value, StringComparer.Ordinal));
+            Assert.DoesNotContain("synthetic_status", columns);
+            Assert.DoesNotContain("text_mkxez28d", columns);
         }
 
         private static MixedScenario CreateMixedStatusChangeScenario(int newMeetStatus)
@@ -903,7 +1249,8 @@ namespace Odmon.Worker.Tests
             bool mondayItemMissing = false,
             long? returnedBoardId = null,
             long? returnedItemId = null,
-            Exception? statusReadException = null)
+            Exception? statusReadException = null,
+            IEnumerable<int>? fullDetailTikCounters = null)
         {
             var options = new DbContextOptionsBuilder<IntegrationDbContext>()
                 .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
@@ -989,16 +1336,25 @@ namespace Odmon.Worker.Tests
                 TransferredLabel
             });
             var skipLogger = new FakeSkipLogger();
-            var configuration = new ConfigurationBuilder()
-                .AddInMemoryCollection(new Dictionary<string, string?>
+            var configurationValues = new Dictionary<string, string?>
+            {
+                ["Testing:Enable"] = "false",
+                ["OdcanitWrites:Enable"] = "true",
+                ["OdcanitWrites:DryRun"] = "false",
+                ["HearingNearest:Mode"] = hearingMode.ToString(),
+                ["HearingNearest:DryRun"] = dryRun.ToString(),
+                ["HearingNearest:RecoveryLookbackDays"] = "30"
+            };
+            if (fullDetailTikCounters != null)
+            {
+                var index = 0;
+                foreach (var tikCounter in fullDetailTikCounters)
                 {
-                    ["Testing:Enable"] = "false",
-                    ["OdcanitWrites:Enable"] = "true",
-                    ["OdcanitWrites:DryRun"] = "false",
-                    ["HearingNearest:Mode"] = hearingMode.ToString(),
-                    ["HearingNearest:DryRun"] = dryRun.ToString(),
-                    ["HearingNearest:RecoveryLookbackDays"] = "30"
-                })
+                    configurationValues[$"HearingNearest:FullDetailTikCounters:{index++}"] = tikCounter.ToString();
+                }
+            }
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(configurationValues)
                 .Build();
             var mondaySettings = Options.Create(new MondaySettings
             {
@@ -1142,9 +1498,17 @@ namespace Odmon.Worker.Tests
             public List<string> StatusLabels { get; } = new();
             public List<(long BoardId, long ItemId, string Label, string ColumnId)> StatusMutations { get; } = new();
             public Dictionary<long, MondayItemStatusValue?> ItemStatusValues { get; } = new();
+            public Dictionary<long, MondayHearingDetailsValue?> ItemHearingDetails { get; } = new();
+            public List<string> ItemMutationPayloads { get; } = new();
+            public int DetailReadCount { get; private set; }
             public bool FailStatusMutation { get; init; }
             public bool FailStatusMutationAfterApply { get; set; }
-            public bool FailDateMutation { get; init; }
+            public bool FailDateMutation { get; set; }
+            public bool SuppressDetailMutationPersistence { get; set; }
+            public bool DetailMissing { get; set; }
+            public long? DetailReturnedBoardId { get; set; }
+            public long? DetailReturnedItemId { get; set; }
+            public Exception? DetailReadException { get; set; }
             public string? CurrentStatusLabel { get; set; }
             public string? StatusAfterMutation { get; init; }
             public int DetailsMutationCount { get; private set; }
@@ -1219,8 +1583,72 @@ namespace Odmon.Worker.Tests
                         ItemState,
                         CurrentStatusLabel));
             }
+            public Task<MondayHearingDetailsValue?> GetHearingDetailsValueAsync(long boardId, long itemId, string dateColumnId, string hourColumnId, string judgeColumnId, CancellationToken ct)
+            {
+                DetailReadCount++;
+                if (DetailReadException != null)
+                {
+                    throw DetailReadException;
+                }
+                if (ItemHearingDetails.TryGetValue(itemId, out var configured))
+                {
+                    return Task.FromResult(configured);
+                }
+
+                return Task.FromResult(DetailMissing
+                    ? null
+                    : new MondayHearingDetailsValue(
+                        DetailReturnedBoardId ?? boardId,
+                        DetailReturnedItemId ?? itemId,
+                        ItemState,
+                        null,
+                        null,
+                        null));
+            }
             public Task UpdateItemAsync(long boardId, long itemId, string columnValuesJson, CancellationToken ct)
-                => Task.CompletedTask;
+            {
+                ItemMutationPayloads.Add(columnValuesJson);
+                if (FailDateMutation)
+                {
+                    throw new InvalidOperationException("Synthetic Monday detail failure");
+                }
+                if (SuppressDetailMutationPersistence)
+                {
+                    return Task.CompletedTask;
+                }
+
+                var current = ItemHearingDetails.TryGetValue(itemId, out var configured) && configured != null
+                    ? configured
+                    : new MondayHearingDetailsValue(boardId, itemId, ItemState, null, null, null);
+                using var document = JsonDocument.Parse(columnValuesJson);
+                var root = document.RootElement;
+                var date = current.HearingDate;
+                var time = current.HearingTime;
+                var judge = current.JudgeName;
+                if (root.TryGetProperty("synthetic_date", out var dateValue) &&
+                    dateValue.TryGetProperty("date", out var dateText) &&
+                    DateOnly.TryParseExact(dateText.GetString(), "yyyy-MM-dd", out var parsedDate))
+                {
+                    date = parsedDate;
+                }
+                if (root.TryGetProperty("synthetic_hour", out var timeValue) &&
+                    timeValue.TryGetProperty("hour", out var hour) &&
+                    timeValue.TryGetProperty("minute", out var minute))
+                {
+                    time = new TimeOnly(hour.GetInt32(), minute.GetInt32());
+                }
+                if (root.TryGetProperty("synthetic_judge", out var judgeValue))
+                {
+                    judge = judgeValue.GetString();
+                }
+                ItemHearingDetails[itemId] = current with
+                {
+                    HearingDate = date,
+                    HearingTime = time,
+                    JudgeName = judge
+                };
+                return Task.CompletedTask;
+            }
             public Task UpdateItemNameAsync(long boardId, long itemId, string name, CancellationToken ct)
                 => Task.CompletedTask;
             public Task<long?> FindItemIdByColumnValueAsync(long boardId, string columnId, string columnValue, CancellationToken ct)
@@ -1248,6 +1676,21 @@ namespace Odmon.Worker.Tests
                     {
                         ColumnId = "synthetic_status",
                         ColumnType = "color"
+                    },
+                    ["synthetic_date"] = new()
+                    {
+                        ColumnId = "synthetic_date",
+                        ColumnType = "date"
+                    },
+                    ["synthetic_hour"] = new()
+                    {
+                        ColumnId = "synthetic_hour",
+                        ColumnType = "hour"
+                    },
+                    ["synthetic_judge"] = new()
+                    {
+                        ColumnId = "synthetic_judge",
+                        ColumnType = "text"
                     }
                 });
         }

@@ -313,6 +313,218 @@ namespace Odmon.Worker.Monday
                 label);
         }
 
+        public async Task<MondayHearingDetailsValue?> GetHearingDetailsValueAsync(
+            long boardId,
+            long itemId,
+            string dateColumnId,
+            string hourColumnId,
+            string judgeColumnId,
+            CancellationToken ct)
+        {
+            if (boardId <= 0 || itemId <= 0 ||
+                string.IsNullOrWhiteSpace(dateColumnId) ||
+                string.IsNullOrWhiteSpace(hourColumnId) ||
+                string.IsNullOrWhiteSpace(judgeColumnId))
+            {
+                throw new ArgumentException("Board, item, and hearing detail columns must be specified.");
+            }
+
+            var query = @"query ($itemIds: [ID!], $columnIds: [String!]) {
+                items(ids: $itemIds) {
+                    id
+                    state
+                    board { id }
+                    column_values(ids: $columnIds) {
+                        id
+                        text
+                        value
+                    }
+                }
+            }";
+            var variables = new Dictionary<string, object>
+            {
+                ["itemIds"] = new[] { itemId.ToString(CultureInfo.InvariantCulture) },
+                ["columnIds"] = new[] { dateColumnId, hourColumnId, judgeColumnId }
+            };
+
+            using var doc = await ExecuteGraphQLRequestAsync(
+                query,
+                variables,
+                ct,
+                operation: "item_hearing_details",
+                boardId: boardId,
+                itemId: itemId);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("data", out var data) ||
+                !data.TryGetProperty("items", out var items) ||
+                items.ValueKind != JsonValueKind.Array)
+            {
+                throw new MondayApiException(
+                    "Monday.com unexpected response while reading hearing details.",
+                    operation: "item_hearing_details",
+                    boardId: boardId,
+                    itemId: itemId);
+            }
+
+            if (items.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            var item = items[0];
+            var returnedItemId = ParseRequiredId(item, "id", "item", boardId, itemId);
+            if (!item.TryGetProperty("board", out var board))
+            {
+                throw UnexpectedHearingDetailsRead(boardId, itemId, "missing board identity");
+            }
+            var returnedBoardId = ParseRequiredId(board, "id", "board", boardId, itemId);
+            if (returnedItemId != itemId || returnedBoardId != boardId)
+            {
+                throw UnexpectedHearingDetailsRead(boardId, itemId, "identity mismatch");
+            }
+
+            if (!item.TryGetProperty("state", out var stateElement) ||
+                string.IsNullOrWhiteSpace(stateElement.GetString()))
+            {
+                throw UnexpectedHearingDetailsRead(boardId, itemId, "missing item state");
+            }
+
+            DateOnly? hearingDate = null;
+            TimeOnly? hearingTime = null;
+            string? judgeName = null;
+            var dateSeen = false;
+            var timeSeen = false;
+            var judgeSeen = false;
+            if (!item.TryGetProperty("column_values", out var columnValues) ||
+                columnValues.ValueKind != JsonValueKind.Array)
+            {
+                throw UnexpectedHearingDetailsRead(boardId, itemId, "missing column values");
+            }
+
+            foreach (var columnValue in columnValues.EnumerateArray())
+            {
+                if (!columnValue.TryGetProperty("id", out var idElement))
+                {
+                    continue;
+                }
+
+                var columnId = idElement.GetString();
+                if (string.Equals(columnId, dateColumnId, StringComparison.Ordinal))
+                {
+                    dateSeen = true;
+                    hearingDate = ParseMondayDateValue(columnValue);
+                    if (!hearingDate.HasValue && HasNonEmptyRawValue(columnValue))
+                    {
+                        throw UnexpectedHearingDetailsRead(boardId, itemId, "invalid date value");
+                    }
+                }
+                else if (string.Equals(columnId, hourColumnId, StringComparison.Ordinal))
+                {
+                    timeSeen = true;
+                    hearingTime = ParseMondayTimeValue(columnValue);
+                    if (!hearingTime.HasValue && HasNonEmptyRawValue(columnValue))
+                    {
+                        throw UnexpectedHearingDetailsRead(boardId, itemId, "invalid time value");
+                    }
+                }
+                else if (string.Equals(columnId, judgeColumnId, StringComparison.Ordinal))
+                {
+                    judgeSeen = true;
+                    if (columnValue.TryGetProperty("text", out var textElement) &&
+                        textElement.ValueKind == JsonValueKind.String)
+                    {
+                        var text = textElement.GetString();
+                        judgeName = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+                    }
+                }
+            }
+
+            if (!dateSeen || !timeSeen || !judgeSeen)
+            {
+                throw UnexpectedHearingDetailsRead(boardId, itemId, "requested column identity missing");
+            }
+
+            return new MondayHearingDetailsValue(
+                returnedBoardId,
+                returnedItemId,
+                stateElement.GetString()!,
+                hearingDate,
+                hearingTime,
+                judgeName);
+        }
+
+        private static DateOnly? ParseMondayDateValue(JsonElement columnValue)
+        {
+            if (!TryParseColumnValueObject(columnValue, out var value) ||
+                !value.TryGetProperty("date", out var dateElement) ||
+                dateElement.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            return DateOnly.TryParseExact(
+                dateElement.GetString(),
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var date)
+                ? date
+                : null;
+        }
+
+        private static TimeOnly? ParseMondayTimeValue(JsonElement columnValue)
+        {
+            if (!TryParseColumnValueObject(columnValue, out var value) ||
+                !value.TryGetProperty("hour", out var hourElement) ||
+                !value.TryGetProperty("minute", out var minuteElement) ||
+                !hourElement.TryGetInt32(out var hour) ||
+                !minuteElement.TryGetInt32(out var minute) ||
+                hour is < 0 or > 23 || minute is < 0 or > 59)
+            {
+                return null;
+            }
+
+            return new TimeOnly(hour, minute);
+        }
+
+        private static bool TryParseColumnValueObject(JsonElement columnValue, out JsonElement value)
+        {
+            value = default;
+            if (!columnValue.TryGetProperty("value", out var rawElement) ||
+                rawElement.ValueKind != JsonValueKind.String ||
+                string.IsNullOrWhiteSpace(rawElement.GetString()))
+            {
+                return false;
+            }
+
+            try
+            {
+                using var valueDocument = JsonDocument.Parse(rawElement.GetString()!);
+                value = valueDocument.RootElement.Clone();
+                return value.ValueKind == JsonValueKind.Object;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        private static bool HasNonEmptyRawValue(JsonElement columnValue)
+            => columnValue.TryGetProperty("value", out var rawElement) &&
+               rawElement.ValueKind == JsonValueKind.String &&
+               !string.IsNullOrWhiteSpace(rawElement.GetString());
+
+        private static MondayApiException UnexpectedHearingDetailsRead(
+            long boardId,
+            long itemId,
+            string reason)
+            => new(
+                $"Monday.com unexpected hearing details response: {reason}.",
+                operation: "item_hearing_details",
+                boardId: boardId,
+                itemId: itemId,
+                errorCode: "INVALID_HEARING_DETAILS_RESPONSE");
+
         private static long ParseRequiredId(
             JsonElement parent,
             string propertyName,
