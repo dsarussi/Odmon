@@ -52,7 +52,6 @@ namespace Odmon.Worker.Workers
             LogStartupDiagnostics();
 
             var intervalSeconds = _config.GetValue<int>("Sync:IntervalSeconds", 1200);
-            var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
 
             // Heartbeat timer: every 5 minutes
             var heartbeatInterval = TimeSpan.FromMinutes(5);
@@ -79,7 +78,7 @@ namespace Odmon.Worker.Workers
 
                     try
                     {
-                        await timer.WaitForNextTickAsync(stoppingToken);
+                        await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), stoppingToken);
                     }
                     catch (OperationCanceledException)
                     {
